@@ -121,7 +121,6 @@ class Config:
         if not CONFIG_FILE.exists():
             return cls()
         raw = json.loads(CONFIG_FILE.read_text())
-        raw.get("version")  # accepted but only v2 is written
         return cls(
             bin_dir=raw.get("bin_dir", str(DEFAULT_BIN_DIR)),
             model_dirs=raw.get("model_dirs", list(DEFAULT_MODEL_DIRS)),

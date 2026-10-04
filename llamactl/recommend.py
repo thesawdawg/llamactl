@@ -86,7 +86,8 @@ def estimate_budget(info: ModelInfo, prof: Profile, host: Host) -> Budget:
         host: Host snapshot (unused, kept for the impact callback signature).
     """
     ctx = prof.ctx_size or info.ctx_train
-    kv = kv_per_token(info, prof.cache_type_k, prof.cache_type_v) * ctx * max(prof.parallel, 1)
+    # -c is the total KV pool: parallel slots each get ctx // np, not ctx each
+    kv = kv_per_token(info, prof.cache_type_k, prof.cache_type_v) * ctx
     compute = max(COMPUTE_MIN, info.n_embd * (prof.ubatch_size or 512) * 4 * 8)
     return Budget(weights=info.size, kv=kv, compute=compute, overhead=OVERHEAD)
 

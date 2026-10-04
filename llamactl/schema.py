@@ -102,6 +102,25 @@ def _budget_impact(prof: Profile, info: ModelInfo | None, host: Host) -> str:
             f"{_gb(host.ram_free)} RAM free")
 
 
+def _slots_impact(prof: Profile, info: ModelInfo | None, host: Host) -> str:
+    """One-line impact of the parallel slot count on per-request context.
+
+    Args:
+        prof: Profile being edited.
+        info: Parsed model metadata, or None when editing the default profile.
+        host: Host snapshot (unused; -c is a pool, not multiplied by slots).
+
+    Returns:
+        A single line of text shown under the field.
+    """
+    if info is None:
+        return "The context pool is split evenly between slots."
+    ctx = prof.ctx_size or info.ctx_train
+    if not prof.parallel:
+        return f"auto slots share the {ctx} ctx pool"
+    return f"{prof.parallel} slots -> each request gets {ctx // prof.parallel} of {ctx} ctx"
+
+
 def validate(setting: Setting, raw: str) -> Any:
     """Parse and validate a raw text value for a setting.
 
@@ -323,10 +342,10 @@ SETTINGS: tuple[Setting, ...] = (
         key="parallel", flag="-np", kind=Kind.INT, label="Slots", group=Group.SERVER,
         hint="Requests served at once. Context is split between slots. 0 = auto.",
         help=("Number of server slots: how many requests are decoded in parallel.\n"
-              "The context is divided between slots, so more slots means less context\n"
-              "each, and KV memory multiplies. 0 lets llama.cpp choose.\n\n"
+              "The context is divided between slots, so more slots means less\n"
+              "context each. 0 lets llama.cpp choose.\n\n"
               "Flag: -np, --parallel N"),
-        default=0, unset=0, minimum=0, modes=frozenset({"server"}), impact=_budget_impact),
+        default=0, unset=0, minimum=0, modes=frozenset({"server"}), impact=_slots_impact),
     Setting(
         key="cont_batching", flag="-cb", kind=Kind.BOOL, label="Continuous batching", group=Group.SERVER,
         hint="Let slots pick up new requests while others are still decoding. On is right.",

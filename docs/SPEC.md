@@ -174,7 +174,7 @@ so restarts are instant. Reads run in a Textual worker; the UI shows metadata as
 @dataclass(frozen=True)
 class Budget:
     weights: int        # ModelInfo.size
-    kv: int             # kv_per_token(info, ctk, ctv) * ctx * max(parallel, 1 if parallel == 0 else parallel)
+    kv: int             # kv_per_token(info, ctk, ctv) * ctx  (ctx is the total pool; slots share it, each gets ctx // np)
     compute: int        # see below
     overhead: int       # 512 MiB fixed
     def total(self) -> int
