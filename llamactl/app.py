@@ -70,7 +70,7 @@ class LlamaCtl(App):
     def on_mount(self) -> None:
         self.query_one("#nav", ListView).index = 0
         self.poll_host()
-        self.set_interval(3.0, self.poll_host)
+        self.set_interval(self.cfg.gauge_interval, self.poll_host)
         self.views["models"].on_activate()
 
     @property

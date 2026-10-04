@@ -14,15 +14,14 @@ from textual.widgets import Button, DataTable, Label, Static
 from .. import hf
 from ..command import build_command, command_string
 from ..config import Profile, discover_models
-from ..fmt import human, params_str
+from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import GGUFError, ModelInfo, read_model_info
 from ..hostinfo import Host
 from ..recommend import estimate_budget, verdict
 from ..screens.profile import ProfileEditor
+from ..screens.recommend import RecommendationScreen
 from ..widgets.budget import BudgetPanel
 from .base import BaseView
-
-FITS_STYLE = {"GPU": "green", "GPU+CPU": "yellow", "CPU": "yellow", "NO": "red"}
 
 
 class ModelsView(BaseView):
@@ -206,39 +205,63 @@ class ModelsView(BaseView):
         self.app.sessions.launch(model)
         self.app.switch_view("sessions")
 
-    def _edit(self, model: str | None, auto_recommend: bool) -> None:
-        """Open the profile editor, parsing the header first when needed.
+    def open_editor(self, model: str, auto_recommend: bool) -> None:
+        """Open the profile editor for a model and persist the result.
 
         Args:
-            model: Model path, or None for the default profile.
+            model: Model path (must be in self.infos).
             auto_recommend: Apply the recommendation once the editor opens.
         """
+        info = self.infos.get(model)
+        if info is None:
+            return self.say("Still reading the model header - try again.")
+
         def done(new: Profile | None) -> None:
             if new is not None:
-                if model:
-                    self.app.cfg.profiles[model] = new
-                else:
-                    self.app.cfg.default_profile = new
+                self.app.cfg.profiles[model] = new
                 self.app.cfg.save()
-            if model:
-                self.app.cfg.seen.mark_seen(model)
-            key = str(model) if model else ""
-            if key and key in self.model_table.rows:
-                self._add_row(Path(key), self.infos.get(key))
+            self.app.cfg.seen.mark_seen(model)
+            if model in self.model_table.rows:
+                self._add_row(Path(model), self.infos.get(model))
             self.update_detail()
 
+        self.app.push_screen(
+            ProfileEditor(self.app.cfg, self.app.cfg.profile_for(model), self.app.host,
+                          info, Path(model).name, auto_recommend=auto_recommend), done)
+
+    def open_recommendation(self, model: str) -> None:
+        """Push the RecommendationScreen for a model; "editor" opens the editor.
+
+        Args:
+            model: Model path (must be in self.infos).
+        """
+        info = self.infos.get(model)
+        if info is None:
+            return self.say("Still reading the model header - try again.")
+
+        def done(result: str | None) -> None:
+            if result == "editor":
+                return self.open_editor(model, auto_recommend=True)
+            if model in self.model_table.rows:
+                self._add_row(Path(model), self.infos.get(model))
+            self.update_detail()
+
+        self.app.push_screen(
+            RecommendationScreen(self.app.cfg, model, info, self.app.host), done)
+
+    def _edit(self, model: str | None) -> None:
+        """Open the profile editor (or the default profile when model is None)."""
         if model is None:
+            def done(new: Profile | None) -> None:
+                if new is not None:
+                    self.app.cfg.default_profile = new
+                    self.app.cfg.save()
+
             self.app.push_screen(
                 ProfileEditor(self.app.cfg, self.app.cfg.default_profile, self.app.host,
                               None, "Default profile"), done)
             return
-        info = self.infos.get(model)
-        if info is None:
-            return self.say("Still reading the model header - try again.")
-        prof = self.app.cfg.profile_for(model)
-        self.app.push_screen(
-            ProfileEditor(self.app.cfg, prof, self.app.host, info, Path(model).name,
-                          auto_recommend=auto_recommend), done)
+        self.open_editor(model, auto_recommend=False)
 
     def action_launch_server(self) -> None:
         if m := self.selected_model():
@@ -250,14 +273,14 @@ class ModelsView(BaseView):
 
     def action_edit_profile(self) -> None:
         if m := self.selected_model():
-            self._edit(m, auto_recommend=False)
+            self._edit(m)
 
     def action_edit_default(self) -> None:
-        self._edit(None, auto_recommend=False)
+        self._edit(None)
 
     def action_recommend(self) -> None:
         if m := self.selected_model():
-            self._edit(m, auto_recommend=True)
+            self.open_recommendation(m)
 
     def action_delete_profile(self) -> None:
         m = self.selected_model()

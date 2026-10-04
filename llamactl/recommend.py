@@ -160,7 +160,8 @@ def _pick_ctx(info: ModelInfo, prof: Profile, host: Host, avail: int,
     return best
 
 
-def recommend(info: ModelInfo, host: Host, base: Profile) -> Recommendation:
+def recommend(info: ModelInfo, host: Host, base: Profile,
+              headroom_pct: float = 10) -> Recommendation:
     """Recommend a profile for a model on a host.
 
     Picks threads, flash_attn, the largest ctx tier that fits, cache types and
@@ -170,6 +171,7 @@ def recommend(info: ModelInfo, host: Host, base: Profile) -> Recommendation:
         info: Model metadata.
         host: Host resource snapshot.
         base: Profile to start from (usually the default profile).
+        headroom_pct: Fraction of total VRAM kept free (min 512 MiB).
 
     Returns:
         Recommendation with changed keys explained in `reasons`.
@@ -187,7 +189,7 @@ def recommend(info: ModelInfo, host: Host, base: Profile) -> Recommendation:
     set_("threads", cores, f"host has {cores} physical cores")
     set_("flash_attn", "on" if host.gpus else "auto", "GPU present" if host.gpus else "no GPU")
 
-    headroom = max(int(0.10 * host.vram_total), 512 * MiB)
+    headroom = max(int(headroom_pct / 100 * host.vram_total), 512 * MiB)
     vram_avail = host.vram_total - headroom
     verdict = "NO"
 

@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, RichLog, Static
 
-from ..forms import FormScreen
+from ..screens.prompt import PromptScreen
 from ..screens.chat import ChatScreen
 from ..screens.confirm import ConfirmScreen
 from ..screens.log import LogScreen
@@ -162,7 +162,7 @@ class SessionsView(BaseView):
         want = {s.id: s for s in self.app.store.sessions}
         for key in [k for k in t.rows if str(k.value) not in want]:
             t.remove_row(key)
-        for i, s in enumerate(want.values()):
+        for s in want.values():
             if s.id in t.rows:
                 for col, v in zip([k for _, k in COLUMNS], self._cells(s)):
                     t.update_cell(s.id, col, v)
@@ -259,16 +259,16 @@ class SessionsView(BaseView):
         self.say(f"Stopped/forgot {s.name}")
 
     def action_attach(self) -> None:
-        def done(res: dict | None) -> None:
-            if res and res["url"]:
-                s = self.app.store.attach(res["url"])
+        def done(res: str | None) -> None:
+            if res:
+                s = self.app.store.attach(res)
                 self.sync_table()
                 self.say(f"Attached to {s.url}")
 
-        self.app.push_screen(FormScreen("Attach to running server",
-                                        [("url", "URL or host:port", "localhost:8080",
-                                          "Address of a llama-server that is already running. It is only tracked, never stopped by this tool.")]),
-                             done)
+        self.app.push_screen(PromptScreen(
+            "Attach to running server",
+            "Address of a llama-server that is already running (URL or host:port). "
+            "It is only tracked, never stopped by this tool.", "localhost:8080"), done)
 
     def action_open_log(self) -> None:
         s = self.selected_session()

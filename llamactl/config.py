@@ -143,6 +143,8 @@ class Config:
     model_dirs: list[str] = field(default_factory=lambda: list(DEFAULT_MODEL_DIRS))
     default_profile: Profile = field(default_factory=Profile)
     profiles: dict[str, Profile] = field(default_factory=dict)
+    gauge_interval: float = 3.0
+    headroom_pct: int = 10
 
     def __post_init__(self) -> None:
         self.seen = SeenStore()
@@ -158,6 +160,8 @@ class Config:
             model_dirs=raw.get("model_dirs", list(DEFAULT_MODEL_DIRS)),
             default_profile=Profile.from_dict(raw.get("default_profile", {})),
             profiles={k: Profile.from_dict(v) for k, v in raw.get("profiles", {}).items()},
+            gauge_interval=float(raw.get("gauge_interval", 3.0)),
+            headroom_pct=int(raw.get("headroom_pct", 10)),
         )
 
     def save(self) -> None:

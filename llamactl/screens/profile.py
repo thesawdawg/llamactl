@@ -165,7 +165,8 @@ class ProfileEditor(Screen[Profile | None]):
     def action_apply_recommended(self) -> None:
         if self.info is None:
             return self._say("No model - recommendations need parsed model metadata.")
-        rec = recommend.recommend(self.info, self.host, self._draft)
+        rec = recommend.recommend(self.info, self.host, self._draft,
+                                  headroom_pct=self.cfg.headroom_pct)
         for key, reason in rec.reasons.items():
             f = self.fields[key]
             f.set_value(getattr(rec.profile, key))
