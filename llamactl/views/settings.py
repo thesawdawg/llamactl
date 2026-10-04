@@ -18,6 +18,9 @@ class SettingsView(BaseView):
         yield Label("llama.cpp bin dir and model directories.")
         yield Button("Open settings (Enter)", id="set_open", variant="primary")
 
+    def focus_primary(self) -> None:
+        self.query_one("#set_open", Button).focus()
+
     def action_open(self) -> None:
         cfg = self.app.cfg
         fields = [

@@ -105,6 +105,12 @@ class LlamaCtl(App):
             self.query_one("#main", ContentSwitcher).current = name
             self.views[name].on_activate()
 
+    @on(ListView.Selected, "#nav")
+    def _nav_selected(self, event: ListView.Selected) -> None:
+        # Enter on a nav item: also move focus into the view
+        if event.item:
+            self.switch_view(event.item.id.removeprefix("nav-"))
+
     @work(thread=True, exclusive=True, group="host")
     def poll_host(self) -> None:
         """Detect host resources off the UI thread and push to gauges + active view."""

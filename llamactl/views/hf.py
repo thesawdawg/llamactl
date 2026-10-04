@@ -18,6 +18,9 @@ class HFView(BaseView):
         yield Label("Search and download GGUF models from Hugging Face.")
         yield Button("Open Hugging Face (Enter)", id="hf_open", variant="primary")
 
+    def focus_primary(self) -> None:
+        self.query_one("#hf_open", Button).focus()
+
     def action_open(self) -> None:
         self.app.push_screen(HFScreen(self.app.cfg, self.app.host),
                              lambda _: self.app.views["models"].rescan())

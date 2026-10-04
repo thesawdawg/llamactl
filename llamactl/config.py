@@ -125,6 +125,11 @@ class Profile:
         """
         return getattr(self, key) != schema.by_key[key].unset
 
+    def non_default(self) -> dict:
+        """Fields differing from the schema default, for display summaries."""
+        return {k: getattr(self, k) for k in schema.by_key
+                if getattr(self, k) != schema.by_key[k].default}
+
     def merged(self, **overrides: Any) -> "Profile":
         """Copy with the given fields replaced."""
         return replace(self, **overrides)

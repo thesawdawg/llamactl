@@ -28,6 +28,10 @@ class BaseView(Widget):
 
     def on_activate(self) -> None:
         """Called by the shell when this view becomes visible."""
+        self.focus_primary()
+
+    def focus_primary(self) -> None:
+        """Move focus to the view's primary widget (table, first button)."""
 
     def on_host(self, host: Host) -> None:
         """Called by the host poller with each fresh snapshot.

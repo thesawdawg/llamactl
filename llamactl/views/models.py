@@ -60,9 +60,9 @@ class ModelsView(BaseView):
                 yield BudgetPanel()
                 yield Static("", id="prof_summary")
                 with Horizontal(id="m_buttons"):
-                    yield Button("Launch server", id="m_launch", variant="primary")
+                    yield Button("Launch", id="m_launch", variant="primary")
                     yield Button("CLI chat", id="m_cli")
-                    yield Button("Edit profile", id="m_edit")
+                    yield Button("Edit", id="m_edit")
                     yield Button("Recommend", id="m_rec")
                     yield Button("Delete profile", id="m_del")
 
@@ -87,6 +87,10 @@ class ModelsView(BaseView):
 
     def on_activate(self) -> None:
         self.update_detail()
+        super().on_activate()
+
+    def focus_primary(self) -> None:
+        self.model_table.focus()
 
     def on_host(self, host: Host) -> None:
         """Recompute the Fits cells and the detail pane for a fresh host snapshot."""
@@ -176,7 +180,7 @@ class ModelsView(BaseView):
         prof = self.app.cfg.profile_for(model)
         self.query_one(BudgetPanel).update_budget(
             estimate_budget(info, prof, self.app.host), self.app.host)
-        changed = {k: v for k, v in prof.to_dict().items() if prof.is_set(k)}
+        changed = prof.non_default()
         cmd = command_string(build_command(self.app.cfg, model, prof, "server",
                                            prof.port or 0))
         if not prof.port:

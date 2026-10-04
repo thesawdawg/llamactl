@@ -47,6 +47,9 @@ class SessionsView(BaseView):
         self.set_interval(1.0, self.update_detail)
         self.render_sessions()
 
+    def focus_primary(self) -> None:
+        self.sess_table.focus()
+
     @property
     def sess_table(self) -> DataTable:
         return self.query_one("#sess_table", DataTable)
