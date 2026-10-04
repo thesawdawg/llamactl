@@ -6,15 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from textual.app import App
-from textual.widgets import Button, ContentSwitcher, Label
+from textual.widgets import Button, ContentSwitcher, DataTable, Input, Label
 
-from llamactl import recommend
+from llamactl import hf, recommend
 from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
 from llamactl.gguf import ModelInfo
 from llamactl.hostinfo import Gpu, Host
 from llamactl.screens.confirm import ConfirmScreen
 from llamactl.screens.profile import ProfileEditor
+from llamactl.screens.prompt import PromptScreen
+from llamactl.screens.recommend import RecommendationScreen
 
 
 def _info() -> ModelInfo:
@@ -184,3 +186,98 @@ async def test_confirm_screen() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert result == [True, False, False]
+
+
+async def test_recommendation_screen(isolated: SimpleNamespace) -> None:
+    app = LlamaCtl()
+    async with app.run_test(size=(140, 45)) as pilot:
+        result = []
+        scr = RecommendationScreen(app.cfg, "/m.gguf", _info(), app.host)
+        app.push_screen(scr, result.append)
+        await pilot.pause(0.2)
+        assert scr.query_one("#rec_table", DataTable).row_count == len(scr.rec.reasons)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert result == ["accepted"]
+        assert "/m.gguf" in app.cfg.profiles
+        assert app.cfg.profiles["/m.gguf"].ctx_size == scr.rec.profile.ctx_size
+
+    app2 = LlamaCtl()
+    async with app2.run_test(size=(140, 45)) as pilot:
+        result2 = []
+        app2.push_screen(RecommendationScreen(app2.cfg, "/n.gguf", _info(), app2.host),
+                         result2.append)
+        await pilot.pause(0.2)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert result2 == ["skipped"]
+        assert "/n.gguf" in app2.cfg.seen
+
+
+async def test_prompt_screen() -> None:
+    app = App()
+    async with app.run_test() as pilot:
+        result = []
+        app.push_screen(PromptScreen("URL", default="x:1"), result.append)
+        await pilot.pause()
+        app.screen.query_one("#value", Input).value = "host:8080"
+        await pilot.press("enter")
+        await pilot.pause()
+        app.push_screen(PromptScreen("URL"), result.append)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert result == ["host:8080", None]
+
+
+async def test_settings_view(isolated: SimpleNamespace, tmp_path: Path,
+                             monkeypatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "llama-server").touch()
+    new_dir = tmp_path / "extra"
+    new_dir.mkdir()
+    monkeypatch.setattr(hf, "TOKEN_FILE", isolated.cfg_dir / "hf_token")
+    app = LlamaCtl()
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("4")
+        await pilot.pause(0.2)
+        sv = app.views["settings"]
+        bin_in = sv.query_one("#bin_dir", Input)
+        bin_in.value = "/no/such/dir"
+        await pilot.pause(0.2)
+        assert not bin_in.is_valid
+        bin_in.value = str(bin_dir)
+        add = sv.query_one("#add_dir", Input)
+        add.value = str(new_dir)
+        add.focus()
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        sv.action_save()
+        await pilot.pause()
+        loaded = Config.load()
+        assert loaded.bin_dir == str(bin_dir)
+        assert str(new_dir) in loaded.model_dirs
+
+
+async def test_hf_view_tables(isolated: SimpleNamespace, monkeypatch) -> None:
+    monkeypatch.setattr(hf, "TOKEN_FILE", isolated.cfg_dir / "hf_token")
+    monkeypatch.setattr(hf, "search", lambda q, t, limit=30: [
+        {"id": "org/repo", "gated": False, "downloads": 5, "likes": 1,
+         "lastModified": "2025-01-01", "gguf": {"total": int(8e9),
+         "architecture": "qwen3", "context_length": 32768}}])
+    monkeypatch.setattr(hf, "list_gguf", lambda r, t: [
+        {"path": "m-Q8_0.gguf", "quant": "Q8_0", "size": int(8e9), "parts": 1}])
+    app = LlamaCtl()
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("3")
+        await pilot.pause(0.2)
+        hv = app.views["hf"]
+        hv.query_one("#hf_q", Input).value = "qwen"
+        hv.query_one("#hf_q", Input).post_message(Input.Submitted(hv.query_one("#hf_q", Input), "qwen"))
+        assert await _wait(pilot, lambda: hv.query_one("#repos", DataTable).row_count == 1)
+        hv.repo = "org/repo"
+        hv.load_files("org/repo")
+        assert await _wait(pilot, lambda: hv.query_one("#files", DataTable).row_count == 1)
+        fits = hv.query_one("#files", DataTable).get_cell_at((0, 4))
+        assert "GPU" in str(fits)
