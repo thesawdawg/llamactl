@@ -13,17 +13,8 @@ from textual.widgets import DataTable, Footer, Header, Input, Label, ProgressBar
 
 from . import hf, hostinfo
 from .config import Config
+from .fmt import human, params_str
 from .forms import FormScreen
-
-
-def human(n: float) -> str:
-    """Bytes as decimal GB (as shown on Hugging Face)."""
-    return f"{n / 1e9:.2f} GB"
-
-
-def params_str(n: int | None) -> str:
-    """Parameter count like '8.2B'."""
-    return "" if not n else f"{n / 1e9:.1f}B" if n >= 1e9 else f"{n / 1e6:.0f}M"
 
 
 class HFScreen(Screen):
@@ -43,14 +34,14 @@ class HFScreen(Screen):
     #hf_bar { margin: 0 1; display: none; }
     """
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, host: hostinfo.Host) -> None:
         super().__init__()
         self.cfg = cfg
         self.token = hf.load_token()
         self.repos: list[dict] = []
         self.files: list[dict] = []
         self.repo = ""
-        self.host = hostinfo.detect()
+        self.host = host
         self.cancel_ev = threading.Event()
         self.downloading = False
 
