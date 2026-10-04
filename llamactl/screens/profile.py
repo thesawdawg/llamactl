@@ -40,9 +40,11 @@ class ProfileEditor(Screen[Profile | None]):
     BINDINGS = [
         Binding("ctrl+s", "save", "Save"),
         Binding("escape", "cancel", "Cancel"),
-        Binding("R", "apply_recommended", "Apply recommended"),
+        Binding("f2", "apply_recommended", "Recommend"),
+        Binding("f1", "help", "Help"),
+        Binding("R", "apply_recommended", "Apply recommended", show=False),
         Binding("ctrl+r", "reset_field", "Reset field"),
-        Binding("question_mark", "help", "Help"),
+        Binding("question_mark", "help", "Help", show=False),
     ]
     CSS = """
     #editor { height: 1fr; }
@@ -55,12 +57,13 @@ class ProfileEditor(Screen[Profile | None]):
     """
 
     def __init__(self, cfg: Config, prof: Profile, host: Host,
-                 info: ModelInfo | None, title: str) -> None:
+                 info: ModelInfo | None, title: str, auto_recommend: bool = False) -> None:
         super().__init__()
         self.cfg = cfg
         self.host = host
         self.info = info
         self.title_text = title
+        self._auto_recommend = auto_recommend
         self._draft = prof
         self.fields: dict[str, SettingField] = {}
 
@@ -98,6 +101,8 @@ class ProfileEditor(Screen[Profile | None]):
     def on_mount(self) -> None:
         self.sub_title = self.title_text
         self._recompute()
+        if self._auto_recommend:
+            self.action_apply_recommended()
 
     def _rebuild_draft(self) -> None:
         """Rebuild the draft profile; invalid fields keep the previous value."""
@@ -167,7 +172,7 @@ class ProfileEditor(Screen[Profile | None]):
             f.show_reason(reason)
         self._draft = rec.profile
         self._recompute()
-        self._say(f"Recommended: {rec.verdict}. Review, then Ctrl+S to save.")
+        self._say(f"Recommended: {rec.verdict}. Review, then F1 for help or Ctrl+S to save.")
 
     def action_reset_field(self) -> None:
         f = self._focused_field()

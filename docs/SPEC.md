@@ -255,7 +255,9 @@ a 35B MoE (48 layers, 4 kv heads, 128, 262144, 20 GB, 128 experts), and a 1B (16
 - `ResourceGauges` refresh from a `@work(thread=True, exclusive=True)` host poller every 3 s. `hostinfo.detect()`
   never runs on the UI thread. Gauges turn yellow above 80%, red above 95%.
 - Status bar is written only by user actions; health/progress updates go to the Sessions view and `notify()`.
-- All screens: Esc returns, `?` opens context help when a setting field is focused.
+- All screens: Esc returns, `F1` (also `?` outside text inputs) opens context help when a setting field is focused.
+  Printable keys are swallowed by focused `Input`s, so every editor action also has an F-key or ctrl binding:
+  `F1` help, `F2` apply recommended, `ctrl+r` reset field, `ctrl+s` save.
 
 ### 8.2 Models view
 
