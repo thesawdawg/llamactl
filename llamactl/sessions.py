@@ -49,17 +49,30 @@ class Session:
 
 
 def port_free(port: int, host: str = "127.0.0.1") -> bool:
-    """True if nothing is listening on the port."""
+    """True if the port can be bound (nothing holds it).
+
+    A connect test hangs on firewalled/mirrored ports; a bind test cannot.
+    """
     with socket.socket() as s:
-        return s.connect_ex((host, port)) != 0
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
 
 
-def next_free_port(taken: set[int]) -> int:
-    """First free port from BASE_PORT that is not in `taken`."""
+def next_free_port(taken: set[int], host: str = "127.0.0.1") -> int:
+    """First free port from BASE_PORT that is not in `taken`.
+
+    Raises:
+        RuntimeError: after 200 candidates (avoids scanning forever).
+    """
     port = BASE_PORT
-    while port in taken or not port_free(port):
+    for _ in range(200):
+        if port not in taken and port_free(port, host):
+            return port
         port += 1
-    return port
+    raise RuntimeError("no free port")
 
 
 def probe(url: str, timeout: float = 1.0) -> dict | None:
@@ -95,7 +108,7 @@ class SessionStore:
     def launch_server(self, cfg: Config, model: str) -> Session:
         """Start a detached llama-server; it survives TUI exit."""
         prof = cfg.profile_for(model)
-        port = prof.port or next_free_port(self._ports())
+        port = prof.port or next_free_port(self._ports(), prof.host)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         sid = f"{Path(model).stem}-{port}"
         log = LOG_DIR / f"{sid}.log"
