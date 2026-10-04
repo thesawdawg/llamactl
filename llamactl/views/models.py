@@ -43,8 +43,8 @@ class ModelsView(BaseView):
     #model_table { width: 3fr; }
     #detail { width: 2fr; padding: 0 1; }
     #detail Static { margin-bottom: 1; }
-    #m_buttons { height: auto; }
-    #m_buttons Button { margin-right: 1; }
+    #m_buttons, #m_buttons2 { height: auto; }
+    #m_buttons Button, #m_buttons2 Button { margin-right: 1; }
     """
 
     def __init__(self) -> None:
@@ -63,6 +63,7 @@ class ModelsView(BaseView):
                     yield Button("Launch", id="m_launch", variant="primary")
                     yield Button("CLI chat", id="m_cli")
                     yield Button("Edit", id="m_edit")
+                with Horizontal(id="m_buttons2"):
                     yield Button("Recommend", id="m_rec")
                     yield Button("Delete profile", id="m_del")
 
