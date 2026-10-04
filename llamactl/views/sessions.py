@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import httpx
 from rich.text import Text
@@ -11,7 +13,7 @@ from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, RichLog, Static
+from textual.widgets import Button, DataTable, ProgressBar, RichLog, Static
 
 from ..screens.prompt import PromptScreen
 from ..screens.chat import ChatScreen
@@ -23,6 +25,21 @@ from .base import BaseView
 SPINNER = "|/-\\"
 STATE_STYLE = {"starting": "dim", "loading": "yellow", "ready": "green",
                "down": "grey50", "crashed": "red"}
+PROGRESS_RES = (re.compile(r"(\d+)\s*/\s*(\d+)\s*(?:tensors|layers)"),
+                re.compile(r"loading model.*?(\d+)\s*%"))
+
+
+def _load_frac(lines: list[str]) -> float | None:
+    """Parse a load progress fraction from log lines, or None."""
+    for line in reversed(lines):
+        if m := PROGRESS_RES[0].search(line):
+            total = int(m.group(2))
+            return int(m.group(1)) / total if total else None
+        if m := PROGRESS_RES[1].search(line):
+            return int(m.group(1)) / 100
+    return None
+
+
 COLUMNS = (("Name", "name"), ("State", "state"), ("URL", "url"), ("Port", "port"),
            ("Slots", "slots"), ("Uptime", "uptime"), ("Kind", "kind"))
 
@@ -72,6 +89,9 @@ class SessionsView(BaseView):
     ]
     CSS = """
     #sess_table { height: 55%; }
+    #load_box { height: auto; display: none; }
+    #loading_banner { width: 1fr; color: $warning; }
+    #load_progress { width: 30; display: none; }
     #detail { height: 1fr; border: round $primary; }
     #empty_detail { height: 1fr; border: round $primary; padding: 1 2; display: none; }
     #s_buttons { height: auto; }
@@ -84,11 +104,15 @@ class SessionsView(BaseView):
         self.slots: dict[str, tuple[int, int] | None] = {}
         self.props: dict[str, dict] = {}
         self.pending: dict[str, float] = {}
+        self._crash_flash: list[str] = []
         self.detail_text = ""
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield DataTable(id="sess_table", cursor_type="row")
+            with Horizontal(id="load_box"):
+                yield Static(id="loading_banner")
+                yield ProgressBar(id="load_progress", total=100, show_eta=False)
             yield RichLog(id="detail", wrap=True, max_lines=2000)
             yield Static("No sessions. Go to Models (1) and press Enter to launch, "
                          "or press a to attach a running server.", id="empty_detail")
@@ -122,31 +146,47 @@ class SessionsView(BaseView):
         key = rows[min(self.sess_table.cursor_row, len(rows) - 1)]
         return next((s for s in self.app.store.sessions if s.id == str(key.value)), None)
 
-    def launch(self, model: str) -> Session:
-        """Start a managed server for a model and track it as pending.
+    def launch(self, model: str) -> None:
+        """Kick off a managed server launch without blocking the UI thread.
 
         Args:
             model: Path to the GGUF file.
-
-        Returns:
-            The new session.
         """
-        s = self.app.store.launch_server(self.app.cfg, model)
+        self.say(f"Launching {Path(model).stem}...")
+        self.app.switch_view("sessions")
+        self._launch_worker(model)
+
+    @work(thread=True, group="launch")
+    def _launch_worker(self, model: str) -> None:
+        """Bind a port and spawn llama-server off the UI thread."""
+        try:
+            s = self.app.store.launch_server(self.app.cfg, model)
+        except (RuntimeError, OSError) as e:
+            self.app.call_from_thread(
+                self.notify, f"Could not launch {Path(model).stem}: {e}",
+                title="Launch failed", severity="error", timeout=15)
+            return
+        self.app.call_from_thread(self._launch_done, s)
+
+    def _launch_done(self, s: Session) -> None:
+        """Register the new session as pending and select its row."""
         self.pending[s.id] = time.time()
         self.state[s.id] = "starting"
         self.sync_table()
-        self.notify(f"Loading {s.name} on port {s.url.rsplit(':', 1)[1]}...", title="Launching")
-        return s
+        for i, key in enumerate(self.sess_table.rows):
+            if str(key.value) == s.id:
+                self.sess_table.move_cursor(row=i)
+                break
+        self.notify(f"Loading {s.name} on port {s.url.rsplit(':', 1)[1]}...",
+                    title="Launching")
 
     def _state_text(self, s: Session) -> Text:
         """Styled state cell for a session."""
         st = self.state.get(s.id, "down")
         label = st
-        if st == "loading" and s.id in self.pending:
+        if st in ("starting", "loading") and s.id in self.pending:
             waited = int(time.time() - self.pending[s.id])
             label = f"{SPINNER[waited % len(SPINNER)]} {st} {waited}s"
-        elif st == "starting":
-            label = "starting"
         return Text(label, style=STATE_STYLE.get(st, ""))
 
     def _cells(self, s: Session) -> tuple:
@@ -195,12 +235,47 @@ class SessionsView(BaseView):
                 self.state[sid] = "crashed"
                 if sid in self.pending:
                     del self.pending[sid]
-                    tail = " | ".join(self.log_tail(s, 3))
-                    self.notify(f"{s.name} exited during load. {tail}"[:400],
+                    tail = self.log_tail(s, 3)
+                    self._crash_flash.append(
+                        f"[red]{s.name} crashed - {tail[-1] if tail else ''}[/red]")
+                    self.notify(f"{s.name} exited during load. {' | '.join(tail)}"[:400],
                                 title="Launch failed", severity="error", timeout=15)
             else:
                 self.state[sid] = "loading" if sid in self.pending else "down"
         self.sync_table()
+        self._update_banner()
+
+    def _update_banner(self) -> None:
+        """Refresh the loading banner: pending sessions plus one-shot crash tails."""
+        box = self.query_one("#load_box")
+        bar = self.query_one("#load_progress", ProgressBar)
+        banner = self.query_one("#loading_banner", Static)
+        if not self.pending and not self._crash_flash:
+            box.display = False
+            bar.display = False
+            return
+        box.display = True
+        lines: list[str] = []
+        frac: float | None = None
+        sessions = {s.id: s for s in self.app.store.sessions}
+        for sid, t0 in self.pending.items():
+            s = sessions.get(sid)
+            if not s:
+                continue
+            waited = int(time.time() - t0)
+            tail = self.log_tail(s, 6)
+            last = (tail[-1].strip() if tail else "")
+            prefix = (f"{SPINNER[waited % len(SPINNER)]} Loading {s.name} "
+                      f"on :{s.url.rsplit(':', 1)[1]} - {waited}s")
+            width = max(20, (self.size.width or 120) - len(prefix) - 6)
+            lines.append(f"{prefix} - {last[:width]}")
+            frac = frac if frac is not None else _load_frac(tail)
+        lines.extend(self._crash_flash)
+        self._crash_flash.clear()
+        banner.update("\n".join(lines))
+        bar.display = frac is not None
+        if frac is not None:
+            bar.update(progress=frac * 100)
 
     @staticmethod
     def log_tail(s: Session, n: int) -> list[str]:
