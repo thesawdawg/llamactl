@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import time
 import subprocess
-from dataclasses import asdict
 from pathlib import Path
 
 import httpx
@@ -20,10 +19,11 @@ from .hf_screen import HFScreen
 from . import hostinfo
 from .command import build_command
 from .config import Config, Profile, discover_models
+from .gguf import GGUFError, ModelInfoCache, read_model_info
+from .screens.profile import ProfileEditor
 from .sessions import Session, SessionStore, probe
 
 SPINNER = "|/-\\"
-FLASH_ATTN = ("on", "off", "auto")
 
 
 class ChatScreen(Screen):
@@ -111,6 +111,7 @@ class LlamaCtl(App):
         self.pending: dict[str, float] = {}
         self.detail_text = ""
         self.host = hostinfo.Host()
+        self.info_cache = ModelInfoCache()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -261,53 +262,44 @@ class LlamaCtl(App):
         with self.suspend():
             subprocess.run(cmd)
 
-    def edit_profile_form(self, title: str, prof: Profile, apply) -> None:
-        """Open the profile form and pass the parsed result to `apply`."""
-        fields = [
-            ("ctx_size", "Context size (-c)", str(prof.ctx_size),
-             "Max tokens the model remembers (prompt + reply). Larger = more VRAM/RAM for the KV cache. 0 = model's trained max."),
-            ("gpu_layers", "GPU layers (-ngl)", str(prof.gpu_layers),
-             "Layers kept in VRAM: 'all', 'auto' or a number. Higher = faster, but needs more VRAM. Lower it if you run out of memory."),
-            ("threads", "CPU threads (-t)", str(prof.threads),
-             "Threads for CPU work. Usually the number of physical cores. 0 = auto."),
-            ("parallel", "Server slots (-np)", str(prof.parallel),
-             "Requests served at once. The context is split between slots, so more slots = less context each. Server only. 0 = auto."),
-            ("flash_attn", "Flash attention (-fa)", prof.flash_attn,
-             "on / off / auto. Faster attention and lower memory on supported GPUs. 'auto' is safe."),
-            ("port", "Port", str(prof.port),
-             "Port the server listens on. 0 = first free port from 8080, so many models can run together."),
-            ("host", "Host", prof.host,
-             "127.0.0.1 = only this machine. 0.0.0.0 = reachable from your network (no auth by default!)."),
-            ("extra_args", "Extra args", prof.extra_args,
-             "Raw llama.cpp flags added at the end, e.g. --jinja --n-cpu-moe 24 --temp 0.7. Run llama-server --help for all."),
-        ]
+    def _open_editor(self, model: str | None, info) -> None:
+        """Push the profile editor; on save persist the profile and refresh."""
+        prof = self.cfg.profile_for(model) if model else self.cfg.default_profile
+        title = Path(model).name if model else "Default profile"
 
-        def done(res: dict | None) -> None:
-            if res is None:
+        def done(new: Profile | None) -> None:
+            if new is None:
                 return
-            try:
-                new = Profile(**{**asdict(prof), **res, **{k: int(res[k]) for k in
-                              ("ctx_size", "threads", "parallel", "port")}})
-            except ValueError:
-                return self.say("Numeric fields must be integers.")
-            if new.flash_attn not in FLASH_ATTN:
-                return self.say(f"flash_attn must be one of {FLASH_ATTN}")
-            apply(new)
+            if model:
+                self.cfg.profiles[model] = new
+            else:
+                self.cfg.default_profile = new
             self.cfg.save()
             self.action_refresh()
 
-        self.push_screen(FormScreen(title, fields), done)
+        self.push_screen(ProfileEditor(self.cfg, prof, self.host, info, title))
 
     def action_edit_profile(self) -> None:
         model = self.selected_model()
         if model is None:
             return self.say("Select a model first.")
-        self.edit_profile_form(Path(model).name, self.cfg.profile_for(model),
-                               lambda p: self.cfg.profiles.__setitem__(model, p))
+        self.say("Reading model header...")
+        self.load_info_worker(model)
+
+    @work(thread=True, group="info")
+    def load_info_worker(self, model: str) -> None:
+        """Parse (or read the cache for) the model's GGUF header off the UI thread."""
+        info = self.info_cache.get(Path(model))
+        if info is None:
+            try:
+                info = read_model_info(Path(model))
+                self.info_cache.put(info)
+            except (GGUFError, OSError) as e:
+                return self.call_from_thread(self.say, f"Could not read GGUF header: {e}")
+        self.call_from_thread(self._open_editor, model, info)
 
     def action_edit_default(self) -> None:
-        self.edit_profile_form("Default profile", self.cfg.default_profile,
-                               lambda p: setattr(self.cfg, "default_profile", p))
+        self._open_editor(None, None)
 
     def action_edit_settings(self) -> None:
         fields = [

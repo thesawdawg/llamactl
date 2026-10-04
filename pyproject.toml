@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = ["textual>=8.0", "httpx>=0.28"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pytest-asyncio"]
 
 [project.scripts]
 llamactl = "llamactl.app:main"
@@ -17,6 +17,7 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llamactl"]
