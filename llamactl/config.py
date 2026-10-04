@@ -15,6 +15,30 @@ DEFAULT_BIN_DIR = Path.home() / "llama.cpp" / "build" / "bin"
 DEFAULT_MODEL_DIRS = [str(Path.home() / "models")]
 MIN_MODEL_BYTES = 50 * 1024 * 1024
 CONFIG_VERSION = 2
+SEEN_FILE = CONFIG_DIR / "seen.json"
+
+
+class SeenStore:
+    """Set of model paths that are no longer "New" (seen.json).
+
+    Args:
+        path: JSON file holding a list of paths.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or SEEN_FILE
+        self.paths: set[str] = (set(json.loads(self.path.read_text()))
+                                if self.path.exists() else set())
+
+    def mark_seen(self, model: str) -> None:
+        """Remember `model` as seen and persist."""
+        if model not in self.paths:
+            self.paths.add(model)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(sorted(self.paths), indent=2))
+
+    def __contains__(self, model: str) -> bool:
+        return model in self.paths
 
 
 def _coerce(key: str, value: Any) -> Any:
@@ -114,6 +138,9 @@ class Config:
     model_dirs: list[str] = field(default_factory=lambda: list(DEFAULT_MODEL_DIRS))
     default_profile: Profile = field(default_factory=Profile)
     profiles: dict[str, Profile] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.seen = SeenStore()
 
     @classmethod
     def load(cls) -> "Config":

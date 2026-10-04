@@ -72,7 +72,7 @@ def placeholder_info(size: int) -> ModelInfo:
     """
     return ModelInfo(path=Path(), size=size, architecture="", name="", n_layer=0, n_embd=0,
                      n_head=0, n_head_kv=0, head_dim_k=0, head_dim_v=0, ctx_train=0,
-                     expert_count=0, file_type=0, sharded=1)
+                     expert_count=0, file_type=0, sharded=1, parameter_count=0)
 
 
 def estimate_budget(info: ModelInfo, prof: Profile, host: Host) -> Budget:

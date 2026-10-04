@@ -41,6 +41,7 @@ class ModelInfo:
         expert_count: Routed experts (0 for dense models).
         file_type: GGUF file type (quantisation) id.
         sharded: split.count or 1.
+        parameter_count: general.parameter_count or 0 when absent.
     """
 
     path: Path
@@ -57,6 +58,7 @@ class ModelInfo:
     expert_count: int
     file_type: int
     sharded: int
+    parameter_count: int
 
 
 def _read_kv(fh) -> dict:
@@ -161,6 +163,7 @@ def read_model_info(path: Path) -> ModelInfo:
         expert_count=int(kv.get(a + "expert_count", 0)),
         file_type=int(kv.get("general.file_type", 0)),
         sharded=int(kv.get("split.count", 1)),
+        parameter_count=int(kv.get("general.parameter_count", 0)),
     )
 
 
@@ -171,9 +174,10 @@ class ModelInfoCache:
         cache_file: JSON file used for persistence.
     """
 
-    def __init__(self, cache_file: Path = CACHE_FILE) -> None:
-        self.cache_file = cache_file
-        self._data: dict = json.loads(cache_file.read_text()) if cache_file.exists() else {}
+    def __init__(self, cache_file: Path | None = None) -> None:
+        self.cache_file = cache_file or CACHE_FILE
+        self._data: dict = (json.loads(self.cache_file.read_text())
+                            if self.cache_file.exists() else {})
 
     def get(self, path: Path) -> ModelInfo | None:
         """Cached info for `path`, or None when missing or stale.
