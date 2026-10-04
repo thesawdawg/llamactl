@@ -12,7 +12,8 @@ from pathlib import Path
 
 import httpx
 
-from .config import CONFIG_DIR, LOG_DIR, Config, build_command
+from .command import build_command
+from .config import CONFIG_DIR, LOG_DIR, Config
 
 STATE_FILE = CONFIG_DIR / "sessions.json"
 BASE_PORT = 8080

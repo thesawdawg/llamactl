@@ -18,7 +18,8 @@ from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Ta
 from .forms import FormScreen
 from .hf_screen import HFScreen
 from . import hostinfo
-from .config import Config, Profile, build_command, discover_models
+from .command import build_command
+from .config import Config, Profile, discover_models
 from .sessions import Session, SessionStore, probe
 
 SPINNER = "|/-\\"
@@ -266,7 +267,7 @@ class LlamaCtl(App):
             ("ctx_size", "Context size (-c)", str(prof.ctx_size),
              "Max tokens the model remembers (prompt + reply). Larger = more VRAM/RAM for the KV cache. 0 = model's trained max."),
             ("gpu_layers", "GPU layers (-ngl)", str(prof.gpu_layers),
-             "Layers kept in VRAM. Higher = faster, but needs more VRAM. 99 = all. Lower it if you run out of memory."),
+             "Layers kept in VRAM: 'all', 'auto' or a number. Higher = faster, but needs more VRAM. Lower it if you run out of memory."),
             ("threads", "CPU threads (-t)", str(prof.threads),
              "Threads for CPU work. Usually the number of physical cores. 0 = auto."),
             ("parallel", "Server slots (-np)", str(prof.parallel),
@@ -286,7 +287,7 @@ class LlamaCtl(App):
                 return
             try:
                 new = Profile(**{**asdict(prof), **res, **{k: int(res[k]) for k in
-                              ("ctx_size", "gpu_layers", "threads", "parallel", "port")}})
+                              ("ctx_size", "threads", "parallel", "port")}})
             except ValueError:
                 return self.say("Numeric fields must be integers.")
             if new.flash_attn not in FLASH_ATTN:
