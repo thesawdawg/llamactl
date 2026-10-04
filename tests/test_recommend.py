@@ -87,3 +87,11 @@ def test_reasons_only_changed(dense8b: ModelInfo, gpu_host: Host) -> None:
     rec = recommend(dense8b, gpu_host, Profile(temp=0.5))
     assert "temp" not in rec.reasons and rec.profile.temp == 0.5
     assert "host" not in rec.reasons and "seed" not in rec.reasons
+
+
+def test_verdict_honours_headroom(gpu_host: Host) -> None:
+    """A budget inside 10% headroom is GPU at 0% but GPU+CPU at 10%."""
+    from llamactl.recommend import Budget, verdict
+    b = Budget(weights=int(15e9), kv=0, compute=0, overhead=0)
+    assert verdict(b, gpu_host, headroom_pct=0) == "GPU"
+    assert verdict(b, gpu_host, headroom_pct=10) == "GPU+CPU"

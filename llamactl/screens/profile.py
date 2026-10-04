@@ -128,7 +128,8 @@ class ProfileEditor(Screen[Profile | None]):
                 f.set_impact(s.impact(self._draft, self.info, self.host))
         info = self.info or placeholder_info(0)
         self.query_one(BudgetPanel).update_budget(
-            estimate_budget(info, self._draft, self.host), self.host)
+            estimate_budget(info, self._draft, self.host), self.host,
+            self.cfg.headroom_pct)
         model = str(self.info.path) if self.info else "<model>"
         argv = build_command(self.cfg, model, self._draft, "server",
                              self._draft.port or 0)

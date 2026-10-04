@@ -104,7 +104,7 @@ class ModelsView(BaseView):
     def _fits(self, model: str, info: ModelInfo) -> Text:
         """Coloured verdict for a model under its current profile."""
         v = verdict(estimate_budget(info, self.app.cfg.profile_for(model), self.app.host),
-                    self.app.host)
+                    self.app.host, self.app.cfg.headroom_pct)
         return Text(v, style=FITS_STYLE.get(v, ""))
 
     def _profile_tag(self, model: str) -> str:

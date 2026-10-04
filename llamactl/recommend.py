@@ -109,12 +109,13 @@ class Recommendation:
     verdict: str
 
 
-def verdict(budget: Budget, host: Host) -> str:
+def verdict(budget: Budget, host: Host, headroom_pct: float = 10) -> str:
     """Verdict label for a budget on a host: "GPU", "GPU+CPU", "CPU" or "NO".
 
     Args:
         budget: Memory budget of the launch.
         host: Host resource snapshot.
+        headroom_pct: Fraction of total VRAM kept free (min 512 MiB).
 
     Returns:
         "GPU" when it fits VRAM with headroom, "GPU+CPU" when it needs
@@ -122,7 +123,7 @@ def verdict(budget: Budget, host: Host) -> str:
     """
     if not host.gpus:
         return "CPU" if budget.total() <= host.ram_free else "NO"
-    headroom = max(int(0.10 * host.vram_total), 512 * MiB)
+    headroom = max(int(headroom_pct / 100 * host.vram_total), 512 * MiB)
     if budget.total() <= host.vram_total - headroom:
         return "GPU"
     if budget.total() <= host.vram_total + host.ram_free:

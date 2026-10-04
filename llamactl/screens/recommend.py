@@ -69,7 +69,8 @@ class RecommendationScreen(Screen[str]):
 
     def on_mount(self) -> None:
         self.sub_title = "Recommendation"
-        self.query_one(BudgetPanel).update_budget(self.rec.budget, self.host)
+        self.query_one(BudgetPanel).update_budget(self.rec.budget, self.host,
+                                                  self.cfg.headroom_pct)
         t = self.query_one("#rec_table", DataTable)
         t.add_columns("Setting", "Current", "Recommended", "Why")
         base = self.cfg.profile_for(self.model)

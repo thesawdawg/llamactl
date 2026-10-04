@@ -65,6 +65,7 @@ class HFView(BaseView):
         for label, key in [("File (Enter = download)", "file"), ("Quant", "quant"),
                            ("Size", "size"), ("Parts", "parts"), ("Fits", "fits")]:
             t.add_column(label, key=key)
+        self.query_one("#hf_bar", ProgressBar).display = False
         self.refresh_status()
 
     def focus_primary(self) -> None:
@@ -81,13 +82,16 @@ class HFView(BaseView):
     def _fits(self, size: int) -> str:
         """Weights-only verdict for a remote file size."""
         b = estimate_budget(placeholder_info(size), Profile(), self.app.host)
-        return verdict(b, self.app.host)
+        return verdict(b, self.app.host, self.app.cfg.headroom_pct)
 
     def refresh_status(self, msg: str = "") -> None:
         tok = "token set" if self.token else "no token (public models only)"
         dest = self.app.cfg.model_dirs[0] if self.app.cfg.model_dirs else "?"
+        host = self.app.host
+        summary = ("detecting host..." if host.ram_total == 0 and not host.gpus
+                   else host.summary())
         self.query_one("#hf_note", Label).update(
-            f"{msg}  [dim]{self.app.host.summary()} | {tok} | saves to {dest} | "
+            f"{msg}  [dim]{summary} | {tok} | saves to {dest} | "
             f"/ search, k token, x cancel[/dim]".lstrip())
 
     def say_status(self, msg: str) -> None:

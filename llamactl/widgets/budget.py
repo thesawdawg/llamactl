@@ -42,12 +42,13 @@ class BudgetPanel(Vertical):
         yield ProgressBar(id="ram_bar", total=100, show_eta=False)
         yield Label("", classes="verdict")
 
-    def update_budget(self, budget: Budget, host: Host) -> None:
+    def update_budget(self, budget: Budget, host: Host, headroom_pct: float = 10) -> None:
         """Redraw all parts for a budget on a host.
 
         Args:
             budget: Memory budget to display.
             host: Host resource snapshot.
+            headroom_pct: Fraction of total VRAM kept free for the verdict.
         """
         total = budget.total() or 1
         parts = [budget.weights, budget.kv, budget.compute, budget.overhead]
@@ -65,4 +66,5 @@ class BudgetPanel(Vertical):
             vram_bar.set_class(total > host.vram_total, "over")
         self.query_one("#ram_bar", ProgressBar).update(
             total=host.ram_total or 1, progress=min(total, host.ram_total or 1))
-        self.query_one(".verdict", Label).update(f"Verdict: {verdict(budget, host)}")
+        self.query_one(".verdict", Label).update(
+            f"Verdict: {verdict(budget, host, headroom_pct)}")
