@@ -6,8 +6,6 @@ import subprocess
 from dataclasses import dataclass, field
 
 GB = 1e9
-OVERHEAD_FIXED = 1.0 * GB
-OVERHEAD_RATIO = 0.05
 
 
 @dataclass
@@ -28,6 +26,7 @@ class Host:
     ram_free: int = 0
     cpu_name: str = ""
     cpu_threads: int = 0
+    cpu_cores: int = 0
 
     @property
     def vram_total(self) -> int:
@@ -57,9 +56,32 @@ def _gpus() -> list[Gpu]:
     return gpus
 
 
+def physical_cores() -> int:
+    """Count unique (physical id, core id) pairs in /proc/cpuinfo.
+
+    Returns:
+        Physical core count; falls back to os.cpu_count() // 2.
+    """
+    pairs = set()
+    phys = core = None
+    try:
+        for line in open("/proc/cpuinfo"):
+            if line.startswith("physical id"):
+                phys = line.split(":", 1)[1].strip()
+            elif line.startswith("core id"):
+                core = line.split(":", 1)[1].strip()
+            elif not line.strip():
+                if core is not None:
+                    pairs.add((phys or "0", core))
+                phys = core = None
+    except OSError:
+        pass
+    return len(pairs) or (os.cpu_count() or 2) // 2
+
+
 def detect() -> Host:
     """Read GPU, RAM and CPU info (Linux). Missing pieces stay zero/empty."""
-    host = Host(gpus=_gpus(), cpu_threads=os.cpu_count() or 0)
+    host = Host(gpus=_gpus(), cpu_threads=os.cpu_count() or 0, cpu_cores=physical_cores())
     try:
         mem = {k: int(v.split()[0]) * 1024 for k, v in (l.split(":", 1) for l in open("/proc/meminfo"))}
         host.ram_total, host.ram_free = mem["MemTotal"], mem["MemAvailable"]
@@ -72,10 +94,13 @@ def detect() -> Host:
 def estimate(host: Host, size: int) -> tuple[str, str]:
     """Return (short verdict, explanation) for a model whose files total `size` bytes.
 
-    Rough: weights + 5% + 1 GB for KV cache/buffers at modest context.
+    Uses a weights-only budget (KV unknown until the header is parsed).
     Long contexts, MoE offload tricks and multi-GPU splits can change the result.
     """
-    need = size * (1 + OVERHEAD_RATIO) + OVERHEAD_FIXED
+    from .config import Profile
+    from .recommend import estimate_budget, placeholder_info
+
+    need = estimate_budget(placeholder_info(size), Profile(), host).total()
     g = lambda b: f"{b / GB:.1f}G"
     if not host.ram_total and not host.vram_total:
         return "?", "Host resources unknown"
