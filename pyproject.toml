@@ -5,12 +5,18 @@ description = "Textual TUI for launching and managing llama.cpp servers"
 requires-python = ">=3.11"
 dependencies = ["textual>=8.0", "httpx>=0.28"]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.scripts]
 llamactl = "llamactl.app:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["llamactl"]
