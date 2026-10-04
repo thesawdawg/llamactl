@@ -13,6 +13,7 @@ from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
 from llamactl.gguf import ModelInfo
 from llamactl.hostinfo import Gpu, Host
+from llamactl.screens.confirm import ConfirmScreen
 from llamactl.screens.profile import ProfileEditor
 
 
@@ -139,3 +140,47 @@ async def test_shell_models_view(isolated: SimpleNamespace, gguf_file: Path) -> 
         assert await _wait(pilot, lambda: isinstance(app.screen, ProfileEditor))
         await pilot.press("escape")
         await pilot.pause()
+
+
+async def test_focus_moves_into_views(isolated: SimpleNamespace, gguf_file: Path) -> None:
+    shutil.copy(gguf_file, isolated.model_dir / gguf_file.name)
+    app = LlamaCtl()
+    async with app.run_test(size=(140, 45)) as pilot:
+        assert await _wait(pilot, lambda: app.views["models"].model_table.row_count == 1)
+        await pilot.press("2")
+        await pilot.pause(0.2)
+        assert app.screen.focused is app.views["sessions"].sess_table
+        await pilot.press("1")
+        await pilot.pause(0.2)
+        assert app.screen.focused is app.views["models"].model_table
+
+
+async def test_sessions_external_down(isolated: SimpleNamespace) -> None:
+    app = LlamaCtl()
+    async with app.run_test(size=(140, 45)) as pilot:
+        app.store.attach("127.0.0.1:59999")  # nothing listens -> probe fails
+        await pilot.press("2")
+        await pilot.pause()
+        sv = app.views["sessions"]
+        assert await _wait(pilot, lambda: sv.sess_table.row_count == 1)
+        assert await _wait(pilot, lambda: sv.state.get(app.store.sessions[0].id) == "down")
+
+
+async def test_confirm_screen() -> None:
+    app = App()
+    async with app.run_test() as pilot:
+        result = []
+        app.push_screen(ConfirmScreen("Stop x (pid 1)?"), result.append)
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert result == [True]
+        app.push_screen(ConfirmScreen("Stop x?"), result.append)
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        app.push_screen(ConfirmScreen("Stop x?"), result.append)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert result == [True, False, False]
