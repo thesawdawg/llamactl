@@ -16,7 +16,7 @@ def _info(size: float, n_layer: int, n_head_kv: int, ctx: int, experts: int = 0)
     return ModelInfo(path=Path("m.gguf"), size=int(size), architecture="x", name="m",
                      n_layer=n_layer, n_embd=4096, n_head=32, n_head_kv=n_head_kv,
                      head_dim_k=128, head_dim_v=128, ctx_train=ctx, expert_count=experts,
-                     file_type=0, sharded=1)
+                     file_type=0, sharded=1, parameter_count=0)
 
 
 @pytest.fixture

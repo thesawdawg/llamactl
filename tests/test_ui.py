@@ -1,24 +1,26 @@
-"""ProfileEditor pilot tests: validation, impact lines, recommendations."""
+"""Pilot tests: profile editor and the app shell with Models view."""
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
-from textual.app import App, ComposeResult
-from textual.widgets import Button, Label
+from textual.app import App
+from textual.widgets import Button, ContentSwitcher, Label
 
 from llamactl import recommend
+from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
 from llamactl.gguf import ModelInfo
 from llamactl.hostinfo import Gpu, Host
 from llamactl.screens.profile import ProfileEditor
-from llamactl.widgets.field import SettingField
 
 
 def _info() -> ModelInfo:
     return ModelInfo(path=Path("m.gguf"), size=int(8.5e9), architecture="x", name="m",
                      n_layer=32, n_embd=4096, n_head=32, n_head_kv=8,
                      head_dim_k=128, head_dim_v=128, ctx_train=131072,
-                     expert_count=0, file_type=0, sharded=1)
+                     expert_count=0, file_type=0, sharded=1, parameter_count=0)
 
 
 def _host() -> Host:
@@ -102,3 +104,38 @@ async def test_default_profile_no_model() -> None:
         await pilot.pause(0.4)
         assert ed._draft == Profile()  # R is a no-op without a model
         assert "No model" in str(ed.query_one("#ed_status", Label).render())
+
+
+async def _wait(pilot, cond, tries: int = 40) -> bool:
+    """Poll `cond` while the app's workers settle."""
+    for _ in range(tries):
+        await pilot.pause(0.1)
+        if cond():
+            return True
+    return False
+
+
+async def test_shell_models_view(isolated: SimpleNamespace, gguf_file: Path) -> None:
+    shutil.copy(gguf_file, isolated.model_dir / gguf_file.name)
+    app = LlamaCtl()
+    async with app.run_test(size=(140, 45)) as pilot:
+        assert await _wait(pilot, lambda: app.views["models"].model_table.row_count == 1)
+        # host poll has landed -> Fits resolved to a verdict
+        assert await _wait(pilot, lambda: app.host.vram_total > 0)
+        row_key = str(isolated.model_dir / gguf_file.name)
+        fits = app.views["models"].model_table.get_cell(row_key, "fits")
+        assert str(getattr(fits, "plain", fits)) != "..."
+        assert app.query_one("#main", ContentSwitcher).current == "models"
+
+        await pilot.press("2")
+        await pilot.pause()
+        assert app.query_one("#main", ContentSwitcher).current == "sessions"
+
+        await pilot.press("1")
+        await pilot.pause()
+        app.views["models"].model_table.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        assert await _wait(pilot, lambda: isinstance(app.screen, ProfileEditor))
+        await pilot.press("escape")
+        await pilot.pause()
