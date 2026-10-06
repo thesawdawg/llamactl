@@ -12,13 +12,30 @@ budgets, recommends launch profiles and manages running servers.
 
 ## Install and run
 
+Install the published package in an isolated environment with [uv](https://docs.astral.sh/uv/):
+
 ```bash
-python -m venv .venv
-.venv/bin/pip install -e .[dev]
-.venv/bin/python -m llamactl
+uv tool install llama-tui
+llamactl
 ```
 
-Tests: `.venv/bin/pytest -q`
+Or use pip in a virtual environment: `python -m pip install llama-tui`.
+llama.cpp binaries and model files are not bundled; configure their paths in Settings.
+The PyPI distribution is named `llama-tui`; the command and Python module remain
+`llamactl`. The published installation commands become available after the first
+PyPI release.
+
+### Develop from source
+
+```bash
+uv sync --extra dev --locked
+uv run --locked python -m llamactl
+uv run --locked pytest -q
+uv build
+```
+
+Version: **0.1.0** (initial development release). See [CHANGELOG.md](CHANGELOG.md)
+and [release instructions](docs/RELEASING.md) for Semantic Versioning and PyPI setup.
 
 ## Keyboard cheat-sheet
 

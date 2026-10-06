@@ -1,9 +1,29 @@
 [project]
-name = "llamactl"
+name = "llama-tui"
 version = "0.1.0"
 description = "Textual TUI for launching and managing llama.cpp servers"
+readme = "README.md"
+keywords = ["llama.cpp", "llm", "gguf", "textual", "tui"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
 requires-python = ">=3.11"
 dependencies = ["textual>=8.0", "httpx>=0.28"]
+
+[project.urls]
+Homepage = "https://github.com/thesawdawg/llamactl"
+Repository = "https://github.com/thesawdawg/llamactl"
+Issues = "https://github.com/thesawdawg/llamactl/issues"
+Changelog = "https://github.com/thesawdawg/llamactl/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
@@ -21,3 +41,15 @@ asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llamactl"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/llamactl",
+    "/tests",
+    "/scripts/check_release.py",
+    "/docs",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+    "/uv.lock",
+]
