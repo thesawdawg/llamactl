@@ -6,6 +6,18 @@ there are no earlier tagged releases. Commit entries retain their original subje
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-06
+
+### Fixed
+
+- Release as 0.1.1 because PyPI rejected the previously used and deleted
+  `llama_tui-0.1.0` wheel filename. Preserve the original 0.1.0 tag.
+
+### Build and release
+
+- Add a local Semantic Version bump and annotated-tag helper; never push automatically.
+
+
 ## [0.1.0] - 2026-10-03
 
 Initial development release. The date records the existing source history, not a
@@ -66,5 +78,6 @@ profile editing, Hugging Face downloads, server sessions, logs and chat integrat
 
 - chore: initial import of llamactl TUI and redesign spec ([`cb1089e`](https://github.com/thesawdawg/llamactl/commit/cb1089e36e23655c937d1de54df2b674b87e1463)).
 
-[Unreleased]: https://github.com/thesawdawg/llamactl/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/thesawdawg/llamactl/compare/v0.1.1...HEAD
 [0.1.0]: https://github.com/thesawdawg/llamactl/releases/tag/v0.1.0
+[0.1.1]: https://github.com/thesawdawg/llamactl/compare/v0.1.0...v0.1.1

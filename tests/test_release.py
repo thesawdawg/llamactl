@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import tomllib
+
 import pytest
 
 from scripts.check_release import check_release
@@ -60,4 +62,7 @@ def test_repository_release() -> None:
     Returns:
         None.
     """
-    assert check_release(Path(__file__).resolve().parents[1], "v0.1.0") == "0.1.0"
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as stream:
+        version = tomllib.load(stream)["project"]["version"]
+    assert check_release(root, f"v{version}") == version

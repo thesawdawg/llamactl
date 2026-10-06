@@ -34,7 +34,7 @@ uv run --locked pytest -q
 uv build
 ```
 
-Version: **0.1.0** (initial development release). See [CHANGELOG.md](CHANGELOG.md)
+Version: **0.1.1** (development release). See [CHANGELOG.md](CHANGELOG.md)
 and [release instructions](docs/RELEASING.md) for Semantic Versioning and PyPI setup.
 
 ## Keyboard cheat-sheet

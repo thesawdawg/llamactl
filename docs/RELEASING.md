@@ -18,10 +18,35 @@ modules are not a stable library API.
 - Documentation and test changes alone do not require a release. Packaging-only
   fixes that need republication receive a new PATCH version; never reuse a PyPI version.
 
-The initial version remains 0.1.0. Its changelog includes all 24 existing commits.
-The 2026-10-03 heading is the source-history date, not an assertion of publication.
-Before tagging, update the release date to the actual release date. The initial
-packaging notes are included in 0.1.0; Unreleased is reserved for future work.
+The current release is 0.1.1. PyPI rejected the 0.1.0 wheel filename because it
+had previously been used and deleted; the original tag remains intact. The 0.1.0
+changelog covers all 24 initial source commits and the packaging implementation.
+
+## Local release helper
+
+Add notes under `## [Unreleased]`, then choose a numeric SemVer increment:
+
+```bash
+python scripts/bump_version.py bump patch   # or minor / major
+```
+
+This updates `pyproject.toml`, promotes Unreleased notes to a dated release heading,
+updates changelog links and runs `uv lock`. It does not commit, tag or push.
+Review and update any version-specific prose in README/docs yourself. If `uv lock`
+fails, the metadata and changelog edits remain for inspection; repair the lockfile
+before continuing rather than rerunning the bump and incrementing twice.
+
+After tests/build validation and committing the release files:
+
+```bash
+python scripts/bump_version.py tag
+```
+
+This checks release metadata, the lockfile and committed release paths, refuses
+existing local tags, and creates an annotated tag on HEAD. Unrelated local changes
+(such as agent configuration) may remain dirty. Remote tag names are not checked;
+never force-replace an existing remote tag. The helper does not run tests/builds
+or commit changes and never pushes. Push the commit and tag yourself.
 
 ## One-time setup (maintainer)
 
@@ -49,7 +74,8 @@ receives validated distributions via a GitHub artifact.
 
 ## Release checklist
 
-1. Update `project.version` in `pyproject.toml` and run `uv lock`.
+1. Add Unreleased notes and run `python scripts/bump_version.py bump patch`
+   (or `minor` / `major` according to the version policy).
 2. Move relevant Unreleased notes into a dated `## [X.Y.Z] - YYYY-MM-DD` section.
    Preserve the previous release notes and update comparison links.
 3. Validate locally:
