@@ -77,8 +77,44 @@ class ReleaseHelper:
         if self.run("git", "tag", "--list", f"v{version}"):
             raise ValueError(f"Tag v{version} already exists; tags are never replaced")
 
+    def release_notes(self, version: str) -> str:
+        """Group committed subjects since the current release tag.
+
+        Args:
+            version: Current package version whose local tag is the baseline.
+
+        Returns:
+            Markdown notes in chronological order within each category.
+
+        Raises:
+            ValueError: If the baseline tag is missing or not an ancestor of HEAD.
+        """
+        tag = f"v{version}"
+        if not self.run("git", "tag", "--list", tag):
+            raise ValueError(f"Missing baseline tag {tag}; fetch release tags before bumping")
+        try:
+            self.run("git", "merge-base", "--is-ancestor", tag, "HEAD")
+        except subprocess.CalledProcessError as error:
+            raise ValueError(f"Baseline tag {tag} is not an ancestor of HEAD") from error
+        history = self.run("git", "log", "--reverse", "--no-merges",
+                           "--format=%h%x09%s", f"{tag}..HEAD", "--")
+        groups: dict[str, list[str]] = {}
+        categories = {"feat": "Added", "fix": "Fixed", "perf": "Performance",
+                      "refactor": "Changed", "docs": "Documentation", "test": "Tests",
+                      "build": "Build and release", "ci": "Build and release",
+                      "chore": "Maintenance", "style": "Maintenance", "revert": "Reverted"}
+        for line in history.splitlines():
+            sha, subject = line.split("\t", 1)
+            match = re.match(r"([a-z]+)(?:\([^)]*\))?(!)?:\s+", subject)
+            category = categories.get(match.group(1), "Other") if match else "Other"
+            if match and match.group(2):
+                category = "Breaking changes"
+            groups.setdefault(category, []).append(f"- {subject} (`{sha}`).")
+        return "\n\n".join(f"### {category}\n\n" + "\n".join(entries)
+                            for category, entries in groups.items())
+
     def bump(self, part: str) -> str:
-        """Promote Unreleased notes and update metadata and the uv lockfile.
+        """Generate commit notes, preserve Unreleased notes and update release files.
 
         Args:
             part: major, minor or patch (numeric SemVer increments).
@@ -100,8 +136,12 @@ class ReleaseHelper:
         changelog_path = self.root / "CHANGELOG.md"
         changelog = changelog_path.read_text(encoding="utf-8")
         section = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[|\Z)", changelog, re.MULTILINE | re.DOTALL)
-        if section is None or not section.group(1).strip():
-            raise ValueError("Add release notes under ## [Unreleased] before bumping")
+        if section is None:
+            raise ValueError("Missing ## [Unreleased] changelog section")
+        generated = self.release_notes(old)
+        notes = "\n\n".join(text for text in (section.group(1).strip(), generated) if text)
+        if not notes:
+            raise ValueError("No release notes or commits since the current release tag")
         if re.search(rf"^## \[{re.escape(new)}\]", changelog, re.MULTILINE):
             raise ValueError(f"Changelog already contains {new}")
         metadata_path = self.root / "pyproject.toml"
@@ -109,7 +149,7 @@ class ReleaseHelper:
         metadata, count = re.subn(rf'^version = "{re.escape(old)}"$', f'version = "{new}"', metadata, flags=re.MULTILINE)
         if count != 1:
             raise ValueError('Expected exactly one version = "X.Y.Z" metadata line')
-        replacement = f"## [Unreleased]\n\n## [{new}] - {date.today().isoformat()}\n" + section.group(1)
+        replacement = f"## [Unreleased]\n\n## [{new}] - {date.today().isoformat()}\n" + "\n" + notes + "\n\n"
         changelog = changelog[:section.start()] + replacement + changelog[section.end():]
         changelog = re.sub(r"^(\[Unreleased\]: .*?/compare/)v[^.]+\.\d+\.\d+\.\.\.HEAD$", rf"\g<1>v{new}...HEAD", changelog, flags=re.MULTILINE)
         previous_link = re.search(rf"^\[{re.escape(old)}\]: (https://github.com/[^/]+/[^/]+)/", changelog, re.MULTILINE)

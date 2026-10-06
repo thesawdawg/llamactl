@@ -50,6 +50,7 @@ def test_bump(release_repo: ReleaseHelper, monkeypatch: pytest.MonkeyPatch, part
     """
     calls: list[tuple[str, ...]] = []
     original = release_repo.run
+    original("git", "tag", "v0.1.0")
 
     def run(*args: str) -> str:
         """Record uv calls without downloading dependencies.
@@ -67,11 +68,12 @@ def test_bump(release_repo: ReleaseHelper, monkeypatch: pytest.MonkeyPatch, part
     assert release_repo.bump(part) == expected
     assert release_repo.version() == expected
     notes = (release_repo.root / "CHANGELOG.md").read_text()
+    assert "- A fix." in notes
     assert f"## [{expected}] - " in notes
     assert f"compare/v0.1.0...v{expected}" in notes
     assert f"compare/v{expected}...HEAD" in notes
     assert ("uv", "lock") in calls
-    assert original("git", "tag", "--list") == ""
+    assert original("git", "tag", "--list") == "v0.1.0"
 
 
 def test_empty_notes(release_repo: ReleaseHelper) -> None:
@@ -83,6 +85,7 @@ def test_empty_notes(release_repo: ReleaseHelper) -> None:
     Returns:
         None.
     """
+    release_repo.run("git", "tag", "v0.1.0")
     (release_repo.root / "CHANGELOG.md").write_text("## [Unreleased]\n\n## [0.1.0] - 2026-10-03\n")
     with pytest.raises(ValueError, match="release notes"):
         release_repo.bump("patch")
@@ -174,3 +177,91 @@ def test_uv_failure_does_not_tag(release_repo: ReleaseHelper, monkeypatch: pytes
     with pytest.raises(subprocess.CalledProcessError):
         release_repo.tag()
     assert original("git", "tag", "--list") == ""
+
+
+def test_commit_notes(release_repo: ReleaseHelper, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Generate notes from post-tag commits without requiring manual notes.
+
+    Args:
+        release_repo: Isolated repository helper.
+        monkeypatch: Pytest patch utility.
+
+    Returns:
+        None.
+    """
+    release_repo.run("git", "tag", "v0.1.0")
+    subjects = ["feat(ui): add selector", "fix: restore focus", "feat!: replace config", "plain subject"]
+    for subject in subjects:
+        release_repo.run("git", "commit", "--allow-empty", "-qm", subject)
+    (release_repo.root / "CHANGELOG.md").write_text("## [Unreleased]\n\n## [0.1.0] - 2026-10-03\n")
+    original = release_repo.run
+
+    def run(*args: str) -> str:
+        """Stub uv while executing local history commands.
+
+        Args:
+            args: Executable and arguments.
+
+        Returns:
+            Git output or empty uv output.
+        """
+        return "" if args[0] == "uv" else original(*args)
+
+    monkeypatch.setattr(release_repo, "run", run)
+    assert release_repo.bump("patch") == "0.1.1"
+    notes = (release_repo.root / "CHANGELOG.md").read_text()
+    for subject in subjects:
+        assert subject in notes
+    for category in ["Added", "Fixed", "Breaking changes", "Other"]:
+        assert f"### {category}" in notes
+    assert "Initial (`" not in notes
+    assert original("git", "rev-parse", "--short", "HEAD") in notes
+
+
+def test_missing_baseline(release_repo: ReleaseHelper) -> None:
+    """Refuse an ambiguous history range without modifying release metadata.
+
+    Args:
+        release_repo: Isolated repository helper.
+
+    Returns:
+        None.
+    """
+    with pytest.raises(ValueError, match="Missing baseline tag"):
+        release_repo.bump("patch")
+    assert release_repo.version() == "0.1.0"
+
+
+def test_nonancestor_baseline(release_repo: ReleaseHelper) -> None:
+    """Refuse a tag on a divergent commit rather than including unrelated history.
+
+    Args:
+        release_repo: Isolated repository helper.
+
+    Returns:
+        None.
+    """
+    initial = release_repo.run("git", "rev-parse", "HEAD")
+    release_repo.run("git", "commit", "--allow-empty", "-qm", "fix: future")
+    release_repo.run("git", "tag", "v0.1.0")
+    release_repo.run("git", "checkout", "--detach", initial)
+    with pytest.raises(ValueError, match="not an ancestor"):
+        release_repo.bump("patch")
+    assert release_repo.version() == "0.1.0"
+
+
+def test_history_baseline(release_repo: ReleaseHelper) -> None:
+    """Categorize documentation and omit commits already covered by the baseline.
+
+    Args:
+        release_repo: Isolated repository helper.
+
+    Returns:
+        None.
+    """
+    release_repo.run("git", "tag", "v0.1.0")
+    release_repo.run("git", "commit", "--allow-empty", "-qm", "docs: clarify setup")
+    notes = release_repo.release_notes("0.1.0")
+    assert "### Documentation" in notes
+    assert "docs: clarify setup" in notes
+    assert "Initial" not in notes
