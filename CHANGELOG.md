@@ -6,6 +6,11 @@ there are no earlier tagged releases. Commit entries retain their original subje
 
 ## [Unreleased]
 
+### Fixed
+
+- Prepare a new PyPI release because the 0.1.0, 0.1.1 and 0.1.2 wheel
+  filenames were previously used and deleted; PyPI permanently rejects reuse.
+
 ## [0.1.2] - 2026-10-06
 
 ### Added
