@@ -120,12 +120,17 @@ class ReleaseHelper:
             part: major, minor or patch (numeric SemVer increments).
 
         Returns:
-            New version; changes remain uncommitted for review.
+            New version, committed locally with a chore(release) message.
 
         Raises:
             ValueError: If notes, metadata or the candidate tag are invalid.
-            subprocess.CalledProcessError: If uv fails; inspect local changes before retrying.
+            subprocess.CalledProcessError: If uv or git fails; edits remain for inspection.
         """
+        paths = ("pyproject.toml", "CHANGELOG.md", "uv.lock")
+        if self.run("git", "diff", "--cached", "--name-only"):
+            raise ValueError("Unstage existing changes before bumping")
+        if self.run("git", "status", "--porcelain", "--", *paths):
+            raise ValueError("Commit existing release-file changes before bumping")
         old = self.version()
         numbers = list(map(int, old.split(".")))
         index = ("major", "minor", "patch").index(part)
@@ -159,6 +164,9 @@ class ReleaseHelper:
         changelog_path.write_text(changelog, encoding="utf-8")
         self.run("uv", "lock")
         check_release(self.root, f"v{new}")
+        self.run("uv", "lock", "--check")
+        self.run("git", "add", "--", *paths)
+        self.run("git", "commit", "-m", f"chore(release): bump version to {new}", "--", *paths)
         return new
 
     def tag(self) -> str:

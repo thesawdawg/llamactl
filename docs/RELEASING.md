@@ -24,19 +24,35 @@ changelog covers all 24 initial source commits and the packaging implementation.
 
 ## Local release helper
 
-Add notes under `## [Unreleased]`, then choose a numeric SemVer increment:
+Commit your changes, then choose a numeric SemVer increment:
 
 ```bash
 python scripts/bump_version.py bump patch   # or minor / major
 ```
 
-This updates `pyproject.toml`, promotes Unreleased notes to a dated release heading,
-updates changelog links and runs `uv lock`. It does not commit, tag or push.
+This generates release notes from non-merge commit subjects in `vCURRENT..HEAD`,
+grouped by Conventional Commit type and including short commit hashes. Subjects
+with `!` are grouped as Breaking changes; unrecognized subjects appear under Other.
+Within each category, commits retain chronological order. Commit bodies (including
+BREAKING CHANGE footers) are not parsed; review the generated notes yourself.
+Existing Unreleased notes are preserved alongside generated notes. Manual notes
+are optional; a bump with neither notes nor new commits is refused. The current
+version's local tag must exist and be an ancestor of HEAD. Fetch tags yourself if
+needed. Only committed changes are included; merge commits are omitted to avoid
+repeating their constituent commits.
+
+This updates `pyproject.toml`, creates a dated changelog heading, updates comparison
+links and runs `uv lock` and `uv lock --check`. It then automatically creates
+`chore(release): bump version to X.Y.Z`, containing only the changed release files:
+`pyproject.toml`, `CHANGELOG.md` and `uv.lock`. It does not tag or push.
+Existing staged changes or dirty release files are refused before any edits;
+commit manual Unreleased notes before bumping. Unrelated unstaged files stay out
+of the commit. Review the generated commit before tagging.
 Review and update any version-specific prose in README/docs yourself. If `uv lock`
 fails, the metadata and changelog edits remain for inspection; repair the lockfile
 before continuing rather than rerunning the bump and incrementing twice.
 
-After tests/build validation and committing the release files:
+After reviewing the bump commit, tests/build validation, and committing any additional release edits:
 
 ```bash
 python scripts/bump_version.py tag
@@ -46,7 +62,7 @@ This checks release metadata, the lockfile and committed release paths, refuses
 existing local tags, and creates an annotated tag on HEAD. Unrelated local changes
 (such as agent configuration) may remain dirty. Remote tag names are not checked;
 never force-replace an existing remote tag. The helper does not run tests/builds
-or commit changes and never pushes. Push the commit and tag yourself.
+or commit changes during tagging and never pushes. Push the commit and tag yourself.
 
 ## One-time setup (maintainer)
 
@@ -74,7 +90,7 @@ receives validated distributions via a GitHub artifact.
 
 ## Release checklist
 
-1. Add Unreleased notes and run `python scripts/bump_version.py bump patch`
+1. Commit the changes to include in release notes and run `python scripts/bump_version.py bump patch`
    (or `minor` / `major` according to the version policy).
 2. Move relevant Unreleased notes into a dated `## [X.Y.Z] - YYYY-MM-DD` section.
    Preserve the previous release notes and update comparison links.
