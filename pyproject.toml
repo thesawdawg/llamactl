@@ -1,6 +1,6 @@
 [project]
 name = "llama-tui"
-version = "0.1.2"
+version = "0.1.3"
 description = "Textual TUI for launching and managing llama.cpp servers"
 readme = "README.md"
 keywords = ["llama.cpp", "llm", "gguf", "textual", "tui"]
