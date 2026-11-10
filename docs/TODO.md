@@ -53,7 +53,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] IntentPicker, PlanScreen, PresetEditor
 - [x] TuneScreen
 - [x] Serving view (gateway + standalone + attached)
-- [ ] Settings view: gateway and default intent
+- [x] Settings view: gateway and default intent
 
 ## Phase 7 - Onboarding and Discover
 
