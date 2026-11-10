@@ -8,12 +8,13 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Footer, Header, Label, Static
 
-from .. import recommend, schema
+from .. import intents, planner, schema
+from ..calibration import Calibration
 from ..command import build_command, command_string
 from ..config import Config, Profile
 from ..gguf import ModelInfo
 from ..hardware import Host
-from ..recommend import estimate_budget, placeholder_info
+from ..planner import estimate_budget, placeholder_info
 from ..schema import Group
 from ..widgets.budget import BudgetPanel
 from ..widgets.field import SettingField
@@ -33,6 +34,8 @@ class ProfileEditor(Screen[Profile | None]):
         host: Host snapshot.
         info: Parsed model metadata, or None for the default profile.
         title: Screen title.
+        auto_recommend: Apply the plan for the default intent once the editor opens.
+        calibration: Measured data correcting the estimates, or None.
 
     Returns (via dismiss): the edited Profile on save, None on cancel.
     """
@@ -57,13 +60,15 @@ class ProfileEditor(Screen[Profile | None]):
     """
 
     def __init__(self, cfg: Config, prof: Profile, host: Host,
-                 info: ModelInfo | None, title: str, auto_recommend: bool = False) -> None:
+                 info: ModelInfo | None, title: str, auto_recommend: bool = False,
+                 calibration: Calibration | None = None) -> None:
         super().__init__()
         self.cfg = cfg
         self.host = host
         self.info = info
         self.title_text = title
         self._auto_recommend = auto_recommend
+        self.calibration = calibration
         self._draft = prof
         self.fields: dict[str, SettingField] = {}
 
@@ -128,7 +133,7 @@ class ProfileEditor(Screen[Profile | None]):
                 f.set_impact(s.impact(self._draft, self.info, self.host))
         info = self.info or placeholder_info(0)
         self.query_one(BudgetPanel).update_budget(
-            estimate_budget(info, self._draft, self.host), self.host,
+            estimate_budget(info, self._draft, self.host, self.calibration), self.host,
             self.cfg.headroom_pct)
         model = str(self.info.path) if self.info else "<model>"
         argv = build_command(self.cfg, model, self._draft, self._draft.port or 0)
@@ -165,15 +170,18 @@ class ProfileEditor(Screen[Profile | None]):
     def action_apply_recommended(self) -> None:
         if self.info is None:
             return self._say("No model - recommendations need parsed model metadata.")
-        rec = recommend.recommend(self.info, self.host, self._draft,
-                                  headroom_pct=self.cfg.headroom_pct)
+        intent = intents.resolve(self.cfg.default_intent, self.info)
+        rec = planner.plan(intent, self.info, self.host, self._draft, self.cfg.headroom_pct,
+                           self.calibration)
         for key, reason in rec.reasons.items():
             f = self.fields[key]
             f.set_value(getattr(rec.profile, key))
             f.show_reason(reason)
         self._draft = rec.profile
         self._recompute()
-        self._say(f"Recommended: {rec.verdict}. Review, then F1 for help or Ctrl+S to save.")
+        warn = f" Warning: {'; '.join(rec.warnings)}." if rec.warnings else ""
+        self._say(f"Recommended ({intent.label}): {rec.verdict}.{warn} "
+                  "Review, then F1 for help or Ctrl+S to save.")
 
     def action_reset_field(self) -> None:
         f = self._focused_field()

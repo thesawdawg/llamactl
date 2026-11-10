@@ -9,8 +9,9 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Label
 
-from .. import recommend, schema
-from ..config import CUSTOM, Config, Preset
+from .. import intents, planner, schema
+from ..calibration import Calibration
+from ..config import Config, Preset
 from ..fmt import FITS_STYLE
 from ..gguf import ModelInfo
 from ..hardware import Host
@@ -27,6 +28,10 @@ class RecommendationScreen(Screen[str]):
         model: Model path the recommendation applies to.
         info: Parsed model metadata.
         host: Host snapshot.
+        calibration: Measured data correcting the estimates, or None.
+
+    The plan is for the configured default intent when it applies to the model, otherwise
+    for the first applicable intent. Accepting saves it as an "estimated" preset.
     """
 
     BINDINGS = [
@@ -42,21 +47,26 @@ class RecommendationScreen(Screen[str]):
     #rec_none { color: $text-muted; margin: 1 0; display: none; }
     """
 
-    def __init__(self, cfg: Config, model: str, info: ModelInfo, host: Host) -> None:
+    def __init__(self, cfg: Config, model: str, info: ModelInfo, host: Host,
+                 calibration: Calibration | None = None) -> None:
         super().__init__()
         self.cfg = cfg
         self.model = model
         self.host = host
         self.model_name = info.name
-        self.rec = recommend.recommend(info, host, cfg.profile_for(model),
-                                       headroom_pct=cfg.headroom_pct)
+        self.intent = intents.resolve(cfg.default_intent, info)
+        self.plan = planner.plan(self.intent, info, host, cfg.profile_for(model),
+                                 cfg.headroom_pct, calibration)
 
     def compose(self) -> ComposeResult:
         yield Header()
-        v = self.rec.verdict
+        v = self.plan.verdict
         with Vertical(id="rec_body"):
             yield Label(Text.assemble(
-                (self.model_name, "b"), ("  -  verdict: ", ""), (v, FITS_STYLE.get(v, ""))))
+                (self.model_name, "b"), (f"  -  {self.intent.label}  -  verdict: ", ""),
+                (v, FITS_STYLE.get(v, ""))))
+            for warning in self.plan.warnings:
+                yield Label(Text(warning, style="yellow"))
             yield BudgetPanel()
             t = DataTable(id="rec_table")
             yield t
@@ -69,23 +79,23 @@ class RecommendationScreen(Screen[str]):
 
     def on_mount(self) -> None:
         self.sub_title = "Recommendation"
-        self.query_one(BudgetPanel).update_budget(self.rec.budget, self.host,
+        self.query_one(BudgetPanel).update_budget(self.plan.budget, self.host,
                                                   self.cfg.headroom_pct)
         t = self.query_one("#rec_table", DataTable)
         t.add_columns("Setting", "Current", "Recommended", "Why")
         base = self.cfg.profile_for(self.model)
-        for key, reason in self.rec.reasons.items():
+        for key, reason in self.plan.reasons.items():
             t.add_row(schema.by_key[key].label, str(getattr(base, key)),
-                      str(getattr(self.rec.profile, key)), reason)
-        if not self.rec.reasons:
+                      str(getattr(self.plan.profile, key)), reason)
+        if not self.plan.reasons:
             t.display = False
             self.query_one("#rec_none", Label).display = True
             self.query_one("#accept", Button).disabled = True
         self.query_one("#accept", Button).focus()  # Enter lands on the button
 
     def action_accept(self) -> None:
-        if self.rec.reasons:
-            self.cfg.set_preset(self.model, Preset(CUSTOM, self.rec.profile, "edited"))
+        if self.plan.reasons:
+            self.cfg.set_preset(self.model, Preset(self.plan.intent, self.plan.profile, "estimated"))
             self.cfg.save()
         self.dismiss("accepted")
 

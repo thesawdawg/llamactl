@@ -17,7 +17,7 @@ from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import GGUFError, ModelInfo, read_model_info
 from ..hardware import Host
 from ..library import discover_models
-from ..recommend import estimate_budget, verdict
+from ..planner import estimate_budget, verdict
 from ..screens.profile import ProfileEditor
 from ..screens.recommend import RecommendationScreen
 from ..widgets.budget import BudgetPanel
@@ -101,7 +101,8 @@ class ModelsView(BaseView):
 
     def _fits(self, model: str, info: ModelInfo) -> Text:
         """Coloured verdict for a model under its current profile."""
-        v = verdict(estimate_budget(info, self.app.cfg.profile_for(model), self.app.host),
+        v = verdict(estimate_budget(info, self.app.cfg.profile_for(model), self.app.host,
+                                    self.app.calibration),
                     self.app.host, self.app.cfg.headroom_pct)
         return Text(v, style=FITS_STYLE.get(v, ""))
 
@@ -178,7 +179,7 @@ class ModelsView(BaseView):
             + ("\n[yellow]No profile yet. Press F2 for a recommendation.[/]" if is_new else ""))
         prof = self.app.cfg.profile_for(model)
         self.query_one(BudgetPanel).update_budget(
-            estimate_budget(info, prof, self.app.host), self.app.host)
+            estimate_budget(info, prof, self.app.host, self.app.calibration), self.app.host)
         changed = prof.non_default()
         cmd = command_string(build_command(self.app.cfg, model, prof, prof.port or 0))
         if not prof.port:
@@ -216,7 +217,8 @@ class ModelsView(BaseView):
 
         self.app.push_screen(
             ProfileEditor(self.app.cfg, self.app.cfg.profile_for(model), self.app.host,
-                          info, Path(model).name, auto_recommend=auto_recommend), done)
+                          info, Path(model).name, auto_recommend=auto_recommend,
+                          calibration=self.app.calibration), done)
 
     def open_recommendation(self, model: str) -> None:
         """Push the RecommendationScreen for a model; "editor" opens the editor.
@@ -236,7 +238,8 @@ class ModelsView(BaseView):
             self.update_detail()
 
         self.app.push_screen(
-            RecommendationScreen(self.app.cfg, model, info, self.app.host), done)
+            RecommendationScreen(self.app.cfg, model, info, self.app.host,
+                                 self.app.calibration), done)
 
     def _edit(self, model: str | None) -> None:
         """Open the profile editor (or the default profile when model is None)."""

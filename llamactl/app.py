@@ -8,6 +8,7 @@ from textual.containers import Horizontal
 from textual.widgets import ContentSwitcher, Footer, Header, Label, ListItem, ListView
 
 from . import hardware
+from .calibration import Calibration
 from .config import Config
 from .gguf import ModelInfoCache
 from .sessions import SessionStore
@@ -46,6 +47,7 @@ class LlamaCtl(App):
     def __init__(self) -> None:
         super().__init__()
         self.cfg = Config.load()
+        self.calibration = Calibration.load()
         self.store = SessionStore()
         self.info_cache = ModelInfoCache()
         self.host = hardware.Host()

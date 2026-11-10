@@ -1,6 +1,7 @@
 """Pilot tests: profile editor and the app shell with Models view."""
 from __future__ import annotations
 
+import dataclasses
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 from textual.app import App
 from textual.widgets import Button, ContentSwitcher, DataTable, Input, Label
 
-from llamactl import hf, recommend
+from llamactl import hf, intents, planner
 from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
 from llamactl.gguf import ModelInfo
@@ -83,10 +84,10 @@ async def test_apply_recommended_and_save() -> None:
         app.editor.fields["cont_batching"].input.focus()  # 'R' must not go into an Input
         await pilot.press("R")
         await pilot.pause(0.4)
-        rec = recommend.recommend(info, host, Profile())
+        rec = planner.plan(intents.by_key["chat"], info, host, Profile())
         prof = app.editor._draft
-        assert prof.ctx_size == rec.profile.ctx_size
-        assert prof.cache_type_k == "q8_0" and prof.threads == 8
+        assert prof.ctx_size == rec.profile.ctx_size == 16384
+        assert prof.parallel == 1 and prof.fit == "off" and prof.threads == 8
         ctx_f = app.editor.fields["ctx_size"]
         assert ctx_f._reason and ctx_f.query_one(".impact", Label).has_class("recommended")
         await pilot.press("ctrl+s")
@@ -196,14 +197,15 @@ async def test_recommendation_screen(isolated: SimpleNamespace) -> None:
         scr = RecommendationScreen(app.cfg, "/m.gguf", _info(), app.host)
         app.push_screen(scr, result.append)
         await pilot.pause(0.2)
-        assert scr.query_one("#rec_table", DataTable).row_count == len(scr.rec.reasons)
+        assert scr.query_one("#rec_table", DataTable).row_count == len(scr.plan.reasons)
         await pilot.press("enter")
         await pilot.pause()
         assert result == ["accepted"]
         assert app.cfg.has_profile("/m.gguf")
         preset = app.cfg.preset("/m.gguf")
-        assert (preset.intent, preset.source) == ("custom", "edited")
-        assert app.cfg.profile_for("/m.gguf").ctx_size == scr.rec.profile.ctx_size
+        assert (preset.intent, preset.source) == ("chat", "estimated")
+        assert app.cfg.preset("/m.gguf").profile == scr.plan.profile
+        assert app.cfg.profile_for("/m.gguf").ctx_size == scr.plan.profile.ctx_size
 
     app2 = LlamaCtl()
     async with app2.run_test(size=(140, 45)) as pilot:
@@ -284,3 +286,15 @@ async def test_hf_view_tables(isolated: SimpleNamespace, monkeypatch) -> None:
         assert await _wait(pilot, lambda: hv.query_one("#files", DataTable).row_count == 1)
         fits = hv.query_one("#files", DataTable).get_cell_at((0, 4))
         assert "GPU" in str(fits)
+
+
+def test_recommendation_screen_picks_default_intent_when_it_applies(
+        isolated: SimpleNamespace) -> None:
+    cfg = Config()
+    cfg.default_intent = "agent"
+    scr = RecommendationScreen(cfg, "/m.gguf", _info(), _host())
+    assert scr.plan.intent == "agent" and scr.plan.profile.cache_reuse == 256
+    embed = dataclasses.replace(_info(), pooling_type=1)
+    assert RecommendationScreen(cfg, "/e.gguf", embed, _host()).plan.intent == "embed"
+    cfg.default_intent = "bogus"
+    assert RecommendationScreen(cfg, "/m.gguf", _info(), _host()).plan.intent == "chat"

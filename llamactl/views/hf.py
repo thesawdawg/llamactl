@@ -14,7 +14,7 @@ from .. import hf
 from ..config import Profile
 from ..fmt import human, params_str
 from ..gguf import GGUFError, read_model_info
-from ..recommend import estimate_budget, placeholder_info, verdict
+from ..planner import estimate_budget, placeholder_info, verdict
 from ..screens.prompt import PromptScreen
 from .base import BaseView
 

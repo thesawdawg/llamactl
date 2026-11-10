@@ -101,7 +101,7 @@ def _budget_impact(prof: Profile, info: ModelInfo | None, host: Host) -> str:
     Returns:
         A single line of text shown under the field.
     """
-    from .recommend import estimate_budget
+    from .planner import estimate_budget
 
     if info is None:
         return f"Host: {_gb(host.vram_free)} VRAM free, {_gb(host.ram_free)} RAM free"
