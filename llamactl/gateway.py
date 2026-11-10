@@ -27,6 +27,7 @@ PRESETS_FILE = CONFIG_DIR / "gateway.ini"
 LOG_NAME = "gateway.log"
 HTTP_TIMEOUT = 10.0
 STOP_TIMEOUT = 15.0
+SETTLE_SECONDS = 1.0
 
 # Model states reported by `GatewayModel.state`.
 UNLOADED, LOADING, LOADED, SLEEPING, FAILED = "unloaded", "loading", "loaded", "sleeping", "failed"
@@ -270,6 +271,24 @@ def _terminate(pid: int, timeout: float = STOP_TIMEOUT,
         send(signal.SIGKILL)
 
 
+def _log_reason(log: Path) -> str:
+    """The log line that most likely says why a process exited: its last error, else its last line.
+
+    Args:
+        log: Log file of the process.
+
+    Returns:
+        A one-line message, with the log's timestamp prefix removed.
+    """
+    try:
+        lines = [ln.strip() for ln in log.read_text(errors="replace").splitlines() if ln.strip()]
+    except OSError:
+        return "no log output"
+    errors = [ln for ln in lines if " E " in ln[:30]]
+    pick = (errors or lines or ["no log output"])[-1]
+    return pick.split(" ", 2)[-1] if pick[:1].isdigit() else pick
+
+
 def _client_host(host: str) -> str:
     """Address to connect to for a listen address (wildcards become loopback)."""
     return "127.0.0.1" if host in _ANY_ADDRESS else host
@@ -285,13 +304,19 @@ class Gateway:
             ``timeout`` keywords; the client needs ``request(method, path, **kw)`` returning
             an object with ``status_code``, ``text`` and ``json()``, and context-manager
             support (as `httpx.Client` has).
+        settle: Seconds `start` watches the new process for an immediate exit (the router
+            exits at once on a preset it cannot parse); 0 skips the check.
+        sleep: Sleep function used while settling (injectable).
     """
 
     def __init__(self, cfg: Config, popen: Callable[..., Any] = subprocess.Popen,
-                 http: Callable[..., Any] = httpx.Client) -> None:
+                 http: Callable[..., Any] = httpx.Client, settle: float = SETTLE_SECONDS,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self.cfg = cfg
         self._popen = popen
         self._http = http
+        self._settle = settle
+        self._sleep = sleep
         self.problems: list[str] = []
 
     # -- process -----------------------------------------------------------------------
@@ -347,13 +372,16 @@ class Gateway:
         """Start the router as a detached process (it survives the TUI), unless it runs.
 
         Writes the preset INI first. The process is not waited for: use `status` to see when
-        it is healthy, and the log when it never is.
+        it is healthy. It does watch the first moments, because the router exits at once when it
+        rejects the preset file (for example an extra_args option this llama.cpp does not
+        know), and reports the log line that says why. Blocks for up to `settle` seconds.
 
         Returns:
             The state of the (possibly already running) gateway.
 
         Raises:
-            GatewayError: When the port is taken or the process cannot be started.
+            GatewayError: When the port is taken, the process cannot be started, or it exits
+                right away.
         """
         if (st := self.state) is not None:
             return st
@@ -371,6 +399,12 @@ class Gateway:
                                    stdin=subprocess.DEVNULL, start_new_session=True)
         except OSError as e:
             raise GatewayError(f"cannot start {argv[0]}: {e}") from e
+        waited = 0.0
+        while waited < self._settle and pid_alive(proc.pid):
+            self._sleep(0.1)
+            waited += 0.1
+        if self._settle > 0 and not pid_alive(proc.pid):
+            raise GatewayError(f"the gateway exited at once: {_log_reason(log)} (log: {log})")
         st = GatewayState(proc.pid, self.listen_url, str(log), time.time())
         st.save()
         return st
@@ -484,7 +518,10 @@ class Gateway:
         Raises:
             GatewayError: When the model is unknown or already running, or the call fails.
         """
-        self._call("POST", "/models/load", json={"model": name})
+        try:
+            self._call("POST", "/models/load", json={"model": name})
+        except GatewayError as e:
+            raise GatewayError(f"cannot load '{name}': {e}") from None
 
     def unload(self, name: str) -> None:
         """Ask the router to unload a model (``POST /models/unload``).
@@ -495,7 +532,10 @@ class Gateway:
         Raises:
             GatewayError: When the model is unknown or not running, or the call fails.
         """
-        self._call("POST", "/models/unload", json={"model": name})
+        try:
+            self._call("POST", "/models/unload", json={"model": name})
+        except GatewayError as e:
+            raise GatewayError(f"cannot unload '{name}': {e}") from None
 
     def reload(self) -> list[GatewayModel]:
         """Rewrite the preset INI and, when the gateway runs, make it re-read the file.

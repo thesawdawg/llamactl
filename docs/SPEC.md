@@ -295,14 +295,30 @@ llama-server --models-preset ~/.config/llamactl/gateway.ini --models-max N \
              --host H --port P [--api-key K]
 ```
 
-- `render_presets(cfg) -> str` builds the INI from the same registry as the argv builder.
-  One section per preset: the model's active preset is `[alias]`; every other preset is
-  `[alias:intent]`. So a client asks for `qwen3-8b` or `qwen3-8b:agent`. Each section carries
-  `model = /abs/path` plus the preset's non-unset, non-router-owned settings. `[*]` carries
-  `sleep-idle-seconds` from the gateway settings. Boolean negation follows llama.cpp's `no-` rule.
+- `render_presets(cfg, models=None) -> str` builds the INI from the same registry as the argv
+  builder (`command.preset_items`). Output starts with `version = 1`, then `[*]`, then models
+  sorted by alias and presets by name, so it is stable and diffable. One section per preset: the
+  model's active preset is `[alias]`; every other preset is `[alias@name]`, so a client asks for
+  `qwen3-8b` or `qwen3-8b@agent`. The separator is `@`, not `:`: llama.cpp treats the text after
+  the last `:` of a section name as a tag and rewrites it (`qwen3-8b:agent` is served as
+  `qwen3-8b:AGENT`, `qwen3-8b:my-preset` as `qwen3-8b:PRESET`), which would break lookup by
+  name. Each section carries `model = /abs/path` plus the preset's non-unset, non-router-owned
+  settings; models whose file is gone are skipped. `[*]` carries `sleep-idle-seconds` from the
+  gateway settings when above 0.
+- INI details verified against llama.cpp (`common/preset.cpp`): keys are long flags without
+  dashes; booleans are `true` / `false`, and llama.cpp maps `cont-batching = false` to
+  `--no-cont-batching` itself (so llamactl never writes `no-` keys for registry settings); a
+  value ends at the first `;` or `#` and cannot hold a line break, so a preset containing one is
+  skipped with a `; skipped [...]` comment and reported; an option the running llama.cpp does
+  not know (for instance a misspelt one in `extra_args`) makes the whole router refuse to
+  start, which `start()` reports from the log. `extra_args` is parsed into `--flag value` /
+  `--flag` pairs; a bare token cannot be expressed and is an error.
 - `Gateway` class: `start()`, `stop()`, `status()`, `models()` (`GET /models`),
   `load(name)`, `unload(name)`, `reload()` (rewrite INI, `GET /models?reload=1`). State (pid, url,
-  log) persists in `gateway.json` so the gateway outlives the TUI, like sessions do.
+  log) persists in `gateway.json` so the gateway outlives the TUI, like sessions do. Model
+  states are `unloaded`, `loading`, `loaded`, `sleeping` and `failed` (the router reports a
+  crashed model as `unloaded` with `failed` and an `exit_code`). The API key is sent as a
+  Bearer header; `/health` needs none.
 - Saving or tuning a preset regenerates the INI and reloads a running gateway.
 - `models_max` defaults to 1 per GPU-sized model; the Home view explains what will be unloaded
   when a second model is requested.

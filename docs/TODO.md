@@ -30,7 +30,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] `gateway.render_presets` (alias and alias@preset sections)
 - [x] `Gateway` process control + router API client, state in `gateway.json`
 - [x] `sessions.launch_server` takes a preset
-- [ ] Manual: real router accepts the generated INI
+- [x] Manual: real router accepts the generated INI
 
 ## Phase 4 - Tuner
 

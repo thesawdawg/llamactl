@@ -95,6 +95,14 @@ def test_active_preset_is_the_plain_alias_and_others_are_suffixed(two_models) ->
     assert "cache-reuse = 256" in render_presets(cfg).split("[qwen3-8b]")[1].split("[")[0]
 
 
+def test_no_section_name_uses_a_colon(two_models) -> None:
+    """Regression: the router rewrites the text after ':' ("qwen:agent" became "qwen:AGENT")."""
+    cfg, qwen, _ = two_models
+    cfg.models[str(qwen)].presets["my-preset"] = Preset("my-preset", Profile())
+    sections = [ln for ln in render_presets(cfg).splitlines() if ln.startswith("[")]
+    assert "[qwen3-8b@my-preset]" in sections and not any(":" in s for s in sections)
+
+
 def test_invalid_active_falls_back_to_the_first_preset_by_name(two_models) -> None:
     cfg, qwen, _ = two_models
     cfg.models[str(qwen)].active = ""
@@ -244,7 +252,7 @@ def env(isolated: SimpleNamespace, two_models, monkeypatch: pytest.MonkeyPatch) 
     alive: set[int] = set()
     monkeypatch.setattr(gateway, "pid_alive", lambda pid: pid in alive)
     monkeypatch.setattr(gateway, "port_free", lambda port, host="127.0.0.1": True)
-    gw = Gateway(cfg, popen=FakePopen, http=http)
+    gw = Gateway(cfg, popen=FakePopen, http=http, settle=0)
     return SimpleNamespace(gw=gw, cfg=cfg, http=http, alive=alive, cfg_dir=isolated.cfg_dir,
                            qwen=qwen, llama=llama)
 
@@ -302,10 +310,43 @@ def test_start_is_idempotent_while_running(env) -> None:
     assert env.gw.start() == first and len(FakePopen.calls) == 1
 
 
+def test_start_reports_an_immediate_exit_with_the_log_reason(env) -> None:
+    """Regression: the real router exits at once on an option it does not know."""
+    def dies(argv: list[str], stdout: Any = None, **kw: Any) -> SimpleNamespace:
+        stdout.write(b"0.00.001.116 I srv  llama_server: initializing ...\n"
+                     b"0.00.082.119 E srv  llama_server: failed to initialize router models: "
+                     b"option 'no-mmap' not recognized in preset 'qwen3-8b@agent'\n")
+        stdout.flush()
+        return SimpleNamespace(pid=999)
+    gw = Gateway(env.cfg, popen=dies, http=env.http, settle=0.3, sleep=lambda s: None)
+    with pytest.raises(GatewayError, match=r"exited at once: srv  llama_server: failed to "
+                                           r"initialize router models: option 'no-mmap' not "
+                                           r"recognized.*gateway\.log"):
+        gw.start()
+    assert GatewayState.load() is None
+
+
+def test_start_settles_when_the_process_stays_up(env) -> None:
+    env.alive.add(777)
+    gw = Gateway(env.cfg, popen=FakePopen, http=env.http, settle=0.3, sleep=lambda s: None)
+    assert gw.start().pid == 777
+
+
+def test_log_reason_fallbacks(tmp_path: Path) -> None:
+    from llamactl.gateway import _log_reason
+    assert _log_reason(tmp_path / "missing.log") == "no log output"
+    empty = tmp_path / "e.log"
+    empty.write_text("\n")
+    assert _log_reason(empty) == "no log output"
+    plain = tmp_path / "p.log"
+    plain.write_text("first\nlast words\n")
+    assert _log_reason(plain) == "last words"
+
+
 def test_start_reports_a_launch_failure(env) -> None:
     def boom(argv: list[str], **kw: Any) -> None:
         raise FileNotFoundError(2, "No such file or directory")
-    gw = Gateway(env.cfg, popen=boom, http=env.http)
+    gw = Gateway(env.cfg, popen=boom, http=env.http, settle=0)
     with pytest.raises(GatewayError, match="cannot start /opt/llama/bin/llama-server"):
         gw.start()
     assert GatewayState.load() is None
@@ -466,11 +507,11 @@ def test_router_errors_become_gateway_errors(env) -> None:
     started(env)
     env.http.routes[("POST", "/models/load")] = FakeResponse(
         404, {"error": {"message": "model is not found", "type": "not_found_error"}})
-    with pytest.raises(GatewayError, match="HTTP 404: model is not found"):
+    with pytest.raises(GatewayError, match="cannot load 'nope': .*HTTP 404: model is not found"):
         env.gw.load("nope")
     env.http.routes[("POST", "/models/unload")] = FakeResponse(
         400, {"error": {"message": "model is not running"}})
-    with pytest.raises(GatewayError, match="model is not running"):
+    with pytest.raises(GatewayError, match="cannot unload 'qwen3-8b': .*model is not running"):
         env.gw.unload("qwen3-8b")
     env.http.routes[("GET", "/models")] = FakeResponse(
         401, {"error": {"message": "Invalid API Key", "type": "authentication_error"}})
