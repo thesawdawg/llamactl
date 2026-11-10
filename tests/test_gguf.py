@@ -1,11 +1,12 @@
 """GGUF header parsing on synthetic blobs."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from llamactl.gguf import GGUFError, read_model_info
+from llamactl.gguf import GGUFError, ModelInfoCache, read_model_info
 
 from conftest import gguf_blob, kv_arr_i32, kv_arr_str, kv_str, kv_u32
 
@@ -60,3 +61,46 @@ def test_bad_magic(tmp_path: Path) -> None:
     p.write_bytes(b"NOPE")
     with pytest.raises(GGUFError):
         read_model_info(p)
+
+
+def _pooling_file(tmp_path: Path, pooling: int | None) -> Path:
+    kvs = [
+        kv_str("general.architecture", "testarch"),
+        kv_u32("testarch.block_count", 4),
+        kv_u32("testarch.embedding_length", 256),
+        kv_u32("testarch.attention.head_count", 8),
+        kv_u32("testarch.context_length", 8192),
+    ]
+    if pooling is not None:
+        kvs.append(kv_u32("testarch.pooling_type", pooling))
+    return _write(tmp_path, kvs)
+
+
+def test_pooling_absent_is_not_embedding(tmp_path: Path) -> None:
+    info = read_model_info(_pooling_file(tmp_path, None))
+    assert info.pooling_type == -1 and not info.is_embedding
+
+
+@pytest.mark.parametrize("pooling,embedding", [(0, False), (1, True), (2, True), (3, True), (4, True)])
+def test_pooling_detection(tmp_path: Path, pooling: int, embedding: bool) -> None:
+    info = read_model_info(_pooling_file(tmp_path, pooling))
+    assert info.pooling_type == pooling and info.is_embedding is embedding
+
+
+def test_cache_round_trips_pooling(tmp_path: Path) -> None:
+    info = read_model_info(_pooling_file(tmp_path, 1))
+    cache = ModelInfoCache(tmp_path / "cache.json")
+    cache.put(info)
+    got = ModelInfoCache(tmp_path / "cache.json").get(info.path)
+    assert got == info and got.is_embedding
+
+
+def test_old_cache_entry_is_reread(tmp_path: Path) -> None:
+    info = read_model_info(_pooling_file(tmp_path, 1))
+    cache_file = tmp_path / "cache.json"
+    cache = ModelInfoCache(cache_file)
+    cache.put(info)
+    raw = json.loads(cache_file.read_text())
+    del raw[str(info.path)]["pooling_type"]  # shape written by earlier versions
+    cache_file.write_text(json.dumps(raw))
+    assert ModelInfoCache(cache_file).get(info.path) is None

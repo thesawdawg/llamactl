@@ -13,7 +13,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] Remove `screens/chat.py`, the `cli` launch mode and their bindings/tests
 - [x] `hardware.py`: `Device`, `Host`, `--list-devices` parser, nvidia-smi fallback, refresh; delete `hostinfo.py`
 - [x] Schema: drop `modes`; add fit, fit_target, device, cache_reuse, sleep_idle, embedding, pooling, threads_batch; `preset_key`, `router_owned`
-- [ ] GGUF: detect pooling type (embedding models)
+- [x] GGUF: detect pooling type (embedding models)
 - [ ] Config v3: `Preset`, per-model presets/alias/active, gateway settings, v2 migration with backup
 - [ ] `library.py`: discovery + alias/substring model resolution
 

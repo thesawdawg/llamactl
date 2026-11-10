@@ -42,6 +42,7 @@ class ModelInfo:
         file_type: GGUF file type (quantisation) id.
         sharded: split.count or 1.
         parameter_count: general.parameter_count or 0 when absent.
+        pooling_type: {arch}.pooling_type (0 none, 1 mean, 2 cls, 3 last, 4 rank), -1 when absent.
     """
 
     path: Path
@@ -59,6 +60,12 @@ class ModelInfo:
     file_type: int
     sharded: int
     parameter_count: int
+    pooling_type: int = -1
+
+    @property
+    def is_embedding(self) -> bool:
+        """True for embedding/reranker models: the GGUF declares a pooling type."""
+        return self.pooling_type > 0
 
 
 def _read_kv(fh) -> dict:
@@ -164,6 +171,7 @@ def read_model_info(path: Path) -> ModelInfo:
         file_type=int(kv.get("general.file_type", 0)),
         sharded=int(kv.get("split.count", 1)),
         parameter_count=int(kv.get("general.parameter_count", 0)),
+        pooling_type=int(kv.get(a + "pooling_type", -1)),
     )
 
 
@@ -180,13 +188,13 @@ class ModelInfoCache:
                             if self.cache_file.exists() else {})
 
     def get(self, path: Path) -> ModelInfo | None:
-        """Cached info for `path`, or None when missing or stale.
+        """Cached info for `path`, or None when missing, stale or written before pooling_type.
 
         Args:
             path: Model file path.
         """
         ent = self._data.get(str(path))
-        if not ent:
+        if not ent or "pooling_type" not in ent:  # pre-pooling entries are re-read from disk
             return None
         try:
             if ent["mtime"] != path.stat().st_mtime:
