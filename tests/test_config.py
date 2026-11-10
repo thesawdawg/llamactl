@@ -9,6 +9,7 @@ import pytest
 from llamactl import config
 from llamactl.config import (Config, GatewaySettings, ModelEntry, Preset, Profile,
                              derive_alias)
+from llamactl.measure import Measurement
 
 LEGACY = {
     "bin_dir": "/bin",
@@ -58,7 +59,8 @@ def test_v3_round_trip(cfg_dir: Path) -> None:
                  gateway=GatewaySettings(host="0.0.0.0", port=9000, api_key="k", models_max=2,
                                          sleep_idle=0, autostart=True))
     cfg.set_preset("/m/a.gguf", Preset("agent", Profile(ctx_size=65536, fit="off"), "tuned",
-                                       {"ok": True, "gen_tps": 41.5, "nested": {"a": [1, 2]}}))
+                                       Measurement(ok=True, gen_tps=41.5, vram_used=9_000_000_000,
+                                                   at="2026-11-09T10:00:00+00:00", build="b1")))
     cfg.set_preset("/m/a.gguf", Preset("chat", Profile(ctx_size=8192), "estimated"), activate=False)
     cfg.entry("/m/a.gguf").alias = "my-a"
     cfg.save()
@@ -74,7 +76,8 @@ def test_v3_round_trip(cfg_dir: Path) -> None:
     assert back == cfg
     ent = back.models["/m/a.gguf"]
     assert ent.alias == "my-a" and ent.active == "agent" and set(ent.presets) == {"agent", "chat"}
-    assert ent.presets["agent"].measured == {"ok": True, "gen_tps": 41.5, "nested": {"a": [1, 2]}}
+    assert ent.presets["agent"].measured == Measurement(
+        ok=True, gen_tps=41.5, vram_used=9_000_000_000, at="2026-11-09T10:00:00+00:00", build="b1")
     assert ent.presets["chat"].measured is None
     assert back.gateway.api_key == "k" and back.gateway.autostart is True
     assert back.onboarded is True and back.default_intent == "agent"
@@ -204,3 +207,20 @@ def test_migrated_aliases_are_unique(cfg_dir: Path) -> None:
     (cfg_dir / "config.json").write_text(json.dumps({"version": 2, "profiles": profiles}))
     cfg = Config.load()
     assert sorted(e.alias for e in cfg.models.values()) == ["m", "m-2", "m-3"]
+
+
+def test_legacy_dict_measured_still_loads(cfg_dir: Path) -> None:
+    """A measured dict from before Measurement existed (extra keys, missing keys) loads."""
+    (cfg_dir / "config.json").write_text(json.dumps({"version": 3, "models": {"/m/a.gguf": {
+        "active": "agent", "presets": {
+            "agent": {"intent": "agent", "source": "tuned",
+                      "measured": {"ok": True, "gen_tps": "41.5", "nested": {"a": 1}}},
+            "chat": {"intent": "chat", "measured": None}}}}}))
+    ent = Config.load().models["/m/a.gguf"]
+    m = ent.presets["agent"].measured
+    assert m == Measurement(ok=True, gen_tps=41.5)
+    assert ent.presets["chat"].measured is None
+    cfg = Config.load()
+    cfg.save()
+    assert json.loads((cfg_dir / "config.json").read_text())["models"]["/m/a.gguf"][
+        "presets"]["agent"]["measured"]["gen_tps"] == 41.5

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import schema
+from .measure import Measurement
 
 CONFIG_DIR = Path.home() / ".config" / "llamactl"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -172,13 +173,13 @@ class Preset:
         intent: An intent key, or "custom".
         profile: The concrete settings.
         source: "estimated", "tuned" or "edited".
-        measured: Measurement of a tuned run as a plain dict (typed in a later phase), or None.
+        measured: Measurement of the tuned run, or None.
     """
 
     intent: str = CUSTOM
     profile: Profile = field(default_factory=Profile)
     source: str = "edited"
-    measured: dict | None = None
+    measured: Measurement | None = None
 
     @classmethod
     def from_dict(cls, data: dict, name: str = CUSTOM) -> "Preset":
@@ -191,16 +192,16 @@ class Preset:
         Returns:
             The preset.
         """
-        measured = data.get("measured")
+        raw = data.get("measured")
+        measured = Measurement.from_dict(raw) if isinstance(raw, dict) else None
         return cls(intent=str(data.get("intent") or name),
                    profile=Profile.from_dict(data.get("profile") or {}),
-                   source=str(data.get("source") or "edited"),
-                   measured=dict(measured) if isinstance(measured, dict) else None)
+                   source=str(data.get("source") or "edited"), measured=measured)
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-able dict."""
         return {"intent": self.intent, "profile": self.profile.to_dict(), "source": self.source,
-                "measured": self.measured}
+                "measured": self.measured.to_dict() if self.measured else None}
 
 
 @dataclass
