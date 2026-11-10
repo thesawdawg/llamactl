@@ -1,351 +1,380 @@
-# llamactl redesign specification
+# llamactl v2: goal-first serving
 
-Status: approved design, implementation in phases (see section 9).
-Target: Textual >= 8.2, Python >= 3.11, Linux. No new runtime dependencies.
-Verified against llama.cpp build 5fc4f3c (2026-10-01) at `~/llama.cpp/build/bin`.
+Status: approved direction (2026-11-09), implementation in phases (section 11).
+Progress is tracked in [TODO.md](TODO.md). The previous design is archived at
+[archive/SPEC-v1.md](archive/SPEC-v1.md).
 
-## 1. Goals
+Target: Python >= 3.11, Textual >= 8.2, Linux first (macOS best effort). No new runtime
+dependencies (`textual`, `httpx` only). Verified against llama.cpp `0.5.0-dev` commit `5fc4f3c`.
 
-1. Responsive UI: nothing slower than ~50 ms runs on the UI thread.
-2. Intuitive controls: sidebar navigation, typed widgets, visible state, no silent failures.
-3. Guided settings: every setting has a short hint, a long help text, and (where it applies) a live computed impact.
-4. More tunables as first-class settings (memory/offload, sampling, server/API). `extra_args` stays as the escape hatch.
-5. GGUF-aware recommendations proposed on download / first sight, confirmed by the user before saving.
-6. Testable core: schema, GGUF reader, recommender and command builder are pure Python with pytest coverage.
+## 1. Vision
 
-Non-goals: web UI, multiple profiles per model, named presets, chat screen redesign (deferred).
+v1 is a flag editor with a recommender attached: you pick a model, look at ~30 settings, and
+launch one server per model on its own port.
 
-## 2. Module layout
+v2 turns that around. You say **what you want the model for**; llamactl works out the settings
+for **this machine**, proves them by **measuring**, and serves everything behind **one stable
+endpoint** that other frontends and agent harnesses connect to.
+
+```
+  what you have            what you want          what llamactl does
+  -------------            -------------          ------------------
+  hardware (any backend)   intent: chat / agent   plan  -> estimate settings, explain why
+  GGUF models              / context / speed      tune  -> launch, measure VRAM + tok/s, keep the best
+                           / api / embed          serve -> one gateway endpoint, models load on demand
+```
+
+Decisions taken with the owner:
+
+| Topic | Decision |
+|---|---|
+| Tuning | Instant estimate, plus an on-demand measured tune that also calibrates later estimates |
+| Serving | One gateway endpoint (llama-server router mode) first; standalone per-model servers stay available |
+| Profiles | Intent presets; a model can hold several; any preset can still be hand-edited |
+| Hardware | Backend-agnostic detection through llama.cpp's own `--list-devices` |
+| Surfaces | TUI and a headless CLI over the same core |
+| Onboarding | Guided first run |
+| Chat | **Removed.** llamactl is a server-only tool. No chat screen, no `llama-cli` mode |
+
+Non-goals: chat UI, web UI, building or updating llama.cpp, a hard-coded "best models" list,
+remote/multi-host management.
+
+## 2. Architecture
+
+The core is plain Python with no Textual imports. The TUI and the CLI are thin layers over it.
 
 ```
 llamactl/
-  app.py              App shell: sidebar + ContentSwitcher, global bindings, host polling
-  views/
-    models.py         ModelsView: table + detail pane
-    sessions.py       SessionsView: table + log/props pane
-    hf.py             HFView (moved from hf_screen.py, same behaviour + recommendation hand-off)
-    settings.py       SettingsView: bin_dir, model_dirs, HF token
-  screens/
-    profile.py        ProfileEditor screen (full screen)
-    recommend.py      RecommendationScreen (propose -> confirm)
-    help.py           HelpPanel modal for one setting
-  widgets/
-    gauges.py         ResourceGauges (VRAM / RAM bars) for the header area
-    budget.py         BudgetPanel (weights / KV / overhead vs VRAM / RAM)
-    field.py          SettingField: label + typed input + hint + impact line
-  schema.py           Setting registry (single source of truth)
-  config.py           Config / Profile (profile is schema-driven), discovery
-  command.py          build_command from schema (moved out of config.py)
-  gguf.py             GGUF header reader
-  recommend.py        Recommender
-  hostinfo.py         unchanged API, detection made cacheable
-  sessions.py         unchanged API
-  hf.py               unchanged
-  forms.py            removed once SettingsView and HelpPanel replace FormScreen
-tests/
-  test_schema.py  test_gguf.py  test_recommend.py  test_command.py  test_config.py  test_ui.py
-docs/SPEC.md          this file
+  hardware.py     Device/Host detection (replaces hostinfo.py)
+  gguf.py         GGUF header reader (kept; gains pooling/embedding detection)
+  schema.py       Settings registry (kept; server-only, new flags)
+  config.py       Config v3: presets per model, gateway settings, migration from v2
+  command.py      argv builder + preset-INI key/value builder from the same registry
+  intents.py      Intent definitions
+  planner.py      Budget model + plan(intent, model, host) (replaces recommend.py)
+  calibration.py  Measured results store + estimate correction factors
+  tuner.py        Measured search over candidate plans
+  gateway.py      Router-mode process, gateway.ini generation, router API client
+  sessions.py     Standalone and attached servers (kept, slimmed)
+  library.py      Model discovery + name resolution shared by TUI and CLI
+  cli.py          argparse entry point; no args -> TUI
+  app.py, views/, screens/, widgets/   TUI
 ```
 
-All classes carry type hints and docstrings (Args / Returns / Raises). Keep functions short; prefer
-composition over inheritance except where behaviour is genuinely shared (views share a `BaseView`).
+Removed: `hostinfo.py`, `recommend.py`, `screens/chat.py`, the `cli` launch mode.
 
-## 3. Settings schema (`schema.py`)
+Rules: nothing slower than ~50 ms on the UI thread; every subprocess and HTTP call is injectable
+so tests never start llama.cpp; code and tests never touch `~/.config/llamactl` or `~/llama.cpp`
+(tests redirect all paths through the `isolated` fixture).
 
-### 3.1 Data shape
+## 3. Hardware (`hardware.py`)
 
 ```python
-class Kind(StrEnum): INT = "int"; FLOAT = "float"; BOOL = "bool"; CHOICE = "choice"; STR = "str"; PATH = "path"
-
 @dataclass(frozen=True)
-class Setting:
-    key: str                      # Profile attribute and config key
-    flag: str                     # llama.cpp flag, e.g. "-c"; "" when handled specially
-    kind: Kind
-    label: str                    # short UI label
-    hint: str                     # one line shown under the field
-    help: str                     # multi-paragraph text for the help panel
-    group: Group                  # MEMORY, SAMPLING, SERVER, GENERAL
-    default: Any                  # value meaning "let llama.cpp decide" where possible
-    modes: frozenset[str] = frozenset({"server", "cli"})
-    choices: tuple[str, ...] = () # for CHOICE
-    minimum: float | None = None
-    maximum: float | None = None
-    step: float | None = None     # UI stepper increment
-    unset: Any = None             # value that means "omit the flag" (e.g. 0 for ctx_size, "" for strings)
-    impact: Callable[[Profile, ModelInfo | None, Host], str] | None = None
+class Device:
+    id: str          # "CUDA0", "Vulkan1", "Metal" ... as printed by llama.cpp
+    backend: str     # id with trailing digits stripped, lower-cased: "cuda", "vulkan", "metal"
+    name: str
+    total: int       # bytes
+    free: int        # bytes
+
+@dataclass
+class Host:
+    gpus: list[Device]; ram_total: int; ram_free: int
+    cpu_name: str; cpu_threads: int; cpu_cores: int
+    unified: bool    # GPU memory is system RAM (Apple Silicon / integrated)
+    # vram_total, vram_free, summary() as in v1
 ```
 
-`SETTINGS: tuple[Setting, ...]` is ordered as the editor shows them. Helpers:
-`by_key: dict[str, Setting]`, `for_group(group)`, `for_mode(mode)`, `validate(setting, raw: str) -> value`
-(raises `ValueError` with a user-readable message).
+- `list_devices(bin_dir) -> list[Device]` runs `llama-server --list-devices` and parses lines of the
+  form `  CUDA0: NVIDIA GeForce RTX 4060 Ti (16379 MiB, 15223 MiB free)`. This is the source of
+  truth for what llama.cpp can actually offload to, whatever the vendor.
+- Fallback when the binary is missing or prints no devices: `nvidia-smi` as in v1; otherwise no GPU.
+- `detect(bin_dir, runner=subprocess.run) -> Host`. The device list (ids, names, totals) is cached
+  per process; free memory is refreshed by `refresh(host)`: `nvidia-smi` when every device is CUDA
+  (cheap), otherwise `--list-devices` again, no more than once every 15 s.
+- RAM/CPU: `/proc` on Linux; `sysctl` on macOS; zeros elsewhere. `unified=True` when backend is
+  `metal`.
+- More than one device: budgets are computed per device and `tensor_split` is planned in
+  proportion to usable memory (section 5.3).
 
-### 3.2 Registry
+## 4. Settings, presets and config
 
-| key | flag | kind | default | unset | group | notes |
+### 4.1 Schema changes
+
+`Setting.modes` and the `cli` mode are dropped; every setting is a server setting. New entries:
+
+| key | flag | kind | default / unset | notes |
+|---|---|---|---|---|
+| fit | -fit | CHOICE on/off | "on" / "on" | let llama.cpp place layers for unset args |
+| fit_target | -fitt | INT (MiB) | 0 / 0 | free memory margin per device for `--fit` |
+| device | -dev | STR | "" / "" | comma-separated device ids; empty = all |
+| cache_reuse | --cache-reuse | INT | 0 / 0 | KV shifting chunk size; agents benefit |
+| sleep_idle | --sleep-idle-seconds | INT | 0 / 0 | unload after N idle seconds |
+| embedding | --embedding | BOOL | False | embeddings-only server |
+| pooling | --pooling | CHOICE | "" / "" | none, mean, cls, last, rank |
+| threads_batch | -tb | INT | 0 / 0 | prompt/batch threads |
+
+Each setting also gains `preset_key: str` (the flag without leading dashes) and
+`router_owned: bool` (host, port, api_key, alias: omitted from gateway presets because the router
+overrides them).
+
+### 4.2 Presets
+
+```python
+@dataclass
+class Preset:
+    intent: str                 # an intent key, or "custom"
+    profile: Profile            # concrete settings
+    source: str                 # "estimated" | "tuned" | "edited"
+    measured: Measurement | None  # see section 6
+```
+
+### 4.3 Config v3 (`config.json`)
+
+```json
+{
+  "version": 3,
+  "bin_dir": "...", "model_dirs": ["..."],
+  "headroom_pct": 10, "gauge_interval": 3.0,
+  "default_profile": { },
+  "default_intent": "chat",
+  "models": {
+    "/abs/model.gguf": {
+      "alias": "qwen3-8b",
+      "active": "agent",
+      "presets": { "agent": { "intent": "agent", "profile": { }, "source": "tuned", "measured": { } } }
+    }
+  },
+  "gateway": { "host": "127.0.0.1", "port": 8080, "api_key": "", "models_max": 1,
+               "sleep_idle": 600, "autostart": false },
+  "onboarded": true
+}
+```
+
+- Migration: a v2 `profiles[path]` becomes `models[path].presets["custom"]` with
+  `source: "edited"` and `active: "custom"`. The v2 file is copied to `config.v2.bak.json` once
+  before the first v3 save. Unknown keys are ignored, as in v1.
+- `default_profile` remains the base every plan starts from (sampling and server fields are
+  never changed by the planner).
+- Aliases are derived from the file stem (lower-case, quant suffix kept), unique across models,
+  and editable.
+- `seen.json` is retired; "new" means the model has no presets.
+
+## 5. Intents and the planner
+
+### 5.1 Intents (`intents.py`)
+
+An intent is declarative data, so adding one never touches the planner.
+
+```python
+@dataclass(frozen=True)
+class Intent:
+    key: str; label: str; description: str
+    ctx_min: int; ctx_target: int; ctx_max: int   # ctx is per slot; 0 ctx_max = trained ctx
+    slots: int
+    kv_quant: str            # "never" | "if_needed" | "prefer"   (q8_0 K/V)
+    spill: str               # "avoid" | "allow": may weights leave the GPU to reach ctx_target?
+    extra: dict[str, Any]    # fixed settings, e.g. {"cache_reuse": 256}
+    applies: Callable[[ModelInfo], bool]   # e.g. embed only for embedding models
+```
+
+| key | for | ctx per slot (min / target / max) | slots | KV q8 | spill | extra |
 |---|---|---|---|---|---|---|
-| ctx_size | -c | INT | 0 | 0 | MEMORY | 0 = model's trained max; step 1024 |
-| gpu_layers | -ngl | STR | "all" | "" | MEMORY | accepts "auto", "all" or an int; validate accordingly |
-| n_cpu_moe | --n-cpu-moe | INT | 0 | 0 | MEMORY | server+cli; only meaningful if `ModelInfo.expert_count > 0` |
-| cache_type_k | -ctk | CHOICE | "f16" | "f16" | MEMORY | f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 |
-| cache_type_v | -ctv | CHOICE | "f16" | "f16" | MEMORY | same choices; quantised V requires flash_attn != off |
-| flash_attn | -fa | CHOICE | "auto" | - | MEMORY | on, off, auto; always emitted |
-| batch_size | -b | INT | 0 | 0 | MEMORY | step 256 |
-| ubatch_size | -ub | INT | 0 | 0 | MEMORY | step 128; must be <= batch_size when both set |
-| load_mode | --load-mode | CHOICE | "auto" | "auto" | MEMORY | auto, none, mmap, mlock, mmap+mlock, dio |
-| tensor_split | -ts | STR | "" | "" | MEMORY | comma-separated fractions; only shown when >1 GPU |
-| threads | -t | INT | 0 | 0 | MEMORY | 0 = auto |
-| temp | --temp | FLOAT | -1 | -1 | SAMPLING | -1 = llama.cpp default (0.8); 0..2 |
-| top_k | --top-k | INT | -1 | -1 | SAMPLING | 0 disables |
-| top_p | --top-p | FLOAT | -1 | -1 | SAMPLING | 0..1 |
-| min_p | --min-p | FLOAT | -1 | -1 | SAMPLING | 0..1 |
-| repeat_penalty | --repeat-penalty | FLOAT | -1 | -1 | SAMPLING | 1.0 disables |
-| seed | -s | INT | -1 | -1 | SAMPLING | -1 random |
-| host | --host | STR | "127.0.0.1" | - | SERVER | server only |
-| port | --port | INT | 0 | - | SERVER | 0 = next free from 8080; resolved at launch, always emitted |
-| api_key | --api-key | STR | "" | "" | SERVER | masked input |
-| parallel | -np | INT | 0 | 0 | SERVER | server slots |
-| cont_batching | -cb / -nocb | BOOL | True | True | SERVER | emit `-nocb` only when False |
-| metrics | --metrics | BOOL | False | False | SERVER | |
-| alias | --alias | STR | "" | "" | SERVER | model name exposed by API |
-| draft_model | -md | PATH | "" | "" | SERVER | speculative decoding draft model |
-| mmproj | --mmproj | PATH | "" | "" | SERVER | vision projector |
-| extra_args | - | STR | "" | "" | GENERAL | appended last via shlex.split |
+| chat | interactive chat frontends | 8k / 16k / 32k | 1 | if_needed | avoid | |
+| agent | coding agents and tool harnesses | 32k / 64k / 128k | 1 | prefer | allow | cache_reuse 256 |
+| context | largest usable window | 32k / trained / trained | 1 | prefer | allow | |
+| speed | highest tokens per second | 4k / 8k / 16k | 1 | never | avoid | |
+| api | several concurrent clients | 4k / 8k / 16k | 4 | if_needed | avoid | metrics on |
+| embed | embedding models | trained | 4 | never | avoid | embedding on |
 
-Sampling fields use -1 as "unset" so that legitimate 0 values (top_k 0, min_p 0) can be expressed.
-`--jinja` is default-on in current llama.cpp and is therefore not a setting.
+`embed` applies only when the GGUF declares a pooling type; the others apply only when it does
+not. Total `-c` is `ctx_per_slot * slots` and `-np` is emitted explicitly.
 
-### 3.3 Help text
+### 5.2 Budget (`planner.py`)
 
-Hand-written in `schema.py`, sourced from `llama-server --help` and `tools/server/README.md`.
-Each `help` covers: what it does, when to change it, typical values, memory/speed consequences, and the raw flag.
-Plain ASCII.
+`Budget`, `kv_per_token`, `estimate_budget` and `verdict` move here unchanged in meaning, with two
+additions: the total is multiplied by the calibration factor for the backend (section 6.3,
+1.0 when nothing has been measured), and on a `unified` host VRAM and RAM are one pool.
 
-## 4. Profile and config (`config.py`)
-
-- `Profile` becomes a dataclass generated from `SETTINGS` (fields with defaults), plus:
-  `from_dict(data)` (ignores unknown keys, coerces types), `to_dict()`, `is_set(key)`,
-  `merged(**overrides)`.
-- Legacy configs: `gpu_layers` stored as int 99 maps to `"all"`; other legacy fields load unchanged.
-  `Config.load()` adds `version: 2` on first save.
-- `Config.profile_for(model)` unchanged. New: `Config.has_profile(model) -> bool` (drives the *New* badge).
-- `discover_models` unchanged, but callers run it in a worker.
-
-## 5. Command builder (`command.py`)
-
-`build_command(cfg, model, prof, mode, port) -> list[str]` iterates `for_mode(mode)` in registry order:
-
-- skip if `value == setting.unset`
-- BOOL: `cont_batching` emits `-nocb` when False; other BOOLs emit the flag when True
-- INT/FLOAT/CHOICE/STR/PATH: `[flag, str(value)]`
-- `port` uses the resolved port argument, `extra_args` is split with shlex and appended last.
-
-Also exposes `command_string(argv) -> str` (shlex.join) for the preview pane.
-
-## 6. GGUF reader (`gguf.py`)
+### 5.3 Planning
 
 ```python
 @dataclass(frozen=True)
-class ModelInfo:
-    path: Path; size: int                  # size = sum of all shards
-    architecture: str; name: str
-    n_layer: int; n_embd: int; n_head: int; n_head_kv: int   # n_head_kv = mean over layers if stored per layer
-    head_dim_k: int; head_dim_v: int       # attention.key_length / value_length, fallback n_embd // n_head
-    ctx_train: int; expert_count: int; file_type: int
-    sharded: int                           # split.count or 1
-
-def read_model_info(path: Path) -> ModelInfo   # raises GGUFError
-```
-
-Parsing: magic `GGUF`, version 2 or 3 (little endian), tensor_count u64, kv_count u64, then KV pairs.
-Value types 0..12 per the GGUF spec; arrays are skipped by reading element lengths (strings) or seeking
-(fixed-size types) so the tokenizer vocab is never materialised. Only keys with prefix `general.`,
-`{arch}.`, `split.` are decoded. Stop reading once kv_count is exhausted; never read tensor data.
-Shards: parse the `-00001-of-` file; size = sum of sibling shards present on disk.
-
-Caching: `ModelInfoCache` keyed by `(path, mtime)`, persisted to `~/.config/llamactl/gguf_cache.json`
-so restarts are instant. Reads run in a Textual worker; the UI shows metadata as it arrives.
-
-## 7. Recommender (`recommend.py`)
-
-### 7.1 Budget model
-
-```python
-@dataclass(frozen=True)
-class Budget:
-    weights: int        # ModelInfo.size
-    kv: int             # kv_per_token(info, ctk, ctv) * ctx  (ctx is the total pool; slots share it, each gets ctx // np)
-    compute: int        # see below
-    overhead: int       # 512 MiB fixed
-    def total(self) -> int
-    def fits_vram(self, host) -> bool; def fits_ram(self, host) -> bool
-
-BYTES_PER_ELEM = {"f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 34/32, "q5_1": 24/32, "q5_0": 22/32,
-                  "q4_1": 20/32, "q4_0": 18/32, "iq4_nl": 18/32}
-
-def kv_per_token(info, ctk, ctv) -> int:
-    return info.n_layer * info.n_head_kv * (info.head_dim_k * BYTES_PER_ELEM[ctk] + info.head_dim_v * BYTES_PER_ELEM[ctv])
-
-compute = max(256 MiB, n_embd * ubatch(512 default) * 4 bytes * 8)   # activation / scratch heuristic
-```
-
-`estimate_budget(info, prof, host) -> Budget` is also what the Models view and the editor's live impact use,
-so recommendations and displayed numbers can never disagree.
-
-### 7.2 Recommendation
-
-```python
-@dataclass(frozen=True)
-class Recommendation:
+class Plan:
+    intent: str
     profile: Profile
-    reasons: dict[str, str]    # key -> one-line reason, only for keys the recommender changed
+    reasons: dict[str, str]     # changed key -> one line with the numbers used
     budget: Budget
-    verdict: str               # "GPU", "GPU+CPU", "CPU", "NO"
+    verdict: str                # "GPU" | "GPU+CPU" | "CPU" | "NO"
+    ctx_per_slot: int
+    warnings: tuple[str, ...]   # e.g. "ctx below this intent's minimum"
 
-def recommend(info: ModelInfo, host: Host, base: Profile) -> Recommendation
+def plan(intent: Intent, info: ModelInfo, host: Host, base: Profile,
+         headroom_pct: float = 10, calibration: Calibration | None = None) -> Plan
+def plan_all(info, host, base, ...) -> dict[str, Plan]   # every applicable intent
 ```
 
-Algorithm (headroom = 10% of VRAM, minimum 512 MiB):
+Algorithm (usable VRAM = total minus headroom, per device):
 
-1. `threads` = physical cores (parse `cpu cores` x physical ids from `/proc/cpuinfo`; fallback `os.cpu_count() // 2`).
-2. `flash_attn` = "on" when a GPU is present, else "auto".
-3. Context: candidates `[4096, 8192, 16384, 32768, 65536, 131072]` filtered to `<= ctx_train`.
-   Pick the largest whose `Budget` (with weights on GPU) fits VRAM minus headroom using f16 KV.
-   If none fits at 4096 go to step 5.
-4. If the largest candidate did not reach the next tier but would with `q8_0` K/V, set both to `q8_0`
-   and take that tier (requires flash_attn on). Never recommend below q8_0.
-5. Offload when weights alone do not fit VRAM minus headroom:
-   - MoE (`expert_count > 0`): `gpu_layers = "all"`, `n_cpu_moe = ceil(n_layer * (1 - vram_avail / weights))`
-     clamped to `[1, n_layer]`. Reason explains experts live in RAM.
-   - Dense: `gpu_layers = floor(n_layer * vram_avail / weights)` and ctx recomputed with the remaining VRAM.
-   If weights do not fit VRAM + RAM free: verdict "NO", still return best-effort values.
-6. No GPU: `gpu_layers = "0"`, ctx chosen against RAM free, verdict "CPU".
-7. Sampling and server fields are never changed by the recommender.
+1. Fixed: `threads` = physical cores, `flash_attn` on with a GPU, `parallel` = slots, the
+   intent's `extra`.
+2. Whole model on GPU: choose the largest ctx tier between `ctx_min` and `ctx_target` that fits
+   with f16 KV. If `kv_quant` is `prefer`, or `if_needed` and the target was not reached, retry
+   with q8_0 K/V. On success: `gpu_layers = "all"`, `fit = "off"`, verdict `GPU`.
+3. Target not reached and `spill == "allow"`: keep the highest tier that fits in VRAM + free RAM,
+   leave `gpu_layers = "auto"`, set `fit = "on"` and `fit_target` = headroom in MiB, so llama.cpp
+   places the layers. For MoE models set `n_cpu_moe` as in v1 instead. Verdict `GPU+CPU`.
+4. Target not reached and `spill == "avoid"`: keep the largest tier that fits on GPU, even below
+   `ctx_min` (with a warning). Only if weights alone exceed usable VRAM, fall back to step 3.
+5. No GPU: `gpu_layers = "0"`, ctx against free RAM, verdict `CPU`. Nothing fits: verdict `NO`
+   with best-effort values.
+6. Multi-GPU: `tensor_split` proportional to each device's usable memory.
 
-Every changed key gets a reason string with the numbers used, e.g.
-`"65536 ctx -> 6.1 GB KV (f16); total 14.2 GB fits 16.0 GB VRAM with 1.6 GB headroom"`.
+llamactl owns the trade-offs that depend on intent (context, slots, KV precision); llama.cpp's
+`--fit` owns exact layer placement when the model does not fit; the tuner checks both.
 
-### 7.3 Tests (`tests/test_recommend.py`)
+## 6. Measured tuning
 
-Fixtures: synthetic `ModelInfo` for an 8B dense (32 layers, 8 kv heads, head_dim 128, ctx 131072, 8.5 GB),
-a 35B MoE (48 layers, 4 kv heads, 128, 262144, 20 GB, 128 experts), and a 1B (16 layers) model; hosts of
-16 GB VRAM / 24 GB RAM and no GPU / 32 GB RAM. Assert the chosen tier, offload decision, verdict and that
-`reasons` keys equal the changed keys. `kv_per_token` checked against a hand-computed value.
+### 6.1 Measurement
 
-## 8. UI
-
-### 8.1 Shell (`app.py`)
-
-```
-+------------+------------------------------------------------------+
-| llamactl   | VRAM [########....] 10.2/16.0 G   RAM [###.....] 5/23 G |
-|------------+------------------------------------------------------|
-| > Models   |                                                      |
-|   Sessions |                 active view                          |
-|   HF       |                                                      |
-|   Settings |                                                      |
-|------------+------------------------------------------------------|
-| status bar: last action result (persists until next action)       |
-| footer: key bindings of the active view                           |
-+-------------------------------------------------------------------+
+```python
+@dataclass(frozen=True)
+class Measurement:
+    ok: bool; error: str             # load failure reason (out of memory, timeout, crash)
+    load_s: float
+    vram_used: int; ram_used: int    # bytes, delta against the pre-launch snapshot
+    prompt_tps: float; gen_tps: float  # from the /completion `timings` object
+    at: str                          # ISO timestamp
+    build: str                       # llama-server --version commit
 ```
 
-- Sidebar is a `ListView`; `ContentSwitcher` holds the four views. Keys `1-4` and `Tab` move between views;
-  each view defines its own `BINDINGS` so the footer is contextual.
-- `ResourceGauges` refresh from a `@work(thread=True, exclusive=True)` host poller every 3 s. `hostinfo.detect()`
-  never runs on the UI thread. Gauges turn yellow above 80%, red above 95%.
-- Status bar is written only by user actions; health/progress updates go to the Sessions view and `notify()`.
-- All screens: Esc returns, `F1` (also `?` outside text inputs) opens context help when a setting field is focused.
-  Printable keys are swallowed by focused `Input`s, so every editor action also has an F-key or ctrl binding:
-  `F1` help, `F2` apply recommended, `ctrl+r` reset field, `ctrl+s` save.
+### 6.2 Tuner (`tuner.py`)
 
-### 8.2 Models view
+```python
+class Runner(Protocol):                       # the only part that touches processes / HTTP
+    def measure(self, model: Path, profile: Profile) -> Measurement: ...
 
-- Left (3fr): `DataTable` columns `Model | Size | Params | Quant | Fits | Ctx | Profile`.
-  `Fits` is colored (`GPU` green, `GPU+CPU` yellow, `CPU` yellow, `NO` red, `...` while metadata loads).
-  `Profile` shows `custom`, `default`, or `New` (no profile and never recommended).
-- Right (2fr) detail pane for the highlighted row:
-  - metadata (arch, layers, kv heads, trained ctx, experts, file type, shards)
-  - `BudgetPanel`: weights / KV / compute / overhead stacked bar vs VRAM and RAM bars, with the numbers
-  - profile summary (only non-default settings) and the exact command line
-  - buttons: `Launch server (l)`, `CLI chat (c)`, `Edit profile (e)`, `Recommend (R)`, `Delete profile`
-- `r` rescans in a worker; the table shows a "scanning" placeholder, never freezes.
-- Highlighting a `New` model shows a one-line prompt in the pane: "No profile yet. Press R for a recommendation."
+def tune(intent, info, host, base, runner, *, max_trials=4,
+         progress: Callable[[TrialEvent], None] | None = None) -> TuneResult
+```
 
-### 8.3 Profile editor (`screens/profile.py`)
+- `ServerRunner` launches `llama-server` on a free port bound to 127.0.0.1, waits for `/health`
+  (timeout scaled by model size), snapshots device memory, posts a fixed prompt to `/completion`
+  (`n_predict` 128, `cache_prompt` false, fixed seed), reads `timings`, then stops the process
+  group. It refuses to start when less than the plan's budget is free and offers to unload
+  gateway models first.
+- Search starts from `plan()` and is bounded by `max_trials`:
+  - load failed: step down (next lower ctx tier; then q8_0 KV if the intent allows; then spill);
+  - loaded with more than one ctx tier of VRAM slack and below `ctx_target`: step up one tier;
+  - `GPU+CPU` plans: one extra trial with `threads` = all logical cores, keep the faster.
+- Score: among trials that loaded and satisfy `ctx_min`, the highest ctx up to `ctx_target`, then
+  the highest `gen_tps` (`speed` scores by `gen_tps` first).
+- The winner is saved as the model's preset with `source: "tuned"` and its `Measurement`.
 
-Full screen. Left (3fr) scrollable `Collapsible` sections: Memory & offload, Sampling, Server & API, Extra.
-Right (2fr) sticky `BudgetPanel` + command preview, recomputed on every change (debounced 150 ms).
+### 6.3 Calibration (`calibration.py`)
 
-`SettingField` widget per registry entry:
+`tuning.json` stores every trial (model path, mtime, intent, profile, estimated budget,
+measurement, backend). `Calibration.factor(backend)` is the median of
+`measured vram / estimated total` over successful all-GPU trials, clamped to 0.8..1.5. The
+planner applies it, so estimates on this machine improve with every tune. Preset entries whose
+model mtime or llama.cpp build changed are flagged "stale" in the UI.
 
-- INT/FLOAT: `Input` with `Integer`/`Number` validator and min/max; `+`/`-` keys step by `setting.step`.
-- CHOICE: `Select`. BOOL: `Switch`. STR/PATH: `Input` (PATH validates existence on save, warning not error).
-- `gpu_layers`: `Input` accepting `auto`, `all` or int, validated as such.
-- Fields irrelevant to the model are disabled with a reason (e.g. `n_cpu_moe` on a dense model,
-  `tensor_split` with one GPU).
-- Below the input: the hint; below that, the `impact` line when the setting defines one
-  (ctx_size, cache_type_k/v, gpu_layers, n_cpu_moe, parallel, batch sizes).
-- Invalid fields are outlined red with the message; `Save` is disabled while any field is invalid.
+## 7. Serving
 
-Actions: `Save (ctrl+s)`, `Cancel (esc)`, `Apply recommended (R)` (fills fields, shows reasons inline as a
-highlighted impact line, nothing saved), `Reset field to default (ctrl+r)`, `Help (?)`.
-The same screen edits the default profile (title "Default profile", no model metadata, impact lines use the
-host only).
+### 7.1 Gateway (`gateway.py`)
 
-### 8.4 Recommendation screen (`screens/recommend.py`)
+One `llama-server` in router mode is the default way to serve:
 
-Pushed after an HF download finishes and from `Recommend` on a model. Shows:
-verdict + `BudgetPanel`, then a table `Setting | Current | Recommended | Why` for the changed keys.
-Buttons: `Accept and save`, `Open in editor` (opens ProfileEditor pre-filled), `Skip`.
-Skip marks the model as "seen" in `~/.config/llamactl/seen.json` so the *New* badge clears.
+```
+llama-server --models-preset ~/.config/llamactl/gateway.ini --models-max N \
+             --host H --port P [--api-key K]
+```
 
-### 8.5 Sessions view
+- `render_presets(cfg) -> str` builds the INI from the same registry as the argv builder.
+  One section per preset: the model's active preset is `[alias]`; every other preset is
+  `[alias:intent]`. So a client asks for `qwen3-8b` or `qwen3-8b:agent`. Each section carries
+  `model = /abs/path` plus the preset's non-unset, non-router-owned settings. `[*]` carries
+  `sleep-idle-seconds` from the gateway settings. Boolean negation follows llama.cpp's `no-` rule.
+- `Gateway` class: `start()`, `stop()`, `status()`, `models()` (`GET /models`),
+  `load(name)`, `unload(name)`, `reload()` (rewrite INI, `GET /models?reload=1`). State (pid, url,
+  log) persists in `gateway.json` so the gateway outlives the TUI, like sessions do.
+- Saving or tuning a preset regenerates the INI and reloads a running gateway.
+- `models_max` defaults to 1 per GPU-sized model; the Home view explains what will be unloaded
+  when a second model is requested.
 
-- Table columns `Name | State | URL | Port | Slots | Uptime | Kind`. State badge styles:
-  `starting` dim, `loading` yellow spinner, `ready` green, `down` grey, `crashed` red.
-- Detail pane: last 60 log lines for managed sessions, `/props` JSON for external, both refreshed only on change
-  (existing diff logic kept). Slots in use are read from `/slots` when `metrics`/slots endpoint is reachable;
-  otherwise `-`.
-- Actions: `Chat (t)`, `Stop (s)` with confirmation for managed sessions, `Attach URL (a)`, `Open log (o)`
-  (shows full log in a scrollable modal), `Copy URL (y)`.
-- Table rows are updated in place by row key; no clear/rebuild per tick.
+### 7.2 Standalone and attached servers (`sessions.py`)
 
-### 8.6 HF view
+Kept for pinned servers on their own port (`serve --standalone`) and for attaching external
+URLs. `launch_server(cfg, model, preset_name)` takes the preset explicitly.
 
-Behaviour unchanged except: host detection off the UI thread; `Fits` uses `recommend.estimate_budget`
-with a size-only `ModelInfo` placeholder (KV unknown -> shown as "weights only"); after a successful download
-the file is parsed and `RecommendationScreen` is pushed.
+## 8. CLI (`cli.py`)
 
-### 8.7 Settings view
+`llamactl` with no arguments opens the TUI. Subcommands (all accept `--json` where they print
+data; models are named by alias, file stem or unique substring):
 
-Replaces the two `FormScreen` uses: bin dir (validated: `llama-server` must exist), model dirs (list editor:
-add/remove rows), HF token (masked, same storage as today), gauge refresh interval, default headroom %.
+| Command | Does |
+|---|---|
+| `llamactl hw` | devices, RAM, CPU, calibration factor |
+| `llamactl ls` | models with size, quant, verdict per intent, presets |
+| `llamactl plan MODEL [--for INTENT]` | print the plan, reasons and exact command; changes nothing |
+| `llamactl tune MODEL [--for INTENT] [--trials N]` | measured tune, saves the preset |
+| `llamactl serve MODEL [--for INTENT] [--standalone] [--port P]` | ensure a preset exists (plan if not), then load it in the gateway (starting it if needed) or start a standalone server |
+| `llamactl up` / `llamactl down` | start / stop the gateway |
+| `llamactl ps` | gateway models and standalone sessions with state |
+| `llamactl load NAME` / `unload NAME` | gateway model control |
+| `llamactl stop NAME\|--all` | stop standalone servers |
+| `llamactl logs NAME [-f]` | print or follow a log |
 
-### 8.8 Responsiveness rules
+Exit codes: 0 ok, 1 runtime failure, 2 usage / unknown or ambiguous model.
 
-- Workers for: host detection, model discovery, GGUF parsing, HF requests, health probes, process spawn.
-- `DataTable` updates by row key (`update_cell`/`add_row(key=)`), never `clear()` on a timer.
-- Any computation in an `impact` callback must be O(1) arithmetic on cached `ModelInfo`.
+## 9. TUI
 
-## 9. Phases
+Five views in a sidebar shell (shell, gauges and status bar carry over from v1):
 
-Each phase lands as one or more Conventional Commits on `main` (repo initialised in phase 1). No pushing.
+1. **Home** - hardware card (devices with bars), gateway card (state, endpoint URL, `y` copies
+   base URL, a ready-made `curl`/OpenAI snippet), what is loaded now, and "next step" prompts
+   (no models, untuned presets, stale presets).
+2. **Models** - table `Model | Size | Quant | Best for | Preset | Measured`. The detail pane
+   shows one row per applicable intent with verdict, ctx and tok/s (estimated or measured).
+   `Enter` serve (intent picker when several), `t` tune, `e` edit preset, `p` plan details,
+   `Delete` remove preset.
+3. **Serving** - gateway models (loaded / sleeping / unloaded / failed) and standalone or
+   attached servers in one table; log tail; load, unload, stop, attach, copy URL.
+4. **Discover** - Hugging Face search and download (carried over). File lists mark the largest
+   quant that fully fits the GPU for the default intent; after a download the intent picker opens.
+5. **Settings** - llama.cpp path, model dirs, gateway settings, headroom, HF token, default
+   intent.
 
-1. **Core** - `schema.py`, schema-driven `Profile`, `command.py`, `gguf.py`, `recommend.py`, `hostinfo`
-   physical-core detection, pytest suite, `AGENTS.md` with run/test commands. Existing UI keeps working
-   through the new builder (behaviour-preserving).
-2. **Profile editor** - `SettingField`, `BudgetPanel`, `ProfileEditor`, `HelpPanel`; wire `e`/`d` to it.
-3. **Shell + Models view** - sidebar, gauges, background refresh, detail pane; remove the tab layout.
-4. **Sessions view** - states, in-place updates, log modal, confirm on stop.
-5. **HF + recommendation flow** - `RecommendationScreen`, post-download hand-off, *New* badge, Settings view,
-   delete `forms.py`.
-6. **Chat** - deferred; not part of this spec.
+Screens: `IntentPicker` (cards with verdict/ctx/why per intent), `PlanScreen` (was
+RecommendationScreen: reasons table, accept / edit / tune), `TuneScreen` (live trial table with
+progress, cancel), `PresetEditor` (was ProfileEditor, unchanged mechanics), `Onboarding`.
 
-## 10. Verification
+Onboarding runs when `onboarded` is false: (1) locate llama.cpp (`bin_dir`, then `PATH`) and show
+its version; (2) show detected hardware; (3) confirm model directories and scan; (4) no models:
+go to Discover; otherwise pick a model and an intent; (5) plan, optional tune; (6) start the
+gateway and show the endpoint. Every step can be skipped.
 
-- `pytest -q` green for every phase.
-- `python -m llamactl` starts, each view reachable by key, no tracebacks in `textual console`.
-- Textual `Pilot` smoke tests: open editor, type an invalid ctx, assert Save disabled; apply recommended;
-  save and reload config round-trips.
-- Manual: launch the Q8 9B model with a recommended profile on the 16 GB GPU and confirm `ready`.
+## 10. Testing
+
+- Pure core (`hardware` parsing, `planner`, `intents`, `calibration`, `tuner` with a fake
+  `Runner`, `gateway.render_presets`, `command`, config migration, `cli` with injected services)
+  is covered by pytest without starting llama.cpp.
+- Textual `Pilot` smoke tests for each view and screen.
+- `pytest -q` is green at every commit.
+- Manual check per serving phase on the reference machine (RTX 4060 Ti 16 GB): generated
+  `gateway.ini` is accepted by the real router, and a tune of a local model completes.
+
+## 11. Phases
+
+Each phase lands as Conventional Commits on the `redesign-v2` branch. No pushing.
+
+1. **Foundations** - remove chat and the cli mode; `hardware.py`; schema additions; config v3
+   with presets and migration; `library.py`.
+2. **Planner** - `intents.py`, `planner.py` (replacing `recommend.py`), calibration read path.
+3. **Gateway** - preset INI rendering, router process and API client, sessions take presets.
+4. **Tuner** - `Measurement`, `ServerRunner`, search, calibration store.
+5. **CLI** - all subcommands over the core.
+6. **TUI** - Home, Models, Serving, IntentPicker, PlanScreen, TuneScreen, PresetEditor.
+7. **Onboarding and Discover** - first-run flow, fit-aware file lists.
+8. **Release prep** - README, CHANGELOG, AGENTS.md, version 0.2.0 (no tag, no publish).

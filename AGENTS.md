@@ -14,7 +14,9 @@ Textual TUI for launching and managing llama.cpp servers. Python 3.14 venv at `.
 .venv/bin/pytest -q
 ```
 
-The redesign spec is at [docs/SPEC.md](docs/SPEC.md); implement it in the phases it defines.
+The v2 design is at [docs/SPEC.md](docs/SPEC.md); implement it in the phases it defines and tick
+items in [docs/TODO.md](docs/TODO.md) in the commit that completes them. Work on the
+`redesign-v2` branch.
 
 ## House rules
 

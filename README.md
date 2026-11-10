@@ -103,4 +103,4 @@ All state lives in `~/.config/llamactl/`:
 - `hf_token` - Hugging Face access token
 - `logs/` - per-session llama-server logs
 
-Design spec: [docs/SPEC.md](docs/SPEC.md)
+Design spec: [docs/SPEC.md](docs/SPEC.md) (v2, in progress; see [docs/TODO.md](docs/TODO.md))
