@@ -158,7 +158,7 @@ class SessionsView(BaseView):
         """Bind a port and spawn llama-server off the UI thread."""
         try:
             s = self.app.store.launch_server(self.app.cfg, model)
-        except (RuntimeError, OSError) as e:
+        except (RuntimeError, OSError, LookupError) as e:
             self.app.call_from_thread(
                 self.notify, f"Could not launch {Path(model).stem}: {e}",
                 title="Launch failed", severity="error", timeout=15)

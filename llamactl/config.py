@@ -18,6 +18,7 @@ DEFAULT_MODEL_DIRS = [str(Path.home() / "models")]
 CONFIG_VERSION = 3
 BACKUP_NAME = "config.v2.bak.json"
 CUSTOM = "custom"        # preset name/intent used for hand-edited settings
+PRESET_SEP = "@"         # joins alias and preset name: "qwen3-8b@agent" (":" is rewritten by llama.cpp)
 SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
 
 

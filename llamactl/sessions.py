@@ -13,10 +13,35 @@ from pathlib import Path
 import httpx
 
 from .command import build_command
-from .config import CONFIG_DIR, LOG_DIR, Config
+from .config import CONFIG_DIR, LOG_DIR, PRESET_SEP, Config, Profile
 
 STATE_FILE = CONFIG_DIR / "sessions.json"
 BASE_PORT = 8080
+
+
+def pid_alive(pid: int) -> bool:
+    """True when the process exists and is not a zombie of ours.
+
+    A child of this process that already exited is reaped here, so it does not look alive.
+
+    Args:
+        pid: Process id (0 or negative is never alive).
+
+    Returns:
+        Whether the process is running.
+    """
+    if pid <= 0:
+        return False
+    try:
+        if os.waitpid(pid, os.WNOHANG) != (0, 0):
+            return False
+    except ChildProcessError:
+        pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 @dataclass
@@ -34,18 +59,7 @@ class Session:
     @property
     def alive(self) -> bool:
         """Managed: process exists. External: assumed present until health fails."""
-        if self.external:
-            return True
-        try:
-            if os.waitpid(self.pid, os.WNOHANG) != (0, 0):
-                return False
-        except ChildProcessError:
-            pass
-        try:
-            os.kill(self.pid, 0)
-            return True
-        except OSError:
-            return False
+        return True if self.external else pid_alive(self.pid)
 
 
 def port_free(port: int, host: str = "127.0.0.1") -> bool:
@@ -105,23 +119,57 @@ class SessionStore:
     def _ports(self) -> set[int]:
         return {int(s.url.rsplit(":", 1)[1]) for s in self.sessions if s.url.rsplit(":", 1)[1].isdigit()}
 
-    def launch_server(self, cfg: Config, model: str) -> Session:
-        """Start a detached llama-server; it survives TUI exit."""
-        prof = cfg.profile_for(model)
+    def launch_server(self, cfg: Config, model: str, preset_name: str | None = None) -> Session:
+        """Start a detached llama-server; it survives TUI exit.
+
+        Args:
+            cfg: Global config.
+            model: Path to the GGUF file.
+            preset_name: Preset to serve; None uses the model's active preset, or the default
+                profile when the model has none. The session id and name carry the preset
+                (``stem@preset``) when it is not the active one.
+
+        Returns:
+            The new session (also stored and saved).
+
+        Raises:
+            LookupError: When `preset_name` is not a preset of the model.
+            RuntimeError: When no free port is found.
+            OSError: When the process or its log cannot be started.
+        """
+        prof = self._profile(cfg, model, preset_name)
         port = prof.port or next_free_port(self._ports(), prof.host)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        sid = f"{Path(model).stem}-{port}"
+        ent = cfg.models.get(model)
+        explicit = preset_name is not None and (ent is None or preset_name != ent.active)
+        name = Path(model).stem + (PRESET_SEP + preset_name if explicit else "")
+        sid = f"{name}-{port}"
         log = LOG_DIR / f"{sid}.log"
         with log.open("ab") as fh:
             proc = subprocess.Popen(
-                build_command(cfg, model, prof, "server", port),
+                build_command(cfg, model, prof, port),
                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        s = Session(sid, Path(model).stem, f"http://{prof.host}:{port}", proc.pid, str(log), started=time.time())
+        s = Session(sid, name, f"http://{prof.host}:{port}", proc.pid, str(log), started=time.time())
         self.sessions.append(s)
         self.save()
         return s
+
+    @staticmethod
+    def _profile(cfg: Config, model: str, preset_name: str | None) -> Profile:
+        """Profile to launch: the named preset, else the active one, else the default profile.
+
+        Raises:
+            LookupError: When a named preset does not exist.
+        """
+        if preset_name is None:
+            return cfg.profile_for(model)
+        preset = cfg.preset(model, preset_name)
+        if preset is None:
+            have = ", ".join(cfg.models[model].presets) if model in cfg.models else "none"
+            raise LookupError(f"{Path(model).stem} has no preset '{preset_name}' (has: {have or 'none'})")
+        return preset.profile
 
     def attach(self, url: str) -> Session:
         """Register an already-running server by URL."""
