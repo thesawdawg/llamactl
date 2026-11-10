@@ -5,7 +5,7 @@ from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import Label, ProgressBar
 
-from ..hostinfo import Host
+from ..hardware import Host
 
 
 class ResourceGauges(Widget):

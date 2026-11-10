@@ -15,7 +15,7 @@ from ..command import build_command, command_string
 from ..config import Profile, discover_models
 from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import GGUFError, ModelInfo, read_model_info
-from ..hostinfo import Host
+from ..hardware import Host
 from ..recommend import estimate_budget, verdict
 from ..screens.profile import ProfileEditor
 from ..screens.recommend import RecommendationScreen

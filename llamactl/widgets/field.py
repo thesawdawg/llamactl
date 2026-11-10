@@ -11,7 +11,7 @@ from textual.widgets import Input, Label, Select, Switch
 
 from .. import schema
 from ..gguf import ModelInfo
-from ..hostinfo import Host
+from ..hardware import Host
 from ..schema import Kind, Setting
 
 

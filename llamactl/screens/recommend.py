@@ -13,7 +13,7 @@ from .. import recommend, schema
 from ..config import Config
 from ..fmt import FITS_STYLE
 from ..gguf import ModelInfo
-from ..hostinfo import Host
+from ..hardware import Host
 from ..widgets.budget import BudgetPanel
 
 

@@ -8,7 +8,7 @@ import pytest
 
 from llamactl.config import Profile
 from llamactl.gguf import ModelInfo
-from llamactl.hostinfo import Gpu, Host
+from llamactl.hardware import Device, Host
 from llamactl.recommend import kv_per_token, recommend
 
 
@@ -36,7 +36,7 @@ def small1b() -> ModelInfo:
 
 @pytest.fixture
 def gpu_host() -> Host:
-    return Host(gpus=[Gpu("G", int(16e9), int(16e9))], ram_total=int(24e9), ram_free=int(24e9),
+    return Host(gpus=[Device.of("CUDA0", "G", int(16e9), int(16e9))], ram_total=int(24e9), ram_free=int(24e9),
                 cpu_threads=16, cpu_cores=8)
 
 

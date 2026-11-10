@@ -5,7 +5,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Label, ProgressBar
 
-from ..hostinfo import Host
+from ..hardware import Host
 from ..recommend import Budget, verdict
 
 _PARTS = (("weights", "red"), ("KV", "blue"), ("compute", "green"), ("overhead", "yellow"))

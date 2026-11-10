@@ -12,7 +12,7 @@ from llamactl import hf, recommend
 from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
 from llamactl.gguf import ModelInfo
-from llamactl.hostinfo import Gpu, Host
+from llamactl.hardware import Device, Host
 from llamactl.screens.confirm import ConfirmScreen
 from llamactl.screens.profile import ProfileEditor
 from llamactl.screens.prompt import PromptScreen
@@ -27,7 +27,7 @@ def _info() -> ModelInfo:
 
 
 def _host() -> Host:
-    return Host(gpus=[Gpu("G", int(16e9), int(16e9))], ram_total=int(24e9), ram_free=int(24e9),
+    return Host(gpus=[Device.of("CUDA0", "G", int(16e9), int(16e9))], ram_total=int(24e9), ram_free=int(24e9),
                 cpu_threads=16, cpu_cores=8)
 
 

@@ -7,7 +7,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import ContentSwitcher, Footer, Header, Label, ListItem, ListView
 
-from . import hostinfo
+from . import hardware
 from .config import Config
 from .gguf import ModelInfoCache
 from .sessions import SessionStore
@@ -48,7 +48,7 @@ class LlamaCtl(App):
         self.cfg = Config.load()
         self.store = SessionStore()
         self.info_cache = ModelInfoCache()
-        self.host = hostinfo.Host()
+        self.host = hardware.Host()
         self.views: dict[str, BaseView] = {}
 
     def compose(self) -> ComposeResult:
@@ -114,10 +114,14 @@ class LlamaCtl(App):
     @work(thread=True, exclusive=True, group="host")
     def poll_host(self) -> None:
         """Detect host resources off the UI thread and push to gauges + active view."""
-        host = hostinfo.detect()
+        bin_dir = self.cfg.bin_dir
+        if self.host.ram_total:
+            host = hardware.refresh(self.host, bin_dir)
+        else:
+            host = hardware.detect(bin_dir)
         self.call_from_thread(self._host_update, host)
 
-    def _host_update(self, host: hostinfo.Host) -> None:
+    def _host_update(self, host: hardware.Host) -> None:
         self.host = host
         self.query_one("#gauges", ResourceGauges).update_host(host)
         current = self.query_one("#main", ContentSwitcher).current

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import Profile
 from .gguf import ModelInfo
-from .hostinfo import Host
+from .hardware import Host
 
 MiB = 1 << 20
 GB = 1e9

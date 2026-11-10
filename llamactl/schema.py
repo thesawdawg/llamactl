@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from .config import Profile
     from .gguf import ModelInfo
-    from .hostinfo import Host
+    from .hardware import Host
 
 
 class Kind(StrEnum):

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from textual.widget import Widget
 
-from ..hostinfo import Host
+from ..hardware import Host
 
 if TYPE_CHECKING:
     from ..app import LlamaCtl

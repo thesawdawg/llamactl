@@ -12,7 +12,7 @@ from .. import recommend, schema
 from ..command import build_command, command_string
 from ..config import Config, Profile
 from ..gguf import ModelInfo
-from ..hostinfo import Host
+from ..hardware import Host
 from ..recommend import estimate_budget, placeholder_info
 from ..schema import Group
 from ..widgets.budget import BudgetPanel

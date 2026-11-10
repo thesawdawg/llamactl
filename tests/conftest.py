@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from llamactl import config, gguf, hostinfo, sessions
-from llamactl.hostinfo import Gpu, Host
+from llamactl import config, gguf, hardware, sessions
+from llamactl.hardware import Device, Host
 
 _U32, _F32, _STR, _ARR, _I32 = 4, 6, 8, 9, 5
 
@@ -89,7 +89,9 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
     ):
         for name, val in attrs.items():
             monkeypatch.setattr(mod, name, val)
-    host = Host(gpus=[Gpu("GPU", int(16e9), int(16e9))], ram_total=int(24e9),
+    host = Host(gpus=[Device.of("CUDA0", "GPU", int(16e9), int(16e9))], ram_total=int(24e9),
                 ram_free=int(24e9), cpu_threads=16, cpu_cores=8, cpu_name="Test CPU")
-    monkeypatch.setattr(hostinfo, "detect", lambda: host)
+    hardware.reset_cache()
+    monkeypatch.setattr(hardware, "detect", lambda bin_dir=None, runner=None, clock=None: host)
+    monkeypatch.setattr(hardware, "refresh", lambda h, bin_dir=None, runner=None, clock=None: host)
     return SimpleNamespace(cfg_dir=cfg_dir, model_dir=model_dir, host=host)
