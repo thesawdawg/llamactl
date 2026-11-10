@@ -12,6 +12,7 @@ from llamactl.calibration import Calibration, Trial
 from llamactl.config import Profile
 from llamactl.gguf import ModelInfo
 from llamactl.hardware import Device, Host
+from llamactl.measure import Measurement
 from llamactl.planner import (Budget, Plan, estimate_budget, gpu_limit, kv_per_token, plan,
                               plan_all, spill_limit, verdict)
 
@@ -526,7 +527,7 @@ def test_every_gpu_verdict_fits_and_ctx_within_trained(models) -> None:
 
 def _trial(ratio: float, backend: str) -> Trial:
     return Trial("/m.gguf", 1.0, "chat", {}, 1000, "GPU", backend,
-                 {"ok": True, "vram_used": 1000 * ratio})
+                 Measurement(ok=True, vram_used=round(1000 * ratio)))
 
 
 def _borderline_host(info: ModelInfo) -> Host:

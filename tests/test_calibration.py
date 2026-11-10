@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,13 +10,15 @@ import pytest
 
 from llamactl import calibration
 from llamactl.calibration import Calibration, Trial
+from llamactl.config import Preset, Profile
+from llamactl.measure import Measurement
 
 
 def _trial(vram: float, est: int = 10_000, backend: str = "cuda", verdict: str = "GPU",
            ok: bool = True) -> Trial:
     return Trial(model="/m.gguf", mtime=1.0, intent="chat", profile={"ctx_size": 8192},
                  estimated_total=est, verdict=verdict, backend=backend,
-                 measurement={"ok": ok, "vram_used": vram, "gen_tps": 50.0})
+                 measurement=Measurement(ok=ok, vram_used=int(vram), gen_tps=50.0))
 
 
 def test_trial_round_trip() -> None:
@@ -91,3 +94,106 @@ def test_default_path_follows_isolated_fixture(isolated: SimpleNamespace) -> Non
     (isolated.cfg_dir / "tuning.json").write_text(
         json.dumps({"trials": [_trial(13_000).to_dict()]}))
     assert Calibration.load().factor("cuda") == pytest.approx(1.3)
+
+
+# --------------------------------------------------------------------------- write path
+
+def test_record_save_load_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "sub" / "tuning.json"
+    cal = Calibration()
+    cal.record(_trial(12_000))
+    cal.record(_trial(14_000, backend="vulkan"))
+    cal.save(path)
+    raw = json.loads(path.read_text())
+    assert raw["version"] == 1 and len(raw["trials"]) == 2
+    back = Calibration.load(path)
+    assert back.trials == cal.trials
+    assert back.factor("cuda") == pytest.approx(1.2) and back.factor("vulkan") == pytest.approx(1.4)
+
+
+def test_save_defaults_to_the_tuning_file(isolated: SimpleNamespace) -> None:
+    cal = Calibration([_trial(13_000)])
+    cal.save()
+    assert (isolated.cfg_dir / "tuning.json").is_file()
+    assert Calibration.load().factor("cuda") == pytest.approx(1.3)
+
+
+def test_save_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed write leaves the old file untouched and no temp file behind."""
+    path = tmp_path / "tuning.json"
+    Calibration([_trial(12_000)]).save(path)
+    before = path.read_text()
+
+    def boom(src: str, dst: str) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(calibration.os, "replace", boom)
+    with pytest.raises(OSError):
+        Calibration([_trial(12_000), _trial(14_000)]).save(path)
+    assert path.read_text() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["tuning.json"]
+
+
+def test_save_goes_through_a_temp_file_in_the_same_folder(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[Path, Path]] = []
+    real = os.replace
+    monkeypatch.setattr(calibration.os, "replace",
+                        lambda a, b: (seen.append((Path(a), Path(b))), real(a, b))[1])
+    Calibration([_trial(12_000)]).save(tmp_path / "tuning.json")
+    (src, dst), = seen
+    assert src.parent == dst.parent == tmp_path and src != dst
+
+
+def test_trials_for_filters_by_model_and_intent() -> None:
+    a, b = _trial(12_000), _trial(13_000)
+    b = Trial(**{**b.__dict__, "model": "/other.gguf", "intent": "agent"})
+    cal = Calibration([a, b])
+    assert cal.trials_for("/m.gguf") == [a]
+    assert cal.trials_for("/other.gguf", "agent") == [b]
+    assert cal.trials_for("/other.gguf", "chat") == [] and cal.trials_for("/none") == []
+
+
+def _tuned(build: str = "b1", at: str = "t1", source: str = "tuned") -> Preset:
+    return Preset("chat", Profile(), source, Measurement(ok=True, build=build, at=at))
+
+
+def _stale_setup(tmp_path: Path, mtime: float | None = None) -> tuple[Calibration, Path]:
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"x")
+    t = _trial(12_000)
+    t = Trial(**{**t.__dict__, "model": str(model), "mtime": mtime or model.stat().st_mtime,
+                 "measurement": Measurement(ok=True, vram_used=12_000, build="b1", at="t1")})
+    return Calibration([t]), model
+
+
+def test_fresh_preset_is_not_stale(tmp_path: Path) -> None:
+    cal, model = _stale_setup(tmp_path)
+    assert cal.is_stale(_tuned(), model, "b1") is False
+
+
+def test_new_build_makes_a_preset_stale(tmp_path: Path) -> None:
+    cal, model = _stale_setup(tmp_path)
+    assert cal.is_stale(_tuned(), model, "b2") is True
+    assert cal.is_stale(_tuned(), model, "") is False          # unknown build: cannot tell
+    assert cal.is_stale(_tuned(build=""), model, "b2") is False
+
+
+def test_changed_model_file_makes_a_preset_stale(tmp_path: Path) -> None:
+    cal, model = _stale_setup(tmp_path)
+    os.utime(model, (1_000_000, 1_000_000))
+    assert cal.is_stale(_tuned(), model, "b1") is True
+
+
+def test_untuned_or_unmeasured_presets_are_never_stale(tmp_path: Path) -> None:
+    cal, model = _stale_setup(tmp_path)
+    assert cal.is_stale(_tuned(source="estimated"), model, "b2") is False
+    assert cal.is_stale(Preset("chat", Profile(), "tuned", None), model, "b2") is False
+
+
+def test_stale_check_tolerates_missing_trial_or_file(tmp_path: Path) -> None:
+    cal, model = _stale_setup(tmp_path)
+    assert cal.is_stale(_tuned(at="other"), model, "b1") is False     # no matching trial
+    assert Calibration().is_stale(_tuned(), model, "b1") is False
+    model.unlink()
+    assert cal.is_stale(_tuned(), model, "b1") is False

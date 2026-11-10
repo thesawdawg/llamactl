@@ -36,7 +36,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 - [ ] `Measurement`, `Runner` protocol, `ServerRunner`
 - [ ] Search (step down / step up / threads trial) and scoring
-- [ ] `calibration.py` store, stale detection
+- [x] `calibration.py` store, stale detection
 - [ ] Manual: tune a local model end to end
 
 ## Phase 5 - CLI
