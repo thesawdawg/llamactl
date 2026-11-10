@@ -144,6 +144,22 @@ def test_launch_model_without_presets_uses_default_profile(two_presets) -> None:
         SessionStore().launch_server(cfg, "/models/other.gguf", "agent")
 
 
+def test_launch_port_override_and_busy_port(two_presets) -> None:
+    cfg, model = two_presets
+    store = SessionStore()
+    s = store.launch_server(cfg, model, "agent", port=48123)
+    assert s.url.endswith(":48123") and "48123" in _FakePopen.calls[-1]
+    with pytest.raises(RuntimeError, match="port 48123.*in use"):
+        store.launch_server(cfg, model, port=48123)     # held by the first session
+
+
+def test_load_without_persist_does_not_write(isolated: SimpleNamespace) -> None:
+    SessionStore(persist=False)
+    assert not sessions.STATE_FILE.exists()
+    SessionStore()
+    assert sessions.STATE_FILE.exists()
+
+
 def test_pid_alive() -> None:
     import os
     assert sessions.pid_alive(os.getpid()) and not sessions.pid_alive(0)

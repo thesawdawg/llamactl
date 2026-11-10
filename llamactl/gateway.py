@@ -271,7 +271,7 @@ def terminate_group(pid: int, timeout: float = STOP_TIMEOUT,
         send(signal.SIGKILL)
 
 
-def _log_reason(log: Path) -> str:
+def log_reason(log: Path) -> str:
     """The log line that most likely says why a process exited: its last error, else its last line.
 
     Args:
@@ -307,11 +307,14 @@ class Gateway:
         settle: Seconds `start` watches the new process for an immediate exit (the router
             exits at once on a preset it cannot parse); 0 skips the check.
         sleep: Sleep function used while settling (injectable).
+        read_only: Never touch ``gateway.json``: a dead gateway's state is reported as "not
+            running" but not deleted (for commands that only look, like ``llamactl ps``).
     """
 
     def __init__(self, cfg: Config, popen: Callable[..., Any] = subprocess.Popen,
                  http: Callable[..., Any] = httpx.Client, settle: float = SETTLE_SECONDS,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep, read_only: bool = False) -> None:
+        self.read_only = read_only
         self.cfg = cfg
         self._popen = popen
         self._http = http
@@ -332,7 +335,8 @@ class Gateway:
         """The remembered state of a running gateway, else None (a dead one is forgotten)."""
         st = GatewayState.load()
         if st is not None and not pid_alive(st.pid):
-            GatewayState.clear()
+            if not self.read_only:
+                GatewayState.clear()
             return None
         return st
 
@@ -404,7 +408,7 @@ class Gateway:
             self._sleep(0.1)
             waited += 0.1
         if self._settle > 0 and not pid_alive(proc.pid):
-            raise GatewayError(f"the gateway exited at once: {_log_reason(log)} (log: {log})")
+            raise GatewayError(f"the gateway exited at once: {log_reason(log)} (log: {log})")
         st = GatewayState(proc.pid, self.listen_url, str(log), time.time())
         st.save()
         return st

@@ -104,3 +104,14 @@ def test_old_cache_entry_is_reread(tmp_path: Path) -> None:
     del raw[str(info.path)]["pooling_type"]  # shape written by earlier versions
     cache_file.write_text(json.dumps(raw))
     assert ModelInfoCache(cache_file).get(info.path) is None
+
+
+def test_read_only_cache_never_writes_and_corrupt_cache_is_empty(tmp_path: Path) -> None:
+    info = read_model_info(_pooling_file(tmp_path, 1))
+    cache_file = tmp_path / "cache.json"
+    cache_file.write_text("{not json")
+    cache = ModelInfoCache(cache_file, writable=False)
+    assert cache.get(info.path) is None
+    cache.put(info)
+    assert cache.get(info.path) == info                  # remembered in memory
+    assert cache_file.read_text() == "{not json"         # but the file is untouched

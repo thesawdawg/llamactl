@@ -179,13 +179,19 @@ class ModelInfoCache:
     """Disk cache of ModelInfo keyed by path, invalidated on mtime change.
 
     Args:
-        cache_file: JSON file used for persistence.
+        cache_file: JSON file used for persistence. A missing or corrupt file is an empty cache.
+        writable: When False, `put` remembers entries in memory only and never writes the file
+            (for read-only commands).
     """
 
-    def __init__(self, cache_file: Path | None = None) -> None:
+    def __init__(self, cache_file: Path | None = None, writable: bool = True) -> None:
         self.cache_file = cache_file or CACHE_FILE
-        self._data: dict = (json.loads(self.cache_file.read_text())
-                            if self.cache_file.exists() else {})
+        self.writable = writable
+        try:
+            data = json.loads(self.cache_file.read_text())
+        except (OSError, ValueError):
+            data = {}
+        self._data: dict = data if isinstance(data, dict) else {}
 
     def get(self, path: Path) -> ModelInfo | None:
         """Cached info for `path`, or None when missing, stale or written before pooling_type.
@@ -212,5 +218,7 @@ class ModelInfoCache:
         """
         self._data[str(info.path)] = {**asdict(info), "path": str(info.path),
                                       "mtime": info.path.stat().st_mtime}
+        if not self.writable:
+            return
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
         self.cache_file.write_text(json.dumps(self._data, indent=2))

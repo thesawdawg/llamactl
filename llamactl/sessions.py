@@ -99,17 +99,24 @@ def probe(url: str, timeout: float = 1.0) -> dict | None:
 
 
 class SessionStore:
-    """Persisted list of sessions so the TUI can be closed and reopened."""
+    """Persisted list of sessions so the TUI can be closed and reopened.
 
-    def __init__(self) -> None:
+    Args:
+        persist: Write the pruned list back when loading. False for commands that only look
+            (``llamactl ps``) and must not touch ``sessions.json``.
+    """
+
+    def __init__(self, persist: bool = True) -> None:
         self.sessions: list[Session] = []
+        self.persist = persist
         self.load()
 
     def load(self) -> None:
-        """Read state, dropping dead managed sessions."""
+        """Read state, dropping dead managed sessions (and saving, unless read-only)."""
         raw = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else []
         self.sessions = [s for s in (Session(**r) for r in raw) if s.alive]
-        self.save()
+        if self.persist:
+            self.save()
 
     def save(self) -> None:
         """Write state to disk."""
@@ -119,7 +126,8 @@ class SessionStore:
     def _ports(self) -> set[int]:
         return {int(s.url.rsplit(":", 1)[1]) for s in self.sessions if s.url.rsplit(":", 1)[1].isdigit()}
 
-    def launch_server(self, cfg: Config, model: str, preset_name: str | None = None) -> Session:
+    def launch_server(self, cfg: Config, model: str, preset_name: str | None = None,
+                      port: int | None = None) -> Session:
         """Start a detached llama-server; it survives TUI exit.
 
         Args:
@@ -128,17 +136,23 @@ class SessionStore:
             preset_name: Preset to serve; None uses the model's active preset, or the default
                 profile when the model has none. The session id and name carry the preset
                 (``stem@preset``) when it is not the active one.
+            port: Listen port overriding the preset's; None keeps the preset's, else the first
+                free port from `BASE_PORT`.
 
         Returns:
             The new session (also stored and saved).
 
         Raises:
             LookupError: When `preset_name` is not a preset of the model.
-            RuntimeError: When no free port is found.
+            RuntimeError: When no free port is found, or the requested `port` is in use.
             OSError: When the process or its log cannot be started.
         """
         prof = self._profile(cfg, model, preset_name)
-        port = prof.port or next_free_port(self._ports(), prof.host)
+        if port is not None:
+            if port in self._ports() or not port_free(port, prof.host):
+                raise RuntimeError(f"port {port} on {prof.host} is already in use")
+        else:
+            port = prof.port or next_free_port(self._ports(), prof.host)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         ent = cfg.models.get(model)
         explicit = preset_name is not None and (ent is None or preset_name != ent.active)

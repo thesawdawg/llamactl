@@ -355,6 +355,29 @@ def test_cancel_before_anything_ran(dense8b: ModelInfo) -> None:
     assert r.message == "cancelled before any trial ran"
 
 
+def test_keyboard_interrupt_keeps_the_trials_so_far(dense27b: ModelInfo) -> None:
+    calls: list[Profile] = []
+
+    def answer(p: Profile) -> Measurement:
+        calls.append(p)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return ok(11)
+
+    r = _run("chat", dense27b, _host(16), Scripted(answer), max_trials=10)
+    assert len(calls) == 2 and len(r.trials) == 1       # the interrupted trial is dropped
+    assert r.cancelled and r.ok and r.message.startswith("cancelled; best so far")
+
+
+def test_keyboard_interrupt_in_the_first_trial(dense8b: ModelInfo) -> None:
+    def answer(p: Profile) -> Measurement:
+        raise KeyboardInterrupt
+
+    r = _run("chat", dense8b, _host(), Scripted(answer))
+    assert r.cancelled and not r.ok and r.trials == []
+    assert r.message == "cancelled before any trial ran"
+
+
 # --------------------------------------------------------------------------- save_result
 
 def test_save_result_stores_the_tuned_preset_and_all_trials(isolated: SimpleNamespace,

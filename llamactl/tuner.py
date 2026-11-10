@@ -379,7 +379,9 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
 
     Starts from `planner.plan` and follows `next_candidate` until it has nothing left to try,
     `max_trials` launches happened, or `cancel` returns True (checked before each trial). A
-    plan that cannot fit this machine at all is not launched.
+    Ctrl-C (``KeyboardInterrupt`` out of the runner) ends the search the same way: the
+    interrupted trial is dropped and the trials before it are kept. A plan that cannot fit this
+    machine at all is not launched.
 
     Args:
         intent: What the model is for.
@@ -413,7 +415,11 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
         index = len(history) + 1
         if progress:
             progress(TrialEvent(index, max_trials, "start", cand.summary))
-        m = runner.measure(info.path, cand.profile)
+        try:
+            m = runner.measure(info.path, cand.profile)
+        except KeyboardInterrupt:      # Ctrl-C: the runner has stopped its server; keep what we have
+            cancelled = True
+            break
         history.append((cand, m))
         trials.append(Trial(
             model=str(info.path), mtime=mtime, intent=intent.key, profile=cand.profile.to_dict(),

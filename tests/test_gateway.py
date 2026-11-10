@@ -310,7 +310,7 @@ def test_start_is_idempotent_while_running(env) -> None:
     assert env.gw.start() == first and len(FakePopen.calls) == 1
 
 
-def test_start_reports_an_immediate_exit_with_the_log_reason(env) -> None:
+def test_start_reports_an_immediate_exit_with_thelog_reason(env) -> None:
     """Regression: the real router exits at once on an option it does not know."""
     def dies(argv: list[str], stdout: Any = None, **kw: Any) -> SimpleNamespace:
         stdout.write(b"0.00.001.116 I srv  llama_server: initializing ...\n"
@@ -332,15 +332,15 @@ def test_start_settles_when_the_process_stays_up(env) -> None:
     assert gw.start().pid == 777
 
 
-def test_log_reason_fallbacks(tmp_path: Path) -> None:
-    from llamactl.gateway import _log_reason
-    assert _log_reason(tmp_path / "missing.log") == "no log output"
+def testlog_reason_fallbacks(tmp_path: Path) -> None:
+    from llamactl.gateway import log_reason
+    assert log_reason(tmp_path / "missing.log") == "no log output"
     empty = tmp_path / "e.log"
     empty.write_text("\n")
-    assert _log_reason(empty) == "no log output"
+    assert log_reason(empty) == "no log output"
     plain = tmp_path / "p.log"
     plain.write_text("first\nlast words\n")
-    assert _log_reason(plain) == "last words"
+    assert log_reason(plain) == "last words"
 
 
 def test_start_reports_a_launch_failure(env) -> None:
@@ -358,6 +358,13 @@ def test_running_forgets_a_dead_gateway(env) -> None:
     assert not (env.cfg_dir / "gateway.json").exists()
     env.alive.add(st.pid)
     assert not env.gw.running                  # state was cleared, nothing to find
+
+
+def test_read_only_gateway_does_not_forget_a_dead_state(env) -> None:
+    env.gw.start()
+    ro = Gateway(env.cfg, popen=FakePopen, http=FakeHttp(), settle=0, read_only=True)
+    assert not ro.running
+    assert (env.cfg_dir / "gateway.json").exists()
 
 
 def test_stop_signals_the_group_and_clears_state(env, monkeypatch: pytest.MonkeyPatch) -> None:
