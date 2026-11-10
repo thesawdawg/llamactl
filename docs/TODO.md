@@ -19,7 +19,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 2 - Planner
 
-- [ ] `intents.py`: six intents as data, `applies` rules
+- [x] `intents.py`: six intents as data, `applies` rules
 - [ ] `planner.py`: budget, `plan`, `plan_all`, warnings, multi-GPU split, unified memory
 - [ ] Calibration factor applied to estimates (read path)
 - [ ] Delete `recommend.py`; port its tests
