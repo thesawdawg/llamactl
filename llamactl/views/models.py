@@ -17,7 +17,7 @@ from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import ModelInfo
 from ..hardware import Host
 from ..planner import estimate_budget, verdict
-from ..screens.profile import ProfileEditor
+from ..screens.preset_editor import PresetEditor
 from ..screens.recommend import RecommendationScreen
 from ..widgets.budget import BudgetPanel
 from .base import BaseView
@@ -221,9 +221,9 @@ class ModelsView(BaseView):
             self.update_detail()
 
         self.app.push_screen(
-            ProfileEditor(self.app.cfg, self.app.cfg.profile_for(model), self.app.host,
-                          info, Path(model).name, auto_recommend=auto_recommend,
-                          calibration=self.app.calibration), done)
+            PresetEditor(self.app.cfg, self.app.cfg.profile_for(model), self.app.host,
+                         info, Path(model).name, apply_plan=auto_recommend,
+                         calibration=self.app.calibration), done)
 
     def open_recommendation(self, model: str) -> None:
         """Push the RecommendationScreen for a model; "editor" opens the editor.
@@ -255,7 +255,7 @@ class ModelsView(BaseView):
                     self.app.cfg.save()
 
             self.app.push_screen(
-                ProfileEditor(self.app.cfg, self.app.cfg.default_profile, self.app.host,
+                PresetEditor(self.app.cfg, self.app.cfg.default_profile, self.app.host,
                               None, "Default profile"), done)
             return
         self.open_editor(model, auto_recommend=False)

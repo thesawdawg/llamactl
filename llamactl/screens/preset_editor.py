@@ -1,4 +1,4 @@
-"""ProfileEditor: full-screen profile editor with live impact and budget."""
+"""PresetEditor: full-screen editor for one preset (or the default profile) with live impact."""
 from __future__ import annotations
 
 from textual import on
@@ -8,12 +8,13 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Footer, Header, Label, Static
 
-from .. import intents, planner, schema
+from .. import actions, schema
 from ..calibration import Calibration
 from ..command import build_command, command_string
 from ..config import Config, Profile
 from ..gguf import ModelInfo
 from ..hardware import Host
+from ..intents import Intent
 from ..planner import estimate_budget, placeholder_info
 from ..schema import Group
 from ..widgets.budget import BudgetPanel
@@ -25,8 +26,8 @@ GROUP_TITLES = {Group.MEMORY: "Memory & offload", Group.SAMPLING: "Sampling",
 DEBOUNCE = 0.15
 
 
-class ProfileEditor(Screen[Profile | None]):
-    """Edit a Profile: typed fields, live impacts, budget and command preview.
+class PresetEditor(Screen[Profile | None]):
+    """Edit a preset's Profile: typed fields, live impacts, budget and command preview.
 
     Args:
         cfg: Global config (bin_dir for the preview command).
@@ -34,18 +35,22 @@ class ProfileEditor(Screen[Profile | None]):
         host: Host snapshot.
         info: Parsed model metadata, or None for the default profile.
         title: Screen title.
-        auto_recommend: Apply the plan for the default intent once the editor opens.
+        intent: The preset's intent: what "Apply plan" plans for. None uses the configured
+            default intent that fits the model.
+        apply_plan: Fill the fields from the plan once the editor opens (a preset that does not
+            exist yet starts this way).
         calibration: Measured data correcting the estimates, or None.
 
-    Returns (via dismiss): the edited Profile on save, None on cancel.
+    Returns (via dismiss): the edited Profile on save, None on cancel. The caller stores it as
+    a preset with ``source="edited"``; without a model (the default profile) there is no plan.
     """
 
     BINDINGS = [
         Binding("ctrl+s", "save", "Save"),
         Binding("escape", "cancel", "Cancel"),
-        Binding("f2", "apply_recommended", "Recommend"),
+        Binding("f2", "apply_plan", "Apply plan"),
         Binding("f1", "help", "Help"),
-        Binding("R", "apply_recommended", "Apply recommended", show=False),
+        Binding("R", "apply_plan", "Apply plan", show=False),
         Binding("ctrl+r", "reset_field", "Reset field"),
         Binding("question_mark", "help", "Help", show=False),
     ]
@@ -60,14 +65,15 @@ class ProfileEditor(Screen[Profile | None]):
     """
 
     def __init__(self, cfg: Config, prof: Profile, host: Host,
-                 info: ModelInfo | None, title: str, auto_recommend: bool = False,
-                 calibration: Calibration | None = None) -> None:
+                 info: ModelInfo | None, title: str, *, intent: Intent | None = None,
+                 apply_plan: bool = False, calibration: Calibration | None = None) -> None:
         super().__init__()
         self.cfg = cfg
         self.host = host
         self.info = info
         self.title_text = title
-        self._auto_recommend = auto_recommend
+        self.intent = intent
+        self._apply_plan_on_open = apply_plan
         self.calibration = calibration
         self._draft = prof
         self.fields: dict[str, SettingField] = {}
@@ -98,7 +104,7 @@ class ProfileEditor(Screen[Profile | None]):
                 yield Static("", id="preview")
                 with Horizontal(id="buttons"):
                     yield Button("Save", id="save", variant="primary")
-                    yield Button("Apply recommended", id="rec")
+                    yield Button("Apply plan", id="plan")
                     yield Button("Cancel", id="cancel")
                 yield Label("", id="ed_status")
         yield Footer()
@@ -106,8 +112,8 @@ class ProfileEditor(Screen[Profile | None]):
     def on_mount(self) -> None:
         self.sub_title = self.title_text
         self._recompute()
-        if self._auto_recommend:
-            self.action_apply_recommended()
+        if self._apply_plan_on_open:
+            self.action_apply_plan()
 
     def _rebuild_draft(self) -> None:
         """Rebuild the draft profile; invalid fields keep the previous value."""
@@ -167,20 +173,20 @@ class ProfileEditor(Screen[Profile | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
-    def action_apply_recommended(self) -> None:
+    def action_apply_plan(self) -> None:
+        """Refill the fields the planner changes from `actions.plan_for` for the intent."""
         if self.info is None:
-            return self._say("No model - recommendations need parsed model metadata.")
-        intent = intents.resolve(self.cfg.default_intent, self.info)
-        rec = planner.plan(intent, self.info, self.host, self._draft, self.cfg.headroom_pct,
-                           self.calibration)
+            return self._say("No model - plans need parsed model metadata.")
+        intent = self.intent or actions.choose_intent(None, self.cfg.default_intent, self.info)
+        rec = actions.plan_for(self.cfg, self.info, self.host, intent, self.calibration)
         for key, reason in rec.reasons.items():
             f = self.fields[key]
             f.set_value(getattr(rec.profile, key))
             f.show_reason(reason)
-        self._draft = rec.profile
+        self._draft = self._draft.merged(**{k: getattr(rec.profile, k) for k in rec.reasons})
         self._recompute()
         warn = f" Warning: {'; '.join(rec.warnings)}." if rec.warnings else ""
-        self._say(f"Recommended ({intent.label}): {rec.verdict}.{warn} "
+        self._say(f"Plan applied ({intent.label}): {rec.verdict}.{warn} "
                   "Review, then F1 for help or Ctrl+S to save.")
 
     def action_reset_field(self) -> None:
@@ -198,9 +204,9 @@ class ProfileEditor(Screen[Profile | None]):
     def _save_btn(self) -> None:
         self.action_save()
 
-    @on(Button.Pressed, "#rec")
-    def _rec_btn(self) -> None:
-        self.action_apply_recommended()
+    @on(Button.Pressed, "#plan")
+    def _plan_btn(self) -> None:
+        self.action_apply_plan()
 
     @on(Button.Pressed, "#cancel")
     def _cancel_btn(self) -> None:

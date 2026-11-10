@@ -10,13 +10,13 @@ from types import SimpleNamespace
 from textual.app import App
 from textual.widgets import Button, ContentSwitcher, DataTable, Input, Label
 
-from llamactl import hf, intents, planner
+from llamactl import actions, hf, intents, planner
 from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
 from llamactl.gguf import ModelInfo
 from llamactl.hardware import Device, Host
 from llamactl.screens.confirm import ConfirmScreen
-from llamactl.screens.profile import ProfileEditor
+from llamactl.screens.preset_editor import PresetEditor
 from llamactl.screens.prompt import PromptScreen
 from llamactl.screens.recommend import RecommendationScreen
 
@@ -34,9 +34,9 @@ def _host() -> Host:
 
 
 class _App(App[None]):
-    """Minimal app that pushes a ProfileEditor and records its result."""
+    """Minimal app that pushes a PresetEditor and records its result."""
 
-    def __init__(self, screen: ProfileEditor) -> None:
+    def __init__(self, screen: PresetEditor) -> None:
         super().__init__()
         self.editor = screen
         self.result = None
@@ -46,7 +46,7 @@ class _App(App[None]):
 
 
 def _make(info: ModelInfo | None = None) -> _App:
-    return _App(ProfileEditor(Config(), Profile(), _host(), info, "test"))
+    return _App(PresetEditor(Config(), Profile(), _host(), info, "test"))
 
 
 async def test_invalid_input_disables_save() -> None:
@@ -77,7 +77,7 @@ async def test_ctx_updates_impact_and_budget() -> None:
         assert "Verdict: " in verdict
 
 
-async def test_apply_recommended_and_save() -> None:
+async def test_apply_plan_and_save() -> None:
     info, host = _info(), _host()
     app = _make(info)
     async with app.run_test() as pilot:
@@ -95,6 +95,21 @@ async def test_apply_recommended_and_save() -> None:
         await pilot.pause()
         assert isinstance(app.result, Profile)
         assert app.result.ctx_size == rec.profile.ctx_size
+
+
+async def test_apply_plan_uses_the_editors_intent() -> None:
+    info, host = _info(), _host()
+    app = _App(PresetEditor(Config(), Profile(), host, info, "test", intent=intents.by_key["agent"],
+                            apply_plan=True))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.4)
+        want = actions.plan_for(Config(), info, host, intents.by_key["agent"])
+        assert app.editor._draft.ctx_size == want.profile.ctx_size
+        assert app.editor._draft.cache_reuse == 256
+        assert "Agent" in str(app.editor.query_one("#ed_status", Label).render())
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app.result.cache_reuse == 256
 
 
 async def test_default_profile_no_model() -> None:
@@ -142,7 +157,7 @@ async def test_shell_models_view(isolated: SimpleNamespace, gguf_file: Path) -> 
         app.views["models"].model_table.focus()
         await pilot.pause()
         await pilot.press("e")
-        assert await _wait(pilot, lambda: isinstance(app.screen, ProfileEditor))
+        assert await _wait(pilot, lambda: isinstance(app.screen, PresetEditor))
         await pilot.press("escape")
         await pilot.pause()
 
