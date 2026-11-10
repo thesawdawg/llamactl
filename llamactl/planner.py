@@ -440,10 +440,12 @@ def _choose(env: _Env) -> _Layout:
     pick = _search(env, env.gpu_limit)
     if pick and pick.ctx >= env.target:
         return _Layout(pick.ctx, pick.kv, _GPU)
-    if pick and env.intent.spill == SPILL_AVOID:
-        if pick.ctx < env.floor:
-            return _spill_to_floor(env) or _Layout(pick.ctx, pick.kv, _GPU)
-        return _Layout(pick.ctx, pick.kv, _GPU)
+    if env.intent.spill == SPILL_AVOID:
+        if pick and pick.ctx >= env.floor:
+            return _Layout(pick.ctx, pick.kv, _GPU)
+        # no usable GPU-only context (or none at all): spill, but only far enough for the floor
+        return _spill_to_floor(env) or (_Layout(pick.ctx, pick.kv, _GPU) if pick
+                                        else _choose_spill(env, None))
     return _choose_spill(env, pick)
 
 

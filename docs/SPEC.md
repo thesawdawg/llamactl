@@ -226,11 +226,13 @@ Algorithm (usable VRAM = total minus headroom, per device):
    leave `gpu_layers = "auto"`, set `fit = "on"` and `fit_target` = headroom in MiB, so llama.cpp
    places the layers. For MoE models set `n_cpu_moe` as in v1 instead. Verdict `GPU+CPU`.
 4. Target not reached and `spill == "avoid"`: keep the largest tier that fits on GPU when it is
-   at least `ctx_min`. When it is below `ctx_min`, spill instead (the step 3 mechanism) but aim
-   only for `ctx_min`, not `ctx_target`: verdict `GPU+CPU` with a warning that part of the model
-   runs on the CPU to keep a usable context. If even spilling cannot reach `ctx_min` (no spare
-   RAM, or unified memory), keep the largest GPU tier and warn that it is below the minimum.
-   If weights alone exceed usable VRAM, fall back to step 3 as is.
+   at least `ctx_min`. When no GPU-only tier reaches `ctx_min` (including when the weights alone
+   exceed usable VRAM), spill instead (the step 3 mechanism) but aim only for `ctx_min`, never
+   `ctx_target`: verdict `GPU+CPU` with a warning that part of the model runs on the CPU to keep
+   a usable context. If even spilling cannot reach `ctx_min` (no spare RAM, or unified memory),
+   keep the largest GPU tier, or the largest tier spilling allows, and warn that it is below the
+   minimum. A spill-"avoid" intent therefore never plans more than `ctx_min` by spilling, so more
+   VRAM never gives a smaller context for the same intent and model.
 5. No GPU: `gpu_layers = "0"`, ctx against free RAM, verdict `CPU`. Nothing fits: verdict `NO`
    with best-effort values.
 6. Multi-GPU: `tensor_split` proportional to each device's usable memory.

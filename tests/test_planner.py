@@ -164,12 +164,12 @@ GRID = {
     ("27b", "agent"): (65536, 65536, 1, "q8_0", "auto", "on", 1525, 0, "GPU+CPU", 0),
     ("27b", "context"): (131072, 131072, 1, "q8_0", "auto", "on", 1525, 0, "GPU+CPU", 0),
     ("27b", "speed"): (4096, 4096, 1, "f16", "all", "off", 0, 0, "GPU", 0),
-    ("27b", "api"): (8192, 32768, 4, "f16", "auto", "on", 1525, 0, "GPU+CPU", 1),
-    ("moe", "chat"): (16384, 16384, 1, "f16", "all", "off", 0, 20, "GPU+CPU", 1),
+    ("27b", "api"): (4096, 16384, 4, "f16", "auto", "on", 1525, 0, "GPU+CPU", 1),
+    ("moe", "chat"): (8192, 8192, 1, "f16", "all", "off", 0, 18, "GPU+CPU", 1),
     ("moe", "agent"): (65536, 65536, 1, "q8_0", "all", "off", 0, 24, "GPU+CPU", 0),
     ("moe", "context"): (131072, 131072, 1, "q8_0", "all", "off", 0, 32, "GPU+CPU", 0),
-    ("moe", "speed"): (8192, 8192, 1, "f16", "all", "off", 0, 18, "GPU+CPU", 1),
-    ("moe", "api"): (8192, 32768, 4, "f16", "all", "off", 0, 24, "GPU+CPU", 1),
+    ("moe", "speed"): (4096, 4096, 1, "f16", "all", "off", 0, 17, "GPU+CPU", 1),
+    ("moe", "api"): (4096, 16384, 4, "f16", "all", "off", 0, 20, "GPU+CPU", 1),
     ("embed", "embed"): (512, 2048, 4, "f16", "all", "off", 0, 0, "GPU", 0),
 }
 
@@ -298,23 +298,33 @@ def test_avoid_spill_to_minimum_on_moe_moves_experts() -> None:
 
 
 def test_avoid_with_nothing_fitting_the_gpu_spills(dense27b: ModelInfo) -> None:
-    """On 14 GB the weights alone leave no room for any KV: step 3 takes over."""
+    """On 14 GB the weights alone leave no room for any KV: spill, but only to the minimum."""
     p = _by("chat", dense27b, _gpu_host(14))
     assert p.verdict == "GPU+CPU" and p.profile.gpu_layers == "auto"
-    assert p.ctx_per_slot == 16384 and p.warnings == (SPILL_WARNING,)
+    assert p.ctx_per_slot == 8192      # the chat minimum, not its 16384 target
+    assert p.warnings == (FLOOR_WARNING.format(ctx=8192, intent="chat", floor=8192),)
 
 
 def test_avoid_spills_when_slots_do_not_fit(dense27b: ModelInfo, gpu_host: Host) -> None:
     """Weights fit 16 GB but four slots of KV do not."""
     p = _by("api", dense27b, gpu_host)
-    assert p.verdict == "GPU+CPU" and p.warnings == (SPILL_WARNING,)
+    assert p.verdict == "GPU+CPU" and p.ctx_per_slot == 4096      # the api minimum
+    assert p.warnings == (FLOOR_WARNING.format(ctx=4096, intent="api", floor=4096),)
 
 
 def test_weights_exceed_vram_falls_back_to_spill(dense8b: ModelInfo, tiny_host: Host) -> None:
     p = _by("speed", dense8b, tiny_host)
     assert p.verdict == "GPU+CPU" and p.profile.gpu_layers == "auto"
-    assert p.profile.fit_target == 572 and p.warnings == (SPILL_WARNING,)
-    assert p.ctx_per_slot == 8192
+    assert p.profile.fit_target == 572
+    assert p.ctx_per_slot == 4096      # the speed minimum, not its 8192 target
+    assert p.warnings == (FLOOR_WARNING.format(ctx=4096, intent="speed", floor=4096),)
+
+
+def test_avoid_spill_short_of_the_minimum_keeps_both_warnings(dense8b: ModelInfo) -> None:
+    """Spilling can only reach 4096 here, below the 8192 minimum: say so, and that it spills."""
+    p = _by("chat", dense8b, _gpu_host(6, ram_gb=4.2))
+    assert p.verdict == "GPU+CPU" and p.ctx_per_slot == 4096
+    assert p.warnings == ("ctx 4096 per slot is below the chat minimum of 8192", SPILL_WARNING)
 
 
 def test_verdict_no_has_best_effort_values(moe35b: ModelInfo, tiny_host: Host) -> None:
@@ -446,23 +456,17 @@ VRAM_STEPS = (4, 6, 8, 12, 16, 24, 48, 96)
 
 
 def test_more_vram_never_shrinks_ctx(models) -> None:
-    """Among plans that stay fully on the GPU, and for every intent that may spill."""
-    for info in models.values():
-        for i in intents.applicable(info):
-            ctx = [_by(i.key, info, _gpu_host(v, ram_gb=64)) for v in VRAM_STEPS]
-            gpu_only = [p.ctx_per_slot for p in ctx if p.verdict == "GPU"]
-            assert gpu_only == sorted(gpu_only), (info.size, i.key)
-            if i.spill == "allow":
-                every = [p.ctx_per_slot for p in ctx]
-                assert every == sorted(every), (info.size, i.key)
+    """For every intent, spill-"avoid" included, more VRAM never gives a smaller context."""
+    steps = [n / 2 for n in range(4, 100)]      # 2 .. 49.5 GB in half-GB steps
+    for ram in (8, 24, 64):
+        for info in models.values():
+            for i in intents.applicable(info):
+                ctx = [_by(i.key, info, _gpu_host(v, ram_gb=ram)).ctx_per_slot for v in steps]
+                assert ctx == sorted(ctx), (ram, info.size, i.key)
 
 
 def test_context_reaches_the_minimum_whenever_memory_allows(models) -> None:
-    """With plenty of RAM no fitting plan is left below its intent's minimum context.
-
-    (Plans of spill-"avoid" intents are not monotonic across the GPU / GPU+CPU boundary: a
-    spilling plan may target more context than the smallest all-GPU one, by design.)
-    """
+    """With plenty of RAM no fitting plan is left below its intent's minimum context."""
     for vram in VRAM_STEPS:
         host = _gpu_host(vram, ram_gb=64)
         for info in models.values():
