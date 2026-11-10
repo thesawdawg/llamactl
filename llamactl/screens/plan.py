@@ -63,6 +63,7 @@ class PlanScreen(Screen[str | None]):
         self.plan = actions.plan_for(cfg, info, host, intent, calibration)
 
     def compose(self) -> ComposeResult:
+        """Verdict, budget, planned settings table, message line and action buttons."""
         yield Header()
         v = self.plan.verdict
         with Vertical(id="plan_body"):
@@ -86,6 +87,7 @@ class PlanScreen(Screen[str | None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        """Fill the budget panel and the Setting/Base/Planned/Why table."""
         self.sub_title = f"Plan - {self.intent.label}"
         self.query_one(BudgetPanel).update_budget(self.plan.budget, self.host,
                                                   self.cfg.headroom_pct)
@@ -100,6 +102,7 @@ class PlanScreen(Screen[str | None]):
         self.query_one("#save", Button).focus()
 
     def _say(self, text: str, style: str = "") -> None:
+        """Show a line under the table."""
         self.query_one("#plan_msg", Label).update(Text(text, style=style))
 
     def action_save(self) -> None:
@@ -135,5 +138,6 @@ class PlanScreen(Screen[str | None]):
 
     @on(Button.Pressed)
     def _pressed(self, event: Button.Pressed) -> None:
+        """Route a button to its action."""
         {"save": self.action_save, "edit": self.action_edit, "tune": self.action_tune,
          "serve": self.action_serve, "cancel": self.action_cancel}[str(event.button.id)]()

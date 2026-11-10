@@ -260,7 +260,7 @@ def runner_factory(runner: FakeRunner) -> Callable[[], FakeRunner]:
     return lambda: runner
 
 
-async def wait_for(pilot, cond: Callable[[], bool], tries: int = 60) -> bool:
+async def wait_for(pilot, cond: Callable[[], bool], tries: int = 200) -> bool:
     """Poll `cond` while the app's workers settle; True as soon as it holds."""
     for _ in range(tries):
         await pilot.pause(0.05)

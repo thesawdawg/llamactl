@@ -70,6 +70,7 @@ class ServingView(BaseView):
         self._want = ""                     # row key to select once it exists
 
     def compose(self) -> ComposeResult:
+        """Gateway line, the one table, an empty-state line and the log pane."""
         with Vertical():
             yield Static("", id="sv_gateway")
             yield DataTable(id="sv_table", cursor_type="row")
@@ -79,6 +80,7 @@ class ServingView(BaseView):
                               max_lines=2000)
 
     def on_mount(self) -> None:
+        """Add the columns, start the log refresh and draw the current snapshot."""
         t = self.table
         for label, key in COLUMNS:
             t.add_column(label, key=key)
@@ -95,6 +97,7 @@ class ServingView(BaseView):
         return self.query_one("#sv_table", DataTable)
 
     def focus_primary(self) -> None:
+        """Focus the table and show its log."""
         self.table.focus()
         self.refresh_detail(force=True)
 
@@ -124,6 +127,7 @@ class ServingView(BaseView):
         return out
 
     def on_serving(self, snapshot: ServingSnapshot) -> None:
+        """Update the table in place by key, then the line, hint and log."""
         t = self.table
         keep = self.selected_key()
         rows = self.rows(snapshot)
@@ -146,14 +150,17 @@ class ServingView(BaseView):
         self.refresh_detail()
 
     def on_presets_changed(self, paths) -> None:
+        """Redraw the gateway line."""
         if self.app.snapshot is not None:
             self._gateway_line(self.app.snapshot)
 
     def on_config_changed(self) -> None:
+        """Redraw the gateway line."""
         if self.app.snapshot is not None:
             self._gateway_line(self.app.snapshot)
 
     def _gateway_line(self, snap: ServingSnapshot) -> None:
+        """State, URL and models-max of the gateway above the table."""
         a = self.app
         state = a.gateway_state()
         g = a.cfg.gateway
@@ -165,6 +172,7 @@ class ServingView(BaseView):
         self.query_one("#sv_gateway", Static).update(t)
 
     def _empty_state(self) -> None:
+        """A helpful one-liner while the table is empty."""
         snap = self.app.snapshot
         empty = self.table.row_count == 0
         msg = ""
@@ -216,11 +224,13 @@ class ServingView(BaseView):
 
     @on(DataTable.RowHighlighted, "#sv_table")
     def _highlighted(self) -> None:
+        """The cursor moved: show that row's log."""
         self.refresh_detail(force=True)
 
     # -- detail pane ------------------------------------------------------------------
 
     def _tick(self) -> None:
+        """Check the log for new lines while the view is shown."""
         if self.display and self.is_attached:
             self.refresh_detail()
 
@@ -242,6 +252,7 @@ class ServingView(BaseView):
 
     @staticmethod
     def _tail(log: str, empty: str) -> str:
+        """The end of a log file, or `empty` when there is none."""
         try:
             return "\n".join(tail_lines(Path(log), TAIL_LINES)) or empty
         except OSError:
@@ -309,6 +320,7 @@ class ServingView(BaseView):
         self.app.push_screen(ConfirmScreen(f"Stop {s.name} (pid {s.pid})?"), done)
 
     def _stop(self, s: Session) -> None:
+        """Stop or forget a session in a worker."""
         self.app.run_bg(lambda: self.app.store.stop(s), label=f"Stopping {s.name}", group="stop",
                         done=lambda _: self.say(f"{'Detached from' if s.external else 'Stopped'} "
                                                 f"{s.name}"),

@@ -88,6 +88,7 @@ class PresetEditor(Screen[Profile | None]):
         return ""
 
     def compose(self) -> ComposeResult:
+        """Grouped setting fields on the left; budget, command and buttons on the right."""
         yield Header()
         with Horizontal(id="editor"):
             with VerticalScroll(id="fields"):
@@ -110,6 +111,7 @@ class PresetEditor(Screen[Profile | None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        """Compute the first preview (and apply the plan when asked)."""
         self.sub_title = self.title_text
         self._recompute()
         if self._apply_plan_on_open:
@@ -150,6 +152,7 @@ class PresetEditor(Screen[Profile | None]):
 
     @on(SettingField.Changed)
     def _changed(self) -> None:
+        """A field changed: recompute after a short delay."""
         if t := getattr(self, "_deb", None):
             t.stop()
         self._deb = self.set_timer(DEBOUNCE, self._recompute)
@@ -164,13 +167,16 @@ class PresetEditor(Screen[Profile | None]):
         return None
 
     def _say(self, text: str) -> None:
+        """Show a line under the buttons."""
         self.query_one("#ed_status", Label).update(text)
 
     def action_save(self) -> None:
+        """Close with the edited profile when every field is valid."""
         if self.all_valid:
             self.dismiss(self._draft)
 
     def action_cancel(self) -> None:
+        """Close without a result."""
         self.dismiss(None)
 
     def action_apply_plan(self) -> None:
@@ -190,24 +196,29 @@ class PresetEditor(Screen[Profile | None]):
                   "Review, then F1 for help or Ctrl+S to save.")
 
     def action_reset_field(self) -> None:
+        """Reset the focused field to its default."""
         f = self._focused_field()
         if f:
             f.set_value(f.setting.default)
             self._recompute()
 
     def action_help(self) -> None:
+        """Show the help text of the focused field."""
         f = self._focused_field()
         if f:
             self.app.push_screen(HelpPanel(f.setting))
 
     @on(Button.Pressed, "#save")
     def _save_btn(self) -> None:
+        """The Save button."""
         self.action_save()
 
     @on(Button.Pressed, "#plan")
     def _plan_btn(self) -> None:
+        """The Apply plan button."""
         self.action_apply_plan()
 
     @on(Button.Pressed, "#cancel")
     def _cancel_btn(self) -> None:
+        """The Cancel button."""
         self.action_cancel()

@@ -123,6 +123,7 @@ class ModelsView(BaseView):
         self._plan_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
+        """Model table on top; metadata, intent table and command below; budget on the side."""
         with Vertical():
             with VerticalScroll(id="m_top"):
                 yield ModelTable(id="model_table", cursor_type="row")
@@ -137,6 +138,7 @@ class ModelsView(BaseView):
                     yield BudgetPanel()
 
     def on_mount(self) -> None:
+        """Add the columns and the rows of the models known so far; start planning."""
         for label, key in COLUMNS:
             self.model_table.add_column(label, key=key)
         for label, key in INTENT_COLUMNS:
@@ -175,6 +177,7 @@ class ModelsView(BaseView):
             self.app.cfg.models.get(model or ""), plans, self.app.cfg.default_intent)
 
     def focus_primary(self) -> None:
+        """Focus the model table."""
         self.model_table.focus()
 
     def select(self, path: str) -> None:
@@ -190,10 +193,12 @@ class ModelsView(BaseView):
     # -- rows --------------------------------------------------------------------------
 
     def _state(self, path: str) -> PresetState:
+        """Active preset state of a model for the table."""
         a = self.app
         return preset_state(a.cfg.models.get(path), Path(path), a.calibration, a.build)
 
     def _cells(self, path: str) -> tuple:
+        """Cells of one model row."""
         a = self.app
         info = a.infos.get(path)
         st = self._state(path)
@@ -213,6 +218,7 @@ class ModelsView(BaseView):
             t.add_row(*cells, key=key)
 
     def _empty_state(self) -> None:
+        """Show a one-line hint when there are no models."""
         a = self.app
         msg = ""
         if not self.model_table.row_count:
@@ -226,6 +232,7 @@ class ModelsView(BaseView):
     # -- hooks -------------------------------------------------------------------------
 
     def on_models(self, models: list[Path]) -> None:
+        """Add rows for new files and drop rows of gone ones."""
         want = {str(p) for p in models}
         for key in [k for k in self.model_table.rows if k.value not in want]:
             self.model_table.remove_row(key)
@@ -235,16 +242,19 @@ class ModelsView(BaseView):
         self._empty_state()
 
     def on_info(self, path: Path) -> None:
+        """A header was read: fill its row and schedule planning."""
         if str(path) not in self.app.infos:
             self._unreadable.add(str(path))
         self._row(path)
         self._schedule_plan()
 
     def on_scan_done(self) -> None:
+        """The scan finished: plan every model."""
         self._empty_state()
         self.plan_async()
 
     def on_host(self, host: Host) -> None:
+        """Replan when the memory picture changed meaningfully, else redraw the detail."""
         sig = (tuple((d.id, d.total) for d in host.gpus), host.ram_free // (512 << 20))
         if sig != self._host_sig:
             self._host_sig = sig
@@ -253,6 +263,7 @@ class ModelsView(BaseView):
             self._schedule_detail()          # free memory moved a little: budget bars only
 
     def on_presets_changed(self, paths: Iterable[str]) -> None:
+        """Refresh the rows of the models whose presets changed."""
         keys = list(paths) or [str(p) for p in self.app.models]
         for k in keys:
             if k in self.model_table.rows:
@@ -260,11 +271,13 @@ class ModelsView(BaseView):
         self.update_detail()
 
     def on_config_changed(self) -> None:
+        """Headroom or the default profile changed: replan."""
         self.plan_async()
 
     # -- planning (worker) -------------------------------------------------------------
 
     def _schedule_plan(self) -> None:
+        """Plan shortly, once per burst of header reads."""
         if self._plan_timer is not None:
             self._plan_timer.stop()
         self._plan_timer = self.set_timer(DEBOUNCE, self.plan_async)
@@ -284,6 +297,7 @@ class ModelsView(BaseView):
                  done=self._plans_ready, quiet=True)
 
     def _plans_ready(self, plans: dict[str, dict[str, Plan]]) -> None:
+        """Plans arrived from the worker: fill the Best for cells and the detail."""
         self.plans = plans
         for key in list(self.model_table.rows):
             self._row(Path(str(key.value)))
@@ -293,16 +307,19 @@ class ModelsView(BaseView):
 
     @on(DataTable.RowHighlighted, "#model_table")
     def _model_highlighted(self) -> None:
+        """The model cursor moved: the detail follows after a short delay."""
         self._intent = ""
         self._schedule_detail()
 
     def _schedule_detail(self) -> None:
+        """Redraw the detail pane once the cursor settles."""
         if self._detail_timer is not None:
             self._detail_timer.stop()
         self._detail_timer = self.set_timer(DEBOUNCE, self.update_detail)
 
     @on(DataTable.RowHighlighted, "#intent_table")
     def _intent_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """The intent cursor moved: actions now apply to that intent."""
         if event.row_key is not None and event.row_key.value != self._intent:
             self._intent = str(event.row_key.value)
             self._show_intent()
@@ -355,6 +372,7 @@ class ModelsView(BaseView):
         self._show_intent()
 
     def _meta_text(self, model: str, info: ModelInfo) -> Text:
+        """Name, file, size, architecture and the no-preset hint of a model."""
         a = self.app
         ent = a.cfg.models.get(model)
         t = Text()
@@ -410,6 +428,7 @@ class ModelsView(BaseView):
         return model, info
 
     def _need_intent(self) -> tuple[str, ModelInfo, str] | None:
+        """The highlighted model, its header and the intent actions apply to, or None."""
         got = self._need_model()
         if got is None:
             return None
@@ -421,10 +440,12 @@ class ModelsView(BaseView):
 
     @on(DataTable.RowSelected, "#model_table")
     def _row_selected(self) -> None:
+        """Enter on a model: serve it."""
         self.action_serve()
 
     @on(DataTable.RowSelected, "#intent_table")
     def _intent_selected(self) -> None:
+        """Enter on an intent row: serve that intent."""
         got = self._need_intent()
         if got:
             self.app.serve_model(got[0], got[2])

@@ -161,6 +161,7 @@ class HomeView(BaseView):
         self._steps: list[Suggestion] = []
 
     def compose(self) -> ComposeResult:
+        """Hardware and gateway cards on the left, loaded models and next steps on the right."""
         with Horizontal(id="home_row"):
             with Vertical(id="home_left"):
                 yield Static("", id="hw_card")
@@ -177,6 +178,7 @@ class HomeView(BaseView):
                     yield Static("Nothing to do: everything is set up.", id="steps_empty")
 
     def on_mount(self) -> None:
+        """Set the card titles, build the loaded table and draw everything."""
         self.query_one("#hw_card").border_title = "Hardware"
         self.query_one("#gw_card").border_title = "Gateway"
         self.query_one("#loaded_box").border_title = "Loaded now"
@@ -190,30 +192,37 @@ class HomeView(BaseView):
     # -- hooks ------------------------------------------------------------------------
 
     def focus_primary(self) -> None:
+        """Focus the next steps when there are any, else the loaded list."""
         steps = self.query_one("#steps", OptionList)
         (steps if self._steps else self.query_one("#loaded", DataTable)).focus()
 
     def on_host(self, host: Host) -> None:
+        """Redraw the hardware card."""
         self.render_hardware()
 
     def on_scan_done(self) -> None:
+        """Models are known: recompute the next steps."""
         self.render_steps()
         self.render_gateway()
 
     def on_models(self, models: list[Path]) -> None:
+        """The model list changed: recompute the next steps."""
         self.render_steps()
 
     def on_serving(self, snapshot: ServingSnapshot) -> None:
+        """Redraw the gateway card, the loaded list and the next steps."""
         self.render_gateway()
         self.render_loaded()
         self.render_steps()
 
     def on_presets_changed(self, paths: Iterable[str]) -> None:
+        """Presets or the build changed: redraw cards and next steps."""
         self.render_hardware()
         self.render_steps()
         self.render_gateway()
 
     def on_config_changed(self) -> None:
+        """Settings changed: redraw everything."""
         self.render_all()
 
     def render_all(self) -> None:
@@ -329,12 +338,14 @@ class HomeView(BaseView):
 
     @on(OptionList.OptionSelected, "#steps")
     def _step_chosen(self, event: OptionList.OptionSelected) -> None:
+        """Enter on a next step: do what it says."""
         step = next((s for s in self._steps if s.key == event.option.id), None)
         if step is not None:
             self.app.run_suggestion(step)
 
     @on(DataTable.RowHighlighted, "#loaded")
     def _loaded_highlighted(self) -> None:
+        """The highlighted loaded model changed: rebuild the snippet."""
         self.render_gateway()
 
     def action_start_gateway(self) -> None:

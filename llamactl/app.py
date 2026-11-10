@@ -156,6 +156,7 @@ class LlamaCtl(App):
     # ------------------------------------------------------------------ shell
 
     def compose(self) -> ComposeResult:
+        """Header, gauges, sidebar with the views, status bar and footer."""
         yield Header()
         yield ResourceGauges(id="gauges")
         with Horizontal(id="shell"):
@@ -173,6 +174,7 @@ class LlamaCtl(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        """Start the pollers and the first scan; autostart the gateway when configured."""
         base = self.screen_stack[0]
         self._status = base.query_one("#status", Label)
         self._gwstate = base.query_one("#gwstate", Label)
@@ -225,6 +227,7 @@ class LlamaCtl(App):
 
     @on(ListView.Highlighted, "#nav")
     def _nav(self, event: ListView.Highlighted) -> None:
+        """Sidebar cursor moved: show that view."""
         name = event.item.id.removeprefix("nav-") if event.item and event.item.id else ""
         if name in self.views and self.current_view != name:
             self.base.query_one("#main", ContentSwitcher).current = name
@@ -233,6 +236,7 @@ class LlamaCtl(App):
 
     @on(ListView.Selected, "#nav")
     def _nav_selected(self, event: ListView.Selected) -> None:
+        """Enter on a sidebar item: show the view and move focus into it."""
         if event.item and event.item.id:     # Enter on a nav item also moves focus into the view
             self.switch_view(event.item.id.removeprefix("nav-"))
 
@@ -354,6 +358,7 @@ class LlamaCtl(App):
                     done=self._host_update, quiet=True)
 
     def _host_update(self, host: hardware.Host) -> None:
+        """A fresh host snapshot: update the gauges and tell every view."""
         self.host = host
         self.base.query_one("#gauges", ResourceGauges).update_host(host)
         for v in self.views.values():
@@ -398,6 +403,7 @@ class LlamaCtl(App):
                     always=partial(self._scan_ended, gen))
 
     def _models_found(self, gen: int, models: list[Path]) -> None:
+        """The folders were scanned: tell the views (ignored when a newer scan started)."""
         if gen != self._scan_gen:
             return
         self.models = models
@@ -406,6 +412,7 @@ class LlamaCtl(App):
             v.on_models(models)
 
     def _info_read(self, gen: int, path: Path, info: ModelInfo | None) -> None:
+        """One header was read: tell the views (ignored when a newer scan started)."""
         if gen != self._scan_gen:
             return
         if info is not None:
@@ -414,6 +421,7 @@ class LlamaCtl(App):
             v.on_info(path)
 
     def _scan_done(self, gen: int) -> None:
+        """Every header was read: report the count and tell the views."""
         if gen != self._scan_gen:
             return
         self.scanning = False
@@ -423,6 +431,7 @@ class LlamaCtl(App):
             v.on_scan_done()
 
     def _scan_ended(self, gen: int) -> None:
+        """The scan worker ended: clear the scanning flag if it died early."""
         if gen == self._scan_gen and self.scanning:    # the worker died before finishing
             self.scanning = False
 
@@ -435,6 +444,7 @@ class LlamaCtl(App):
                     done=self._build_known, quiet=True)
 
     def _build_known(self, build: str) -> None:
+        """The llama-server version is known: views re-judge stale presets."""
         self.build = build
         for v in self.views.values():
             v.on_presets_changed(())
@@ -533,6 +543,7 @@ class LlamaCtl(App):
                     always=self._gateway_op_ended)
 
     def _gateway_op_ended(self) -> None:
+        """A gateway start or stop finished: clear the busy flag and poll."""
         self._set_busy("")
         self.refresh_serving()
 
@@ -573,6 +584,7 @@ class LlamaCtl(App):
                     always=self.refresh_serving)
 
     def _loaded(self, name: str) -> None:
+        """A model came up: say so in the status bar and as a notification."""
         self.say(f"{name} is loaded at {self.gateway.listen_url}/v1")
         self.notify(f"{name} is loaded", title="Model ready", markup=False)
 
@@ -629,6 +641,7 @@ class LlamaCtl(App):
         self._serve_gateway(path, chosen.name, timeout)
 
     def _serve_gateway(self, path: str, preset: str, timeout: float) -> None:
+        """Load a preset in the gateway in a worker and wait until it is loaded."""
         def work() -> str:
             with self._gw_lock:
                 name = actions.serve_gateway(
@@ -644,6 +657,7 @@ class LlamaCtl(App):
                     done=self._loaded, always=self.refresh_serving)
 
     def _serve_standalone(self, path: str, preset: str, timeout: float) -> None:
+        """Start a standalone server in a worker and wait until it answers."""
         def work() -> str:
             try:
                 session = self.store.launch_server(self.cfg, path, preset)
@@ -688,6 +702,7 @@ class LlamaCtl(App):
                         exclusive=True, done=self._presets_written, always=self.refresh_serving)
 
     def _presets_written(self, _count: int) -> None:
+        """The gateway re-read the presets: surface presets it could not take."""
         if self.gateway.problems:
             self.fail("some presets cannot go in the gateway: " + "; ".join(self.gateway.problems))
         if self.snapshot is not None:        # the Home card lists the gateway's problems

@@ -153,6 +153,7 @@ class TuneScreen(ModalScreen[str | None]):
         self._last = ""
 
     def compose(self) -> ComposeResult:
+        """Title, pre-flight text, trial table, progress, summary and buttons."""
         with Vertical(id="tbox"):
             yield Label("", id="t_title")
             yield Static("Checking free memory...", id="t_pre")
@@ -168,6 +169,7 @@ class TuneScreen(ModalScreen[str | None]):
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
+        """Fill the title and columns, then run the pre-flight check."""
         a = self.app
         self.query_one("#t_title", Label).update(
             f"Tune {a.alias_of(self.model)} for {self.intent.label}  "
@@ -198,11 +200,13 @@ class TuneScreen(ModalScreen[str | None]):
             self.query_one(f"#{focus}", Button).focus()
 
     def _can_use(self) -> bool:
+        """True when the tuned preset exists and is not yet the active one."""
         ent = self.app.cfg.models.get(self.model)
         return bool(self.outcome and self.outcome.result.ok and
                     (ent is None or ent.active != self.intent.key))
 
     def _say_pre(self, text: Text | str) -> None:
+        """Set the pre-flight text."""
         self.query_one("#t_pre", Static).update(text)
 
     # -- preflight ---------------------------------------------------------------------
@@ -231,6 +235,7 @@ class TuneScreen(ModalScreen[str | None]):
         a.run_bg(work, label="Checking free memory", group="tune-pre", done=self._preflight_done)
 
     def _preflight_done(self, result: tuple[Host, Plan, str | None, list[str]]) -> None:
+        """Pre-flight finished: start the tune, or show the refusal and the options."""
         self.host, self.plan, refusal, self.loaded = result
         self.app.host = self.host
         h, plan = self.host, self.plan
@@ -320,6 +325,7 @@ class TuneScreen(ModalScreen[str | None]):
         self._tick()
 
     def _tick(self) -> None:
+        """Refresh the progress line (elapsed time, cancelling note)."""
         if self.state != RUNNING:
             return
         what = "cancelling after this trial; " if self._cancel.is_set() else ""
@@ -327,6 +333,7 @@ class TuneScreen(ModalScreen[str | None]):
             f"{what}{self._last or 'starting'}  ({time.monotonic() - self._t0:.0f} s)")
 
     def _finished(self, outcome: TuneOutcome | None, error: str) -> None:
+        """The tune ended: show the summary and the buttons for this state."""
         self.state = DONE
         self.outcome = outcome
         self.error = error
@@ -350,28 +357,34 @@ class TuneScreen(ModalScreen[str | None]):
 
     @on(Button.Pressed, "#cancel")
     def _cancel_pressed(self) -> None:
+        """Cancel tune: stop the search after the current trial."""
         self._cancel.set()
         self._tick()
         self._buttons()
 
     @on(Button.Pressed, "#unload")
     def _unload_pressed(self) -> None:
+        """Unload gateway models and retry."""
         self.unload_and_retry()
 
     @on(Button.Pressed, "#anyway")
     def _anyway_pressed(self) -> None:
+        """Tune anyway: skip the free-memory check."""
         self._say_pre(Text("Tuning without the free-memory check.", style="yellow"))
         self.start(force=True)
 
     @on(Button.Pressed, "#use")
     def _use_pressed(self) -> None:
+        """Use: make the tuned preset the active one and close."""
         if self.app.activate_preset(self.model, self.intent.key):
             self.dismiss("used")
 
     @on(Button.Pressed, "#keep")
     def _keep_pressed(self) -> None:
+        """Keep as is: close, leaving the active preset alone."""
         self.dismiss("kept")
 
     @on(Button.Pressed, "#close")
     def _close_pressed(self) -> None:
+        """Close (cancels a running tune first)."""
         self.action_close()

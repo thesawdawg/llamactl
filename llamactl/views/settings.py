@@ -46,6 +46,7 @@ class SettingsView(BaseView):
     """
 
     def compose(self) -> ComposeResult:
+        """The settings form: label, control and hint per row."""
         cfg = self.app.cfg
         g = cfg.gateway
         intent_keys = [i.key for i in INTENTS]
@@ -103,9 +104,11 @@ class SettingsView(BaseView):
             yield Static("", id="set_msg")
 
     def on_mount(self) -> None:
+        """Show whether a token is set."""
         self._token_state()
 
     def focus_primary(self) -> None:
+        """Focus the first field."""
         self.query_one("#bin_dir", Input).focus()
 
     @staticmethod
@@ -119,15 +122,18 @@ class SettingsView(BaseView):
         return not value.strip() or Path(value).expanduser().is_dir()
 
     def _token_state(self) -> None:
+        """Label the token button with whether a token exists."""
         self.query_one("#set_token", Button).label = (
             "Change token (set)" if hf.load_token() else "Set token (none yet)")
 
     def _msg(self, text: str) -> None:
+        """Show a message under the form and in the status bar."""
         self.query_one("#set_msg", Static).update(text)
         self.say(text)
 
     @on(Input.Submitted, "#add_dir")
     def _add_dir(self, event: Input.Submitted) -> None:
+        """Enter in the add-folder box: append a valid folder to the list."""
         inp = event.input
         if not inp.is_valid or not inp.value.strip():
             return self.say("Not a directory.")
@@ -142,6 +148,7 @@ class SettingsView(BaseView):
 
     @on(Button.Pressed, "#set_token")
     def _set_token(self) -> None:
+        """Ask for the Hugging Face token."""
         def done(res: str | None) -> None:
             if res is not None:
                 hf.save_token(res)
@@ -152,12 +159,15 @@ class SettingsView(BaseView):
 
     @on(Button.Pressed, "#edit_default")
     def _edit_default(self) -> None:
+        """Open the default profile editor (Models view)."""
         self.app.views["models"].action_edit_default()          # type: ignore[attr-defined]
 
     def _fields_valid(self) -> bool:
+        """True when every text field validates."""
         return all(self.query_one(f"#{i}", Input).is_valid for i in TEXT_INPUTS)
 
     def _dirs(self) -> list[str]:
+        """The model folders currently listed."""
         return [item.children[0].content  # type: ignore[attr-defined]
                 for item in self.query_one("#dir_list", ListView).children]
 
@@ -202,4 +212,5 @@ class SettingsView(BaseView):
 
     @on(Button.Pressed, "#save")
     def _save_button(self) -> None:
+        """The Save button."""
         self.action_save()

@@ -74,6 +74,7 @@ class IntentPicker(ModalScreen[str | None]):
         self.model, self.rows, self.current = model, rows, current
 
     def compose(self) -> ComposeResult:
+        """Heading, hint and one option per intent."""
         with Vertical(id="ibox"):
             yield Label(f"[b]What is {self.model} for?[/b]", markup=True)
             yield Label("Enter picks it, Esc cancels. A preset is planned for the pick.",
@@ -81,6 +82,7 @@ class IntentPicker(ModalScreen[str | None]):
             yield OptionList(*[Option(card(r), id=r.key) for r in self.rows], id="intents")
 
     def on_mount(self) -> None:
+        """Highlight the current intent and focus the list."""
         lst = self.query_one("#intents", OptionList)
         keys = [r.key for r in self.rows]
         lst.highlighted = keys.index(self.current) if self.current in keys else 0
@@ -88,6 +90,7 @@ class IntentPicker(ModalScreen[str | None]):
 
     @on(OptionList.OptionSelected)
     def _picked(self, event: OptionList.OptionSelected) -> None:
+        """An intent was chosen: close with its key."""
         self.dismiss(event.option.id)
 
     def action_cancel(self) -> None:
