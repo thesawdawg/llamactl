@@ -1,6 +1,7 @@
 """Build the llama-server command line from a profile."""
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 
@@ -38,6 +39,121 @@ def build_command(cfg: Config, model: str, prof: Profile, port: int) -> list[str
         else:
             argv += [s.flag, str(v)]
     return argv + shlex.split(prof.extra_args)
+
+
+# What llama.cpp's preset INI parser accepts as a key, and the characters that end a value.
+INI_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+INI_VALUE_FORBIDDEN = ";#\n\r"
+_NUMBER_RE = re.compile(r"-\d+(\.\d+)?\Z")
+
+
+def check_ini_value(key: str, value: str) -> None:
+    """Check that a value survives llama.cpp's preset INI parser unchanged.
+
+    The parser ends a value at the first ``;`` or ``#`` (even with no space before it) and at
+    a line break, and there is no quoting, so such values cannot be written.
+
+    Args:
+        key: Preset key, for the message.
+        value: Value to write.
+
+    Raises:
+        ValueError: When the value contains ``;``, ``#`` or a line break.
+    """
+    bad = next((c for c in value if c in INI_VALUE_FORBIDDEN), "")
+    if bad:
+        shown = {"\n": "a line break", "\r": "a line break"}.get(bad, repr(bad))
+        raise ValueError(f"{key}: {value!r} contains {shown}, which a gateway preset (INI) "
+                         "cannot hold")
+
+
+def _is_flag(token: str) -> bool:
+    """True for a command-line flag token ("-c", "--jinja"), false for values like "-1"."""
+    return token.startswith("-") and len(token) > 1 and not _NUMBER_RE.match(token)
+
+
+def extra_args_items(extra_args: str) -> list[tuple[str, str]]:
+    """Map a free-form extra_args string to preset INI key/value pairs.
+
+    ``--ctx-checkpoints 4`` becomes ``("ctx-checkpoints", "4")``, ``--key=value`` the same,
+    and a flag with no value (``--jinja``, ``--no-mmap``) becomes ``(key, "true")``; llama.cpp
+    inverts a ``no-`` key itself. Leading dashes are stripped.
+
+    Args:
+        extra_args: The profile's extra_args text (shell syntax).
+
+    Returns:
+        Key/value pairs in order.
+
+    Raises:
+        ValueError: When the text is not valid shell syntax, holds a token with no flag in
+            front of it, a key the INI cannot hold, or the same key twice.
+    """
+    try:
+        tokens = shlex.split(extra_args)
+    except ValueError as e:
+        raise ValueError(f"extra_args: {e}") from None
+    items: list[tuple[str, str]] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if not _is_flag(tok):
+            raise ValueError(f"extra_args: cannot express {tok!r} in a gateway preset: it is "
+                             "not a flag or the value of one")
+        key, eq, value = tok.lstrip("-").partition("=")
+        if not eq:
+            if i < len(tokens) and not _is_flag(tokens[i]):
+                value, i = tokens[i], i + 1
+            else:
+                value = "true"
+        if not INI_KEY_RE.match(key):
+            raise ValueError(f"extra_args: cannot express {tok!r} in a gateway preset "
+                             f"({key!r} is not a valid option name)")
+        if any(k == key for k, _ in items):
+            raise ValueError(f"extra_args: {tok!r} is given twice; a gateway preset holds each "
+                             "option once")
+        check_ini_value(key, value)
+        items.append((key, value))
+    return items
+
+
+def preset_items(prof: Profile) -> list[tuple[str, str]]:
+    """Render a profile as key/value pairs of a llama-server router preset (INI section).
+
+    Uses the same registry as `build_command`: unset values are skipped, as are settings the
+    router owns (host, port, api_key, alias) and settings with no preset key. Booleans are
+    written ``true`` / ``false``: llama.cpp turns ``cont-batching = false`` into
+    ``--no-cont-batching`` itself. extra_args is parsed into further pairs; an option named
+    there replaces the registry's value for the same option.
+
+    Args:
+        prof: Profile to render.
+
+    Returns:
+        Key/value pairs in registry order, then those from extra_args.
+
+    Raises:
+        ValueError: When extra_args cannot be expressed as options, or a value holds a
+            character the INI format cannot carry.
+    """
+    items: list[tuple[str, str]] = []
+    for s in SETTINGS:
+        if not s.preset_key or s.router_owned:
+            continue
+        v = getattr(prof, s.key)
+        if v == s.unset:
+            continue
+        text = ("true" if v else "false") if s.kind == Kind.BOOL else str(v)
+        check_ini_value(s.preset_key, text)
+        items.append((s.preset_key, text))
+    own = {s.preset_key: s.preset_key for s in SETTINGS if s.preset_key}
+    own |= {s.flag.lstrip("-"): s.preset_key for s in SETTINGS if s.flag and s.preset_key}
+    for key, value in extra_args_items(prof.extra_args):
+        key = own.get(key, key)
+        items = [kv for kv in items if kv[0] != key]
+        items.append((key, value))
+    return items
 
 
 def command_string(argv: list[str]) -> str:
