@@ -76,6 +76,8 @@ class Profile:
     ctx_size: int = 0
     gpu_layers: str = "all"
     n_cpu_moe: int = 0
+    fit: str = "on"
+    fit_target: int = 0
     cache_type_k: str = "f16"
     cache_type_v: str = "f16"
     flash_attn: str = "auto"
@@ -83,7 +85,9 @@ class Profile:
     ubatch_size: int = 0
     load_mode: str = "auto"
     tensor_split: str = ""
+    device: str = ""
     threads: int = 0
+    threads_batch: int = 0
     temp: float = -1.0
     top_k: int = -1
     top_p: float = -1.0
@@ -94,8 +98,12 @@ class Profile:
     port: int = 0
     api_key: str = ""
     parallel: int = 0
+    cache_reuse: int = 0
     cont_batching: bool = True
     metrics: bool = False
+    embedding: bool = False
+    pooling: str = ""
+    sleep_idle: int = 0
     alias: str = ""
     draft_model: str = ""
     mmproj: str = ""

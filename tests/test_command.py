@@ -54,3 +54,39 @@ def test_always_server_binary() -> None:
 
 def test_command_string() -> None:
     assert command_string(["a b", "c"]) == "'a b' c"
+
+
+def test_new_flags_emitted() -> None:
+    cmd = argv(Profile(fit="off", fit_target=512, device="CUDA0,CUDA1", cache_reuse=256,
+                       sleep_idle=600, pooling="mean", threads_batch=12))
+    pairs = dict(zip(cmd, cmd[1:]))
+    assert pairs["-fit"] == "off" and pairs["-fitt"] == "512" and pairs["-dev"] == "CUDA0,CUDA1"
+    assert pairs["--cache-reuse"] == "256" and pairs["--sleep-idle-seconds"] == "600"
+    assert pairs["--pooling"] == "mean" and pairs["-tb"] == "12"
+
+
+def test_new_flags_omitted_by_default() -> None:
+    cmd = argv(Profile())
+    for flag in ("-fit", "-fitt", "-dev", "--cache-reuse", "--sleep-idle-seconds", "--pooling",
+                 "-tb", "--embedding"):
+        assert flag not in cmd
+
+
+def test_embedding_bool_flag() -> None:
+    cmd = argv(Profile(embedding=True, metrics=True))
+    assert "--embedding" in cmd and "--metrics" in cmd
+    assert "--embedding" not in argv(Profile(embedding=False))
+
+
+def test_bool_handling_is_generic() -> None:
+    """Default-off BOOLs emit their flag when True; default-on BOOLs emit the negation when False."""
+    from llamactl import schema
+    for s in schema.SETTINGS:
+        if s.kind != schema.Kind.BOOL:
+            continue
+        flipped = not s.default
+        cmd = argv(Profile(**{s.key: flipped}))
+        want = s.negate_flag if s.default else s.flag
+        assert want and want in cmd
+        assert (s.flag if s.default else s.negate_flag) not in cmd
+        assert want not in argv(Profile())

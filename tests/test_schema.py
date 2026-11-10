@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 
 import pytest
 
@@ -69,3 +70,47 @@ def test_validate_min_max() -> None:
 def test_no_launch_modes() -> None:
     assert not hasattr(schema, "for_mode")
     assert not any(hasattr(s, "modes") for s in schema.SETTINGS)
+
+
+NEW_KEYS = ("fit", "fit_target", "device", "cache_reuse", "sleep_idle", "embedding", "pooling",
+            "threads_batch")
+
+
+def test_new_settings_present() -> None:
+    for key in NEW_KEYS:
+        s = schema.by_key[key]
+        assert s.flag and s.hint and s.help and f"Flag: {s.flag}" in s.help, key
+
+
+def test_preset_key_for_every_flagged_setting() -> None:
+    seen: set[str] = set()
+    for s in schema.SETTINGS:
+        if not s.flag:
+            assert s.preset_key == "", s.key
+            continue
+        assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", s.preset_key), s.key
+        assert s.preset_key not in seen, s.key
+        seen.add(s.preset_key)
+    assert schema.by_key["ctx_size"].preset_key == "ctx-size"
+    assert schema.by_key["gpu_layers"].preset_key == "n-gpu-layers"
+    assert schema.by_key["sleep_idle"].preset_key == "sleep-idle-seconds"
+
+
+def test_router_owned() -> None:
+    assert {s.key for s in schema.SETTINGS if s.router_owned} == {"host", "port", "api_key", "alias"}
+
+
+def test_default_on_bools_have_negation() -> None:
+    for s in schema.SETTINGS:
+        if s.kind == schema.Kind.BOOL and s.default:
+            assert s.negate_flag, s.key
+
+
+def test_pooling_choices_allow_unset() -> None:
+    s = schema.by_key["pooling"]
+    assert s.default == "" and s.unset == ""
+    assert schema.validate(s, "") == "" and schema.validate(s, "rank") == "rank"
+    with pytest.raises(ValueError):
+        schema.validate(s, "max")
+    assert schema.validate(schema.by_key["fit"], "off") == "off"
+    assert schema.validate(schema.by_key["embedding"], "true") is True

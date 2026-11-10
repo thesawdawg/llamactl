@@ -99,7 +99,7 @@ class SettingField(Widget):
                    if setting.step else
                    Input(str(value), validators=[Number(setting.minimum, setting.maximum)]))
         elif setting.kind == Kind.CHOICE:
-            inp = Select([(c, c) for c in setting.choices], value=value, allow_blank=False)
+            inp = Select([(c or "(default)", c) for c in setting.choices], value=value, allow_blank=False)
         elif setting.kind == Kind.BOOL:
             inp = Switch(value=bool(value))
         elif setting.key == "gpu_layers":

@@ -102,6 +102,7 @@ async def test_default_profile_no_model() -> None:
         ed = app.editor
         assert not ed.fields["n_cpu_moe"].input.disabled  # enabled when info is None
         assert ed.fields["tensor_split"].input.disabled   # one GPU in the fixture
+        assert ed.fields["pooling"].value == "" and ed.fields["fit"].value == "on"
         ed.fields["cont_batching"].input.focus()
         await pilot.press("R")
         await pilot.pause(0.4)

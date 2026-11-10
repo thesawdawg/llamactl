@@ -31,10 +31,8 @@ def build_command(cfg: Config, model: str, prof: Profile, port: int) -> list[str
         if v == s.unset:
             continue
         if s.kind == Kind.BOOL:
-            if s.key == "cont_batching":
-                argv.append("-nocb")
-            else:
-                argv.append(s.flag)
+            # v != unset, so a default-off BOOL is True here and a default-on one is False
+            argv.append(s.flag if v else s.negate_flag)
         elif s.key == "port":
             argv += [s.flag, str(port)]
         else:
