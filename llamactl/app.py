@@ -1,4 +1,4 @@
-"""Textual TUI for launching, monitoring and chatting with llama.cpp servers."""
+"""Textual TUI for launching and managing llama.cpp servers."""
 from __future__ import annotations
 
 from textual import on, work

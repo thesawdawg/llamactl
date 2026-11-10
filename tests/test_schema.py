@@ -66,7 +66,6 @@ def test_validate_min_max() -> None:
     assert schema.validate(schema.by_key["top_p"], "0") == 0
 
 
-def test_modes() -> None:
-    assert {s.key for s in schema.for_mode("server")} == set(schema.by_key)
-    cli = {s.key for s in schema.for_mode("cli")}
-    assert "port" not in cli and "parallel" not in cli and "ctx_size" in cli
+def test_no_launch_modes() -> None:
+    assert not hasattr(schema, "for_mode")
+    assert not any(hasattr(s, "modes") for s in schema.SETTINGS)

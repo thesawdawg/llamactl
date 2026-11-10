@@ -1,7 +1,6 @@
 """ModelsView: model table with metadata, budget, Fits verdict and actions."""
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from rich.text import Text
@@ -30,7 +29,6 @@ class ModelsView(BaseView):
     BINDINGS = [
         Binding("enter", "launch_server", "Launch server"),
         Binding("l", "launch_server", "Launch", show=False),
-        Binding("c", "launch_cli", "CLI chat"),
         Binding("e", "edit_profile", "Edit profile"),
         Binding("d", "edit_default", "Defaults"),
         Binding("f2", "recommend", "Recommend"),
@@ -60,7 +58,6 @@ class ModelsView(BaseView):
                 yield Static("", id="prof_summary")
                 with Horizontal(id="m_buttons"):
                     yield Button("Launch", id="m_launch", variant="primary")
-                    yield Button("CLI chat", id="m_cli")
                     yield Button("Edit", id="m_edit")
                 with Horizontal(id="m_buttons2"):
                     yield Button("Recommend", id="m_rec")
@@ -181,27 +178,19 @@ class ModelsView(BaseView):
         self.query_one(BudgetPanel).update_budget(
             estimate_budget(info, prof, self.app.host), self.app.host)
         changed = prof.non_default()
-        cmd = command_string(build_command(self.app.cfg, model, prof, "server",
-                                           prof.port or 0))
+        cmd = command_string(build_command(self.app.cfg, model, prof, prof.port or 0))
         if not prof.port:
             cmd = cmd.replace(f"--port 0", "--port <auto>")
         self.query_one("#prof_summary", Static).update(
             ("\n".join(f"{k}={v}" for k, v in changed.items()) or "(all defaults)") + "\n\n" + cmd)
 
-    def _launch(self, model: str, cli: bool) -> None:
-        """Launch a server (or CLI chat) for the model and mark it seen.
+    def _launch(self, model: str) -> None:
+        """Launch a server for the model and mark it seen.
 
         Args:
             model: Model path.
-            cli: True for llama-cli, False for llama-server.
         """
         self.app.cfg.seen.mark_seen(model)
-        if cli:
-            prof = self.app.cfg.profile_for(model)
-            cmd = build_command(self.app.cfg, model, prof, "cli", 0)
-            with self.app.suspend():
-                subprocess.run(cmd)
-            return
         self.app.sessions.launch(model)
         self.app.switch_view("sessions")
 
@@ -265,11 +254,7 @@ class ModelsView(BaseView):
 
     def action_launch_server(self) -> None:
         if m := self.selected_model():
-            self._launch(m, cli=False)
-
-    def action_launch_cli(self) -> None:
-        if m := self.selected_model():
-            self._launch(m, cli=True)
+            self._launch(m)
 
     def action_edit_profile(self) -> None:
         if m := self.selected_model():
@@ -293,10 +278,6 @@ class ModelsView(BaseView):
     @on(Button.Pressed, "#m_launch")
     def _b_launch(self) -> None:
         self.action_launch_server()
-
-    @on(Button.Pressed, "#m_cli")
-    def _b_cli(self) -> None:
-        self.action_launch_cli()
 
     @on(Button.Pressed, "#m_edit")
     def _b_edit(self) -> None:

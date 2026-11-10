@@ -16,7 +16,6 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, ProgressBar, RichLog, Static
 
 from ..screens.prompt import PromptScreen
-from ..screens.chat import ChatScreen
 from ..screens.confirm import ConfirmScreen
 from ..screens.log import LogScreen
 from ..sessions import Session, probe
@@ -81,7 +80,6 @@ class SessionsView(BaseView):
     """Sessions table, health polling, log/props detail pane."""
 
     BINDINGS = [
-        Binding("t", "chat", "Chat"),
         Binding("s", "stop", "Stop/forget"),
         Binding("a", "attach", "Attach URL"),
         Binding("o", "open_log", "Log"),
@@ -117,7 +115,6 @@ class SessionsView(BaseView):
             yield Static("No sessions. Go to Models (1) and press Enter to launch, "
                          "or press a to attach a running server.", id="empty_detail")
             with Horizontal(id="s_buttons"):
-                yield Button("Chat", id="s_chat")
                 yield Button("Stop", id="s_stop", variant="error")
                 yield Button("Attach", id="s_attach")
                 yield Button("Log", id="s_log")
@@ -305,12 +302,6 @@ class SessionsView(BaseView):
             log.clear()
             log.write(text)
 
-    def action_chat(self) -> None:
-        s = self.selected_session()
-        if s is None:
-            return self.say("No session selected.")
-        self.app.push_screen(ChatScreen(s))
-
     def action_stop(self) -> None:
         s = self.selected_session()
         if s is None:
@@ -357,10 +348,6 @@ class SessionsView(BaseView):
             return self.say("No session selected.")
         self.app.copy_to_clipboard(s.url)
         self.say(f"Copied {s.url}")
-
-    @on(Button.Pressed, "#s_chat")
-    def _b_chat(self) -> None:
-        self.action_chat()
 
     @on(Button.Pressed, "#s_stop")
     def _b_stop(self) -> None:

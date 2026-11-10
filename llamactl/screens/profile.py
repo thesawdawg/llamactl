@@ -131,8 +131,7 @@ class ProfileEditor(Screen[Profile | None]):
             estimate_budget(info, self._draft, self.host), self.host,
             self.cfg.headroom_pct)
         model = str(self.info.path) if self.info else "<model>"
-        argv = build_command(self.cfg, model, self._draft, "server",
-                             self._draft.port or 0)
+        argv = build_command(self.cfg, model, self._draft, self._draft.port or 0)
         if not self._draft.port:
             argv[argv.index("--port") + 1] = "<auto>"
         self.query_one("#preview", Static).update(command_string(argv))

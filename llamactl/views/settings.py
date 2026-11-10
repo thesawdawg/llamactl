@@ -39,7 +39,7 @@ class SettingsView(BaseView):
             yield Label("[b]llama.cpp bin dir[/b]")
             yield Input(cfg.bin_dir, id="bin_dir",
                         validators=[Function(self._bin_ok, "needs llama-server inside")])
-            yield Label("Folder holding llama-server and llama-cli (your build/bin).",
+            yield Label("Folder holding llama-server (your build/bin).",
                         classes="hint")
             yield Label("[b]Model dirs[/b]  (Delete removes the highlighted entry)")
             yield ListView(*[ListItem(Label(d)) for d in cfg.model_dirs], id="dir_list")

@@ -51,7 +51,6 @@ class Setting:
         help: Multi-paragraph text for the help panel (plain ASCII).
         group: Editor section.
         default: Value meaning "let llama.cpp decide" where possible.
-        modes: Launch modes the setting applies to.
         choices: Allowed values for CHOICE.
         minimum: Inclusive minimum for INT/FLOAT.
         maximum: Inclusive maximum for INT/FLOAT.
@@ -68,7 +67,6 @@ class Setting:
     help: str
     group: Group
     default: Any
-    modes: frozenset[str] = frozenset({"server", "cli"})
     choices: tuple[str, ...] = ()
     minimum: float | None = None
     maximum: float | None = None
@@ -322,14 +320,14 @@ SETTINGS: tuple[Setting, ...] = (
               "machine. 0.0.0.0 exposes it to your local network; combine with an API\n"
               "key if you do that, there is no auth by default.\n\n"
               "Flag: --host HOST"),
-        default="127.0.0.1", modes=frozenset({"server"})),
+        default="127.0.0.1"),
     Setting(
         key="port", flag="--port", kind=Kind.INT, label="Port", group=Group.SERVER,
         hint="Listen port. 0 = first free port from 8080, resolved at launch.",
         help=("TCP port the server listens on (default 8080). 0 lets llamactl pick the\n"
               "first free port from 8080 so several models can run side by side.\n\n"
               "Flag: --port PORT"),
-        default=0, modes=frozenset({"server"})),
+        default=0),
     Setting(
         key="api_key", flag="--api-key", kind=Kind.STR, label="API key", group=Group.SERVER,
         hint="Require this key in the Authorization header. Empty = no auth.",
@@ -337,7 +335,7 @@ SETTINGS: tuple[Setting, ...] = (
               "any request - set one if you bind to 0.0.0.0. Keys are stored in the\n"
               "config file in plain text.\n\n"
               "Flag: --api-key KEY"),
-        default="", unset="", modes=frozenset({"server"})),
+        default="", unset=""),
     Setting(
         key="parallel", flag="-np", kind=Kind.INT, label="Slots", group=Group.SERVER,
         hint="Requests served at once. Context is split between slots. 0 = auto.",
@@ -345,7 +343,7 @@ SETTINGS: tuple[Setting, ...] = (
               "The context is divided between slots, so more slots means less\n"
               "context each. 0 lets llama.cpp choose.\n\n"
               "Flag: -np, --parallel N"),
-        default=0, unset=0, minimum=0, modes=frozenset({"server"}), impact=_slots_impact),
+        default=0, unset=0, minimum=0, impact=_slots_impact),
     Setting(
         key="cont_batching", flag="-cb", kind=Kind.BOOL, label="Continuous batching", group=Group.SERVER,
         hint="Let slots pick up new requests while others are still decoding. On is right.",
@@ -353,21 +351,21 @@ SETTINGS: tuple[Setting, ...] = (
               "immediately instead of waiting for the whole batch. Keep it on unless a\n"
               "model misbehaves; disabling emits -nocb.\n\n"
               "Flag: -cb, --cont-batching / -nocb, --no-cont-batching"),
-        default=True, unset=True, modes=frozenset({"server"})),
+        default=True, unset=True),
     Setting(
         key="metrics", flag="--metrics", kind=Kind.BOOL, label="Metrics endpoint", group=Group.SERVER,
         hint="Expose a Prometheus-compatible /metrics endpoint.",
         help=("Enables the Prometheus-compatible /metrics endpoint with per-slot usage\n"
               "and performance counters. Off by default.\n\n"
               "Flag: --metrics"),
-        default=False, unset=False, modes=frozenset({"server"})),
+        default=False, unset=False),
     Setting(
         key="alias", flag="--alias", kind=Kind.STR, label="Alias", group=Group.SERVER,
         hint="Model name reported by the API instead of the file name.",
         help=("Model name exposed through the API (e.g. in /v1/models) instead of the\n"
               "GGUF file name. Useful when a client expects a specific model id.\n\n"
               "Flag: --alias STRING"),
-        default="", unset="", modes=frozenset({"server"})),
+        default="", unset=""),
     Setting(
         key="draft_model", flag="-md", kind=Kind.PATH, label="Draft model", group=Group.SERVER,
         hint="Small draft model for speculative decoding. Empty = off.",
@@ -375,14 +373,14 @@ SETTINGS: tuple[Setting, ...] = (
               "vocabulary: the draft proposes tokens, the big model verifies them, which\n"
               "can nearly double generation speed when it works.\n\n"
               "Flag: -md, --spec-draft-model FNAME"),
-        default="", unset="", modes=frozenset({"server"})),
+        default="", unset=""),
     Setting(
         key="mmproj", flag="--mmproj", kind=Kind.PATH, label="mmproj", group=Group.SERVER,
         hint="Vision projector file for multimodal models.",
         help=("Path to a multimodal projector (mmproj) GGUF that pairs with a vision\n"
               "model so it can accept images. Only needed for vision-capable models.\n\n"
               "Flag: --mmproj FILE"),
-        default="", unset="", modes=frozenset({"server"})),
+        default="", unset=""),
     Setting(
         key="extra_args", flag="", kind=Kind.STR, label="Extra args", group=Group.GENERAL,
         hint="Raw llama.cpp flags appended last, e.g. --jinja --n-cpu-moe 24 --temp 0.7.",
@@ -405,15 +403,3 @@ def for_group(group: Group) -> list[Setting]:
         Settings belonging to `group`.
     """
     return [s for s in SETTINGS if s.group == group]
-
-
-def for_mode(mode: str) -> list[Setting]:
-    """Settings valid for a launch mode ("server" or "cli"), registry order.
-
-    Args:
-        mode: The launch mode.
-
-    Returns:
-        Settings emitted for that mode.
-    """
-    return [s for s in SETTINGS if mode in s.modes]

@@ -7,8 +7,8 @@ from llamactl.config import Config, Profile
 MODEL = "/models/m.gguf"
 
 
-def argv(prof: Profile, mode: str = "server", port: int = 8080) -> list[str]:
-    return build_command(Config(bin_dir="/bin"), MODEL, prof, mode, port)
+def argv(prof: Profile, port: int = 8080) -> list[str]:
+    return build_command(Config(bin_dir="/bin"), MODEL, prof, port)
 
 
 def test_default_server_shape() -> None:
@@ -46,10 +46,10 @@ def test_extra_args_last() -> None:
     assert cmd[-3:] == ["--jinja", "--temp", "0.9"]
 
 
-def test_cli_mode() -> None:
-    cmd = argv(Profile(parallel=4, port=1234), mode="cli")
-    assert cmd[0] == "/bin/llama-cli"
-    assert "--host" not in cmd and "--port" not in cmd and "-np" not in cmd
+def test_always_server_binary() -> None:
+    cmd = argv(Profile(parallel=4, port=1234), port=1234)
+    assert cmd[0] == "/bin/llama-server"
+    assert "--host" in cmd and cmd[cmd.index("--port") + 1] == "1234" and "-np" in cmd
 
 
 def test_command_string() -> None:
