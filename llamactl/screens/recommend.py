@@ -10,7 +10,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Label
 
 from .. import recommend, schema
-from ..config import Config
+from ..config import CUSTOM, Config, Preset
 from ..fmt import FITS_STYLE
 from ..gguf import ModelInfo
 from ..hardware import Host
@@ -85,17 +85,14 @@ class RecommendationScreen(Screen[str]):
 
     def action_accept(self) -> None:
         if self.rec.reasons:
-            self.cfg.profiles[self.model] = self.rec.profile
+            self.cfg.set_preset(self.model, Preset(CUSTOM, self.rec.profile, "edited"))
             self.cfg.save()
-        self.cfg.seen.mark_seen(self.model)
         self.dismiss("accepted")
 
     def action_editor(self) -> None:
-        self.cfg.seen.mark_seen(self.model)
         self.dismiss("editor")
 
     def action_skip(self) -> None:
-        self.cfg.seen.mark_seen(self.model)
         self.dismiss("skipped")
 
     @on(Button.Pressed, "#accept")

@@ -14,7 +14,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] `hardware.py`: `Device`, `Host`, `--list-devices` parser, nvidia-smi fallback, refresh; delete `hostinfo.py`
 - [x] Schema: drop `modes`; add fit, fit_target, device, cache_reuse, sleep_idle, embedding, pooling, threads_batch; `preset_key`, `router_owned`
 - [x] GGUF: detect pooling type (embedding models)
-- [ ] Config v3: `Preset`, per-model presets/alias/active, gateway settings, v2 migration with backup
+- [x] Config v3: `Preset`, per-model presets/alias/active, gateway settings, v2 migration with backup
 - [ ] `library.py`: discovery + alias/substring model resolution
 
 ## Phase 2 - Planner

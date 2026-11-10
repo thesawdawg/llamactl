@@ -1,8 +1,10 @@
-"""Config, profiles and model discovery for llamactl."""
+"""Config v3: settings profiles, per-model presets, gateway settings and v2 migration."""
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field, replace
+import re
+import shutil
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -13,32 +15,10 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 LOG_DIR = CONFIG_DIR / "logs"
 DEFAULT_BIN_DIR = Path.home() / "llama.cpp" / "build" / "bin"
 DEFAULT_MODEL_DIRS = [str(Path.home() / "models")]
-MIN_MODEL_BYTES = 50 * 1024 * 1024
-CONFIG_VERSION = 2
-SEEN_FILE = CONFIG_DIR / "seen.json"
-
-
-class SeenStore:
-    """Set of model paths that are no longer "New" (seen.json).
-
-    Args:
-        path: JSON file holding a list of paths.
-    """
-
-    def __init__(self, path: Path | None = None) -> None:
-        self.path = path or SEEN_FILE
-        self.paths: set[str] = (set(json.loads(self.path.read_text()))
-                                if self.path.exists() else set())
-
-    def mark_seen(self, model: str) -> None:
-        """Remember `model` as seen and persist."""
-        if model not in self.paths:
-            self.paths.add(model)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(sorted(self.paths), indent=2))
-
-    def __contains__(self, model: str) -> bool:
-        return model in self.paths
+CONFIG_VERSION = 3
+BACKUP_NAME = "config.v2.bak.json"
+CUSTOM = "custom"        # preset name/intent used for hand-edited settings
+SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
 
 
 def _coerce(key: str, value: Any) -> Any:
@@ -143,60 +123,331 @@ class Profile:
         return replace(self, **overrides)
 
 
+def _parse_bool(value: Any, default: bool) -> bool:
+    """Parse a JSON bool that may have been written as text.
+
+    Args:
+        value: Raw JSON value.
+        default: Returned when `value` is not recognisable.
+
+    Returns:
+        The boolean.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("1", "true", "on", "yes", "0", "false", "off", "no"):
+        return value.lower() in ("1", "true", "on", "yes")
+    return default
+
+
+def derive_alias(model: str | Path, taken: set[str]) -> str:
+    """Derive a unique, URL-safe alias from a model file name.
+
+    The alias is the lower-cased file stem (a split-model "-00001-of-00003" suffix removed)
+    with every character outside ``[a-z0-9._-]`` replaced by "-". When it is already in
+    `taken`, a numeric suffix is appended: "name-2", "name-3", ...
+
+    Args:
+        model: Path of the GGUF file.
+        taken: Aliases already in use.
+
+    Returns:
+        An alias not in `taken`.
+    """
+    stem = SHARD_SUFFIX_RE.sub("", Path(model).stem.lower())
+    base = re.sub(r"[^a-z0-9._-]", "-", stem) or "model"
+    alias, n = base, 1
+    while alias in taken:
+        n += 1
+        alias = f"{base}-{n}"
+    return alias
+
+
+@dataclass
+class Preset:
+    """One named set of launch settings for a model.
+
+    Attributes:
+        intent: An intent key, or "custom".
+        profile: The concrete settings.
+        source: "estimated", "tuned" or "edited".
+        measured: Measurement of a tuned run as a plain dict (typed in a later phase), or None.
+    """
+
+    intent: str = CUSTOM
+    profile: Profile = field(default_factory=Profile)
+    source: str = "edited"
+    measured: dict | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict, name: str = CUSTOM) -> "Preset":
+        """Build a preset from its JSON form, ignoring unknown keys.
+
+        Args:
+            data: Raw dict from the config file.
+            name: Preset name, used as the intent when the dict has none.
+
+        Returns:
+            The preset.
+        """
+        measured = data.get("measured")
+        return cls(intent=str(data.get("intent") or name),
+                   profile=Profile.from_dict(data.get("profile") or {}),
+                   source=str(data.get("source") or "edited"),
+                   measured=dict(measured) if isinstance(measured, dict) else None)
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-able dict."""
+        return {"intent": self.intent, "profile": self.profile.to_dict(), "source": self.source,
+                "measured": self.measured}
+
+
+@dataclass
+class ModelEntry:
+    """Everything the config knows about one model file.
+
+    Attributes:
+        alias: Name clients use for the model; unique across models, editable.
+        active: Name of the preset served by default ("" when there is none).
+        presets: Presets by name.
+    """
+
+    alias: str = ""
+    active: str = ""
+    presets: dict[str, Preset] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ModelEntry":
+        """Build an entry from its JSON form, ignoring unknown keys.
+
+        Args:
+            data: Raw dict from the config file.
+
+        Returns:
+            The entry.
+        """
+        raw = data.get("presets")
+        presets = {str(k): Preset.from_dict(v, str(k)) for k, v in raw.items()
+                   if isinstance(v, dict)} if isinstance(raw, dict) else {}
+        return cls(alias=str(data.get("alias") or ""), active=str(data.get("active") or ""),
+                   presets=presets)
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-able dict."""
+        return {"alias": self.alias, "active": self.active,
+                "presets": {k: v.to_dict() for k, v in self.presets.items()}}
+
+
+@dataclass
+class GatewaySettings:
+    """Settings of the router-mode gateway server.
+
+    Attributes:
+        host: Listen address.
+        port: Listen port.
+        api_key: Bearer key clients must send; "" for none.
+        models_max: Models kept loaded at once.
+        sleep_idle: Idle seconds before an unused model unloads; 0 = never.
+        autostart: Start the gateway when the TUI opens.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 8080
+    api_key: str = ""
+    models_max: int = 1
+    sleep_idle: int = 600
+    autostart: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GatewaySettings":
+        """Build settings from JSON, ignoring unknown keys and falling back on bad values.
+
+        Args:
+            data: Raw dict from the config file.
+
+        Returns:
+            The settings.
+        """
+        base = cls()
+        out: dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name not in data:
+                continue
+            want, v = type(getattr(base, f.name)), data[f.name]
+            try:
+                out[f.name] = (_parse_bool(v, getattr(base, f.name)) if want is bool
+                               else want(v))
+            except (TypeError, ValueError):
+                pass
+        return cls(**out)
+
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-able dict."""
+        return asdict(self)
+
+
 @dataclass
 class Config:
-    """Global settings plus per-model profile overrides keyed by model path."""
+    """Global settings, the default profile and per-model entries keyed by model path."""
 
     bin_dir: str = str(DEFAULT_BIN_DIR)
     model_dirs: list[str] = field(default_factory=lambda: list(DEFAULT_MODEL_DIRS))
     default_profile: Profile = field(default_factory=Profile)
-    profiles: dict[str, Profile] = field(default_factory=dict)
+    models: dict[str, ModelEntry] = field(default_factory=dict)
+    gateway: GatewaySettings = field(default_factory=GatewaySettings)
+    default_intent: str = "chat"
     gauge_interval: float = 3.0
     headroom_pct: int = 10
+    onboarded: bool = False
 
-    def __post_init__(self) -> None:
-        self.seen = SeenStore()
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Config":
+        """Build a config from parsed JSON of any version, migrating v2 on the way.
+
+        A v2 (or unversioned) file carries ``profiles[path]``; each becomes the model's
+        "custom" preset (source "edited") and the active one. Unknown keys are ignored.
+
+        Args:
+            raw: Parsed config.json.
+
+        Returns:
+            The config, in v3 shape.
+        """
+        version = raw.get("version", 0)
+        cfg = cls(
+            bin_dir=raw.get("bin_dir", str(DEFAULT_BIN_DIR)),
+            model_dirs=list(raw.get("model_dirs", DEFAULT_MODEL_DIRS)),
+            default_profile=Profile.from_dict(raw.get("default_profile", {})),
+            gateway=GatewaySettings.from_dict(raw.get("gateway") or {}),
+            default_intent=str(raw.get("default_intent", "chat")),
+            gauge_interval=float(raw.get("gauge_interval", 3.0)),
+            headroom_pct=int(raw.get("headroom_pct", 10)),
+            onboarded=_parse_bool(raw.get("onboarded"), False),
+        )
+        if isinstance(version, int) and version >= 3:
+            for path, data in (raw.get("models") or {}).items():
+                if isinstance(data, dict):
+                    cfg.models[path] = ModelEntry.from_dict(data)
+        else:
+            for path, data in (raw.get("profiles") or {}).items():
+                cfg.models[path] = ModelEntry(
+                    active=CUSTOM,
+                    presets={CUSTOM: Preset(CUSTOM, Profile.from_dict(data), "edited")})
+        for path, ent in cfg.models.items():
+            if not ent.alias:
+                ent.alias = derive_alias(path, {e.alias for e in cfg.models.values()})
+        return cfg
 
     @classmethod
     def load(cls) -> "Config":
         """Load config from disk, falling back to defaults."""
         if not CONFIG_FILE.exists():
             return cls()
-        raw = json.loads(CONFIG_FILE.read_text())
-        return cls(
-            bin_dir=raw.get("bin_dir", str(DEFAULT_BIN_DIR)),
-            model_dirs=raw.get("model_dirs", list(DEFAULT_MODEL_DIRS)),
-            default_profile=Profile.from_dict(raw.get("default_profile", {})),
-            profiles={k: Profile.from_dict(v) for k, v in raw.get("profiles", {}).items()},
-            gauge_interval=float(raw.get("gauge_interval", 3.0)),
-            headroom_pct=int(raw.get("headroom_pct", 10)),
-        )
+        return cls.from_dict(json.loads(CONFIG_FILE.read_text()))
+
+    def to_dict(self) -> dict:
+        """Serialise to the v3 JSON shape."""
+        return {
+            "version": CONFIG_VERSION,
+            "bin_dir": self.bin_dir,
+            "model_dirs": self.model_dirs,
+            "headroom_pct": self.headroom_pct,
+            "gauge_interval": self.gauge_interval,
+            "default_profile": self.default_profile.to_dict(),
+            "default_intent": self.default_intent,
+            "models": {k: v.to_dict() for k, v in self.models.items()},
+            "gateway": self.gateway.to_dict(),
+            "onboarded": self.onboarded,
+        }
+
+    @staticmethod
+    def _backup_v2() -> None:
+        """Copy a pre-v3 config file to config.v2.bak.json, once.
+
+        Does nothing when the file is missing, already v3 or newer, or a backup exists.
+        """
+        backup = CONFIG_FILE.with_name(BACKUP_NAME)
+        if not CONFIG_FILE.exists() or backup.exists():
+            return
+        try:
+            version = json.loads(CONFIG_FILE.read_text()).get("version", 0)
+        except (ValueError, AttributeError):
+            version = 0
+        if not isinstance(version, int) or version < CONFIG_VERSION:
+            shutil.copy2(CONFIG_FILE, backup)
 
     def save(self) -> None:
-        """Write config to disk with the current format version."""
+        """Write config to disk as v3, backing up a v2 file first (once)."""
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps({"version": CONFIG_VERSION, **asdict(self)}, indent=2))
+        self._backup_v2()
+        CONFIG_FILE.write_text(json.dumps(self.to_dict(), indent=2))
+
+    def entry(self, model: str) -> ModelEntry:
+        """The model's entry, created (with a unique derived alias) when missing.
+
+        Args:
+            model: Model path.
+
+        Returns:
+            The entry; a new one is stored in `models` but not saved to disk.
+        """
+        ent = self.models.get(model)
+        if ent is None:
+            ent = self.models[model] = ModelEntry(
+                alias=derive_alias(model, {e.alias for e in self.models.values()}))
+        return ent
+
+    def preset(self, model: str, name: str | None = None) -> Preset | None:
+        """A preset of the model.
+
+        Args:
+            model: Model path.
+            name: Preset name; None selects the active preset.
+
+        Returns:
+            The preset, or None when the model or preset does not exist.
+        """
+        ent = self.models.get(model)
+        if ent is None:
+            return None
+        return ent.presets.get(ent.active if name is None else name)
+
+    def set_preset(self, model: str, preset: Preset, activate: bool = True) -> None:
+        """Store a preset under its intent name, replacing any with that name.
+
+        Args:
+            model: Model path.
+            preset: The preset; its `intent` is the name it is stored under.
+            activate: Make it the model's active preset.
+        """
+        ent = self.entry(model)
+        ent.presets[preset.intent] = preset
+        if activate or not ent.active:
+            ent.active = preset.intent
+
+    def delete_preset(self, model: str, name: str) -> bool:
+        """Remove a preset; when it was active, the first remaining one becomes active.
+
+        Args:
+            model: Model path.
+            name: Preset name.
+
+        Returns:
+            True when a preset was removed.
+        """
+        ent = self.models.get(model)
+        if ent is None or ent.presets.pop(name, None) is None:
+            return False
+        if ent.active == name:
+            ent.active = next(iter(ent.presets), "")
+        return True
 
     def profile_for(self, model: str) -> Profile:
-        """Return the model's override profile, or the default one."""
-        return self.profiles.get(model, self.default_profile)
+        """The active preset's profile, or the default profile when there is none."""
+        p = self.preset(model)
+        return p.profile if p else self.default_profile
 
     def has_profile(self, model: str) -> bool:
-        """True when the model has a custom profile (drives the New badge)."""
-        return model in self.profiles
-
-
-def discover_models(dirs: list[str]) -> list[Path]:
-    """Find GGUF files in the given dirs, skipping vocab stubs and non-first shards."""
-    found: dict[Path, None] = {}
-    for d in dirs:
-        root = Path(d).expanduser()
-        if not root.is_dir():
-            continue
-        for p in root.rglob("*.gguf"):
-            if p.stat().st_size < MIN_MODEL_BYTES or "mmproj" in p.name:
-                continue
-            if "-of-" in p.stem and "-00001-of-" not in p.stem:
-                continue
-            found[p] = None
-    return sorted(found)
+        """True when the model has any preset (a model without one is "new")."""
+        ent = self.models.get(model)
+        return bool(ent and ent.presets)

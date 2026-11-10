@@ -12,10 +12,11 @@ from textual.widgets import Button, DataTable, Label, Static
 
 from .. import hf
 from ..command import build_command, command_string
-from ..config import Profile, discover_models
+from ..config import CUSTOM, Preset, Profile
 from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import GGUFError, ModelInfo, read_model_info
 from ..hardware import Host
+from ..library import discover_models
 from ..recommend import estimate_budget, verdict
 from ..screens.profile import ProfileEditor
 from ..screens.recommend import RecommendationScreen
@@ -105,10 +106,11 @@ class ModelsView(BaseView):
         return Text(v, style=FITS_STYLE.get(v, ""))
 
     def _profile_tag(self, model: str) -> str:
-        """'custom', 'default' or 'New' for the Profile column."""
-        if self.app.cfg.has_profile(model):
-            return "custom"
-        return "default" if model in self.app.cfg.seen else "New"
+        """The active preset's name, or 'New' when the model has no presets."""
+        ent = self.app.cfg.models.get(model)
+        if ent is None or not ent.presets:
+            return "New"
+        return ent.active or "custom"
 
     def _add_row(self, p: Path, info: ModelInfo | None) -> None:
         """Insert or update one table row; Fits/Params fill in when info arrives."""
@@ -185,12 +187,11 @@ class ModelsView(BaseView):
             ("\n".join(f"{k}={v}" for k, v in changed.items()) or "(all defaults)") + "\n\n" + cmd)
 
     def _launch(self, model: str) -> None:
-        """Launch a server for the model and mark it seen.
+        """Launch a server for the model.
 
         Args:
             model: Model path.
         """
-        self.app.cfg.seen.mark_seen(model)
         self.app.sessions.launch(model)
         self.app.switch_view("sessions")
 
@@ -207,9 +208,8 @@ class ModelsView(BaseView):
 
         def done(new: Profile | None) -> None:
             if new is not None:
-                self.app.cfg.profiles[model] = new
+                self.app.cfg.set_preset(model, Preset(CUSTOM, new, "edited"))
                 self.app.cfg.save()
-            self.app.cfg.seen.mark_seen(model)
             if model in self.model_table.rows:
                 self._add_row(Path(model), self.infos.get(model))
             self.update_detail()
@@ -269,7 +269,8 @@ class ModelsView(BaseView):
 
     def action_delete_profile(self) -> None:
         m = self.selected_model()
-        if m and self.app.cfg.profiles.pop(m, None) is not None:
+        ent = self.app.cfg.models.get(m) if m else None
+        if m and ent and self.app.cfg.delete_preset(m, ent.active):
             self.app.cfg.save()
             self._add_row(Path(m), self.infos.get(m))
             self.update_detail()

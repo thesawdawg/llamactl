@@ -62,7 +62,7 @@ MINI_KVS = [
 
 @pytest.fixture
 def gguf_file(tmp_path: Path) -> Path:
-    """A synthetic 8B-ish GGUF file in tmp_path (>= MIN_MODEL_BYTES is faked by size)."""
+    """A synthetic 8B-ish GGUF file in tmp_path (>= library.MIN_MODEL_BYTES is faked by size)."""
     p = tmp_path / "test.gguf"
     # pad so it passes discover_models' 50 MB floor
     p.write_bytes(gguf_blob(MINI_KVS) + b"\0" * (50 * 1024 * 1024))
@@ -81,7 +81,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
     model_dir.mkdir()
     for mod, attrs in (
         (config, {"CONFIG_DIR": cfg_dir, "CONFIG_FILE": cfg_dir / "config.json",
-                  "LOG_DIR": cfg_dir / "logs", "SEEN_FILE": cfg_dir / "seen.json",
+                  "LOG_DIR": cfg_dir / "logs",
                   "DEFAULT_MODEL_DIRS": [str(model_dir)]}),
         (sessions, {"CONFIG_DIR": cfg_dir, "STATE_FILE": cfg_dir / "sessions.json",
                     "LOG_DIR": cfg_dir / "logs"}),

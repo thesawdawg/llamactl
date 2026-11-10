@@ -200,8 +200,10 @@ async def test_recommendation_screen(isolated: SimpleNamespace) -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert result == ["accepted"]
-        assert "/m.gguf" in app.cfg.profiles
-        assert app.cfg.profiles["/m.gguf"].ctx_size == scr.rec.profile.ctx_size
+        assert app.cfg.has_profile("/m.gguf")
+        preset = app.cfg.preset("/m.gguf")
+        assert (preset.intent, preset.source) == ("custom", "edited")
+        assert app.cfg.profile_for("/m.gguf").ctx_size == scr.rec.profile.ctx_size
 
     app2 = LlamaCtl()
     async with app2.run_test(size=(140, 45)) as pilot:
@@ -212,7 +214,7 @@ async def test_recommendation_screen(isolated: SimpleNamespace) -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert result2 == ["skipped"]
-        assert "/n.gguf" in app2.cfg.seen
+        assert not app2.cfg.has_profile("/n.gguf")   # skipping saves nothing; still "new"
 
 
 async def test_prompt_screen() -> None:
