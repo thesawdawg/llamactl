@@ -7,7 +7,7 @@ explains every setting it changes; ``plan_all`` does so for every applicable int
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
 
@@ -247,11 +247,20 @@ class _Pick(NamedTuple):
 
 @dataclass(frozen=True)
 class _Layout:
-    """The planner's decision: context, KV type and where the weights go."""
+    """The planner's decision: context, KV type and where the weights go.
+
+    Attributes:
+        ctx: Context per slot.
+        kv: KV cache type for K and V.
+        mode: Weight placement ("gpu", "spill", "moe" or "cpu").
+        floor_spill: True when weights were moved off the GPU only to reach the intent's
+            minimum context (a spill-"avoid" intent whose GPU-only context was too small).
+    """
 
     ctx: int
     kv: str
     mode: str
+    floor_spill: bool = False
 
 
 @dataclass(frozen=True)
@@ -405,12 +414,35 @@ def _choose_spill(env: _Env, gpu_pick: _Pick | None) -> _Layout:
     return _Layout(pick.ctx, pick.kv, mode)
 
 
+def _spill_to_floor(env: _Env) -> _Layout | None:
+    """Layout that spills weights only far enough to reach the intent's minimum context.
+
+    Args:
+        env: Planning environment.
+
+    Returns:
+        A spill (or MoE) layout at the smallest candidate context of at least the minimum, or
+        None when there is no second memory pool or even spilling cannot reach the minimum.
+    """
+    if env.spill_limit <= env.gpu_limit:
+        return None
+    at_floor = min(c for c in env.cands if c >= env.floor)
+    pick = _search(replace(env, cands=(at_floor,), target=at_floor), env.spill_limit)
+    if pick is None:
+        return None
+    return _Layout(pick.ctx, pick.kv, _MOE if env.info.expert_count else _SPILL, True)
+
+
 def _choose(env: _Env) -> _Layout:
     """Decide context, KV type and placement (SPEC 5.3 steps 2 to 5)."""
     if not env.host.gpus:
         return _choose_cpu(env)
     pick = _search(env, env.gpu_limit)
-    if pick and (pick.ctx >= env.target or env.intent.spill == SPILL_AVOID):
+    if pick and pick.ctx >= env.target:
+        return _Layout(pick.ctx, pick.kv, _GPU)
+    if pick and env.intent.spill == SPILL_AVOID:
+        if pick.ctx < env.floor:
+            return _spill_to_floor(env) or _Layout(pick.ctx, pick.kv, _GPU)
         return _Layout(pick.ctx, pick.kv, _GPU)
     return _choose_spill(env, pick)
 
@@ -537,7 +569,10 @@ def _warnings(env: _Env, lay: _Layout, v: str) -> tuple[str, ...]:
         out.append(f"does not fit memory ({_where(env, lay.mode)}); values are best effort")
     if lay.ctx < env.floor:
         out.append(f"ctx {lay.ctx} per slot is below the {env.intent.key} minimum of {env.floor}")
-    if v != VERDICT_NO and lay.mode in (_SPILL, _MOE) and env.intent.spill == SPILL_AVOID:
+    if lay.floor_spill:
+        out.append(f"part of the model runs on the CPU (slower) to keep a usable context: "
+                   f"{lay.ctx} per slot, the {env.intent.key} minimum is {env.floor}")
+    elif v != VERDICT_NO and lay.mode in (_SPILL, _MOE) and env.intent.spill == SPILL_AVOID:
         out.append("does not fit usable VRAM; part of the model runs on the CPU (slower)")
     return tuple(out)
 

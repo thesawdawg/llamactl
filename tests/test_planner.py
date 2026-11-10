@@ -254,12 +254,47 @@ def test_moe_spill_uses_n_cpu_moe(moe35b: ModelInfo, gpu_host: Host) -> None:
     assert p.budget.total() - (p.profile.n_cpu_moe - 1) * per_layer > gpu_limit(gpu_host)
 
 
-def test_avoid_spill_keeps_largest_gpu_tier_and_warns_below_min(dense27b: ModelInfo) -> None:
-    """12 GB of weights on a 15 GB card leave room for 4096 ctx (q8_0) but not the 8192 minimum."""
+FLOOR_WARNING = ("part of the model runs on the CPU (slower) to keep a usable context: "
+                 "{ctx} per slot, the {intent} minimum is {floor}")
+
+
+def test_avoid_spills_to_the_minimum_when_the_gpu_tier_is_too_small(dense27b: ModelInfo) -> None:
+    """12 GB of weights on a 15 GB card leave only 4096 ctx on the GPU: spill for the 8192 minimum."""
     p = _by("chat", dense27b, _gpu_host(15))
+    assert p.verdict == "GPU+CPU" and p.profile.gpu_layers == "auto" and p.profile.fit == "on"
+    assert p.ctx_per_slot == 8192 and p.profile.ctx_size == 8192   # the minimum, not the 16384 target
+    assert p.warnings == (FLOOR_WARNING.format(ctx=8192, intent="chat", floor=8192),)
+    assert p.budget.total() <= spill_limit(_gpu_host(15))
+    assert set(p.reasons) == _changed(p)
+
+
+def test_avoid_keeps_gpu_tier_below_min_when_spilling_cannot_reach_it(dense27b: ModelInfo) -> None:
+    """With almost no free RAM, spilling gains nothing: old behaviour, below-minimum warning."""
+    p = _by("chat", dense27b, _gpu_host(15, ram_gb=0.1))
     assert p.verdict == "GPU" and p.profile.gpu_layers == "all"
     assert (p.ctx_per_slot, p.profile.cache_type_k) == (4096, "q8_0")
     assert p.warnings == ("ctx 4096 per slot is below the chat minimum of 8192",)
+
+
+def test_avoid_on_unified_memory_never_spills_to_the_minimum(dense27b: ModelInfo) -> None:
+    """One memory pool: there is nothing to spill into."""
+    p = _by("chat", dense27b, _gpu_host(15, unified=True))
+    assert p.verdict == "GPU" and p.ctx_per_slot == 4096
+    assert p.warnings == ("ctx 4096 per slot is below the chat minimum of 8192",)
+
+
+def test_avoid_at_or_above_minimum_stays_on_gpu(dense27b: ModelInfo) -> None:
+    """16 GB reaches the 8192 minimum on the GPU alone, so nothing spills."""
+    p = _by("chat", dense27b, _gpu_host(16))
+    assert p.verdict == "GPU" and p.ctx_per_slot == 8192 and p.warnings == ()
+
+
+def test_avoid_spill_to_minimum_on_moe_moves_experts() -> None:
+    """A MoE reaches the minimum by keeping experts in RAM, not by fit."""
+    p = _by("chat", _info(12e9, 48, 8, 131072, experts=64), _gpu_host(15))
+    assert p.verdict == "GPU+CPU" and p.ctx_per_slot == 8192
+    assert p.profile.n_cpu_moe > 0 and p.profile.gpu_layers == "all"
+    assert p.warnings == (FLOOR_WARNING.format(ctx=8192, intent="chat", floor=8192),)
 
 
 def test_avoid_with_nothing_fitting_the_gpu_spills(dense27b: ModelInfo) -> None:
@@ -420,6 +455,22 @@ def test_more_vram_never_shrinks_ctx(models) -> None:
             if i.spill == "allow":
                 every = [p.ctx_per_slot for p in ctx]
                 assert every == sorted(every), (info.size, i.key)
+
+
+def test_context_reaches_the_minimum_whenever_memory_allows(models) -> None:
+    """With plenty of RAM no fitting plan is left below its intent's minimum context.
+
+    (Plans of spill-"avoid" intents are not monotonic across the GPU / GPU+CPU boundary: a
+    spilling plan may target more context than the smallest all-GPU one, by design.)
+    """
+    for vram in VRAM_STEPS:
+        host = _gpu_host(vram, ram_gb=64)
+        for info in models.values():
+            for i in intents.applicable(info):
+                p = _by(i.key, info, host)
+                floor = min(i.ctx_min or info.ctx_train, info.ctx_train)
+                if p.verdict != "NO":
+                    assert p.ctx_per_slot >= floor, (vram, info.size, i.key, p.ctx_per_slot)
 
 
 def test_more_ram_never_shrinks_ctx(dense27b: ModelInfo) -> None:
