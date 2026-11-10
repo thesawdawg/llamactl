@@ -245,15 +245,20 @@ llamactl owns the trade-offs that depend on intent (context, slots, KV precision
 ### 6.1 Measurement
 
 ```python
-@dataclass(frozen=True)
+@dataclass(frozen=True)          # llamactl/measure.py (no imports from config/calibration)
 class Measurement:
-    ok: bool; error: str             # load failure reason (out of memory, timeout, crash)
+    ok: bool; error: str             # "<kind>: detail (log: path)"; kinds: out of memory, timeout,
+                                     # unknown argument, load failed, benchmark failed
     load_s: float
     vram_used: int; ram_used: int    # bytes, delta against the pre-launch snapshot
     prompt_tps: float; gen_tps: float  # from the /completion `timings` object
     at: str                          # ISO timestamp
-    build: str                       # llama-server --version commit
+    build: str                       # llama-server --version string (e.g. "0.5.0-dev (build 1, commit 5fc4f3c)")
 ```
+
+`vram_used` is the larger of the deltas after load and after the benchmark request.
+`resource_failure` (out of memory or timeout) is the only kind the search answers by stepping down;
+an unknown argument or architecture will not improve with a smaller context.
 
 ### 6.2 Tuner (`tuner.py`)
 
@@ -261,30 +266,49 @@ class Measurement:
 class Runner(Protocol):                       # the only part that touches processes / HTTP
     def measure(self, model: Path, profile: Profile) -> Measurement: ...
 
-def tune(intent, info, host, base, runner, *, max_trials=4,
-         progress: Callable[[TrialEvent], None] | None = None) -> TuneResult
+def tune(intent, info, host, base, runner, *, headroom_pct=10, calibration=None, max_trials=4,
+         progress: Callable[[TrialEvent], None] | None = None,
+         cancel: Callable[[], bool] | None = None) -> TuneResult
+def save_result(cfg, model, result, calibration, *, activate=False) -> None
+def preflight(plan, host) -> str | None       # refusal text when free memory is clearly short
 ```
 
-- `ServerRunner` launches `llama-server` on a free port bound to 127.0.0.1, waits for `/health`
-  (timeout scaled by model size), snapshots device memory, posts a fixed prompt to `/completion`
-  (`n_predict` 128, `cache_prompt` false, fixed seed), reads `timings`, then stops the process
-  group. It refuses to start when less than the plan's budget is free and offers to unload
-  gateway models first.
-- Search starts from `plan()` and is bounded by `max_trials`:
-  - load failed: step down (next lower ctx tier; then q8_0 KV if the intent allows; then spill);
-  - loaded with more than one ctx tier of VRAM slack and below `ctx_target`: step up one tier;
-  - `GPU+CPU` plans: one extra trial with `threads` = all logical cores, keep the faster.
-- Score: among trials that loaded and satisfy `ctx_min`, the highest ctx up to `ctx_target`, then
-  the highest `gen_tps` (`speed` scores by `gen_tps` first).
-- The winner is saved as the model's preset with `source: "tuned"` and its `Measurement`.
+- `ServerRunner` launches `llama-server` on a free port bound to 127.0.0.1 (host, port and API key
+  of the profile are overridden, idle sleep off), logs to a temp file in the log directory, waits
+  for `/health` (timeout 60 s + 20 s per GB of model file, at most 30 min), snapshots device
+  memory and RAM, posts a fixed prompt to `/completion` (`n_predict` 128, `cache_prompt` false,
+  seed 42, temperature 0), reads `timings`, then always stops the process group (SIGTERM, SIGKILL
+  after 15 s) and waits for it to be gone. Embedding profiles post a fixed text to
+  `/v1/embeddings` instead and report `usage.prompt_tokens` over wall time as `prompt_tps`.
+  `preflight` refuses to start when free memory is below 90% of the plan's budget; offering to
+  unload gateway models is the caller's job.
+- Search starts from `plan()` and is bounded by `max_trials`; a plan with verdict `NO` is not tried:
+  - load failed (memory or timeout): step down - next lower ctx tier (not below `ctx_min`); then
+    q8_0 KV if the intent allows; then let llama.cpp place the layers (`gpu_layers` auto, `fit` on);
+  - loaded fully on the GPU, below `ctx_target`, and the measured slack (free VRAM before the
+    launch, minus the model's `vram_used`, minus headroom) exceeds the extra KV of the next tier:
+    step up one tier. A failed step up ends the climb and keeps the last good trial;
+  - `GPU+CPU` candidates: one extra trial with `threads` = all logical cores, keep the faster;
+  - an identical profile is never launched twice.
+- Score: among trials that loaded and reach `ctx_min`, the highest ctx up to `ctx_target`, then the
+  highest `gen_tps` (`prompt_tps` for embedding models); `speed` scores by `gen_tps` first. When
+  nothing reaches `ctx_min` the best loaded trial still wins and the message says it is below the
+  minimum. Nothing loaded: `ok` is false, the trials are still recorded.
+- `save_result` stores the winner as the model's preset with `source: "tuned"` and its
+  `Measurement` (it becomes the active preset only when asked or when the model has none), and
+  records every trial in `tuning.json`.
 
 ### 6.3 Calibration (`calibration.py`)
 
 `tuning.json` stores every trial (model path, mtime, intent, profile, estimated budget,
-measurement, backend). `Calibration.factor(backend)` is the median of
+measurement, backend). `Trial.estimated_total` is `Budget.raw_total()` - the uncalibrated sum - so
+the factor never compounds. `Calibration.factor(backend)` is the median of
 `measured vram / estimated total` over successful all-GPU trials, clamped to 0.8..1.5. The
-planner applies it, so estimates on this machine improve with every tune. Preset entries whose
-model mtime or llama.cpp build changed are flagged "stale" in the UI.
+planner applies it, so estimates on this machine improve with every tune. `record`/`save` write
+the file atomically (temp file, then replace); `trials_for(model, intent)` lists trials;
+`is_stale(preset, model_path, build)` is true for a tuned preset whose model mtime (kept in the
+trial that produced the measurement) or llama.cpp build (kept in the `Measurement`) changed; the
+UI flags those "stale".
 
 ## 7. Serving
 
