@@ -51,7 +51,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] Home view
 - [x] Models view with per-intent detail
 - [x] IntentPicker, PlanScreen, PresetEditor
-- [ ] TuneScreen
+- [x] TuneScreen
 - [x] Serving view (gateway + standalone + attached)
 - [ ] Settings view: gateway and default intent
 
