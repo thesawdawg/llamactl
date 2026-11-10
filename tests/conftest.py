@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llamactl import calibration, config, gguf, hardware, sessions
+from llamactl import calibration, config, gateway, gguf, hardware, sessions
 from llamactl.hardware import Device, Host
 
 _U32, _F32, _STR, _ARR, _I32 = 4, 6, 8, 9, 5
@@ -87,6 +87,8 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
                     "LOG_DIR": cfg_dir / "logs"}),
         (gguf, {"CONFIG_DIR": cfg_dir, "CACHE_FILE": cfg_dir / "gguf_cache.json"}),
         (calibration, {"CONFIG_DIR": cfg_dir, "TUNING_FILE": cfg_dir / "tuning.json"}),
+        (gateway, {"CONFIG_DIR": cfg_dir, "STATE_FILE": cfg_dir / "gateway.json",
+                   "PRESETS_FILE": cfg_dir / "gateway.ini", "LOG_DIR": cfg_dir / "logs"}),
     ):
         for name, val in attrs.items():
             monkeypatch.setattr(mod, name, val)

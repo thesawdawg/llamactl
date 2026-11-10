@@ -27,8 +27,8 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 ## Phase 3 - Gateway
 
 - [x] `command.py`: preset key/value rendering from the registry
-- [ ] `gateway.render_presets` (alias and alias:intent sections)
-- [ ] `Gateway` process control + router API client, state in `gateway.json`
+- [x] `gateway.render_presets` (alias and alias@preset sections)
+- [x] `Gateway` process control + router API client, state in `gateway.json`
 - [x] `sessions.launch_server` takes a preset
 - [ ] Manual: real router accepts the generated INI
 
