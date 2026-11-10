@@ -241,7 +241,7 @@ def parse_models(payload: Any) -> list[GatewayModel]:
 
 # --------------------------------------------------------------------------- process control
 
-def _terminate(pid: int, timeout: float = STOP_TIMEOUT,
+def terminate_group(pid: int, timeout: float = STOP_TIMEOUT,
                sleep: Callable[[float], None] = time.sleep) -> None:
     """Stop a process group: SIGTERM, then SIGKILL after `timeout` seconds.
 
@@ -418,7 +418,7 @@ class Gateway:
         st = self.state
         if st is None:
             return False
-        _terminate(st.pid)
+        terminate_group(st.pid)
         GatewayState.clear()
         return True
 

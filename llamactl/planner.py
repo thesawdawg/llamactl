@@ -318,7 +318,7 @@ def _trained(info: ModelInfo) -> int:
     return info.ctx_train or CTX_TIERS[-1]
 
 
-def _ctx_bounds(intent: Intent, info: ModelInfo) -> tuple[tuple[int, ...], int, int]:
+def ctx_bounds(intent: Intent, info: ModelInfo) -> tuple[tuple[int, ...], int, int]:
     """Candidate contexts, resolved target and resolved minimum for an intent.
 
     Candidates are the power-of-two tiers from 4096 up to the target, plus the target itself
@@ -343,7 +343,7 @@ def _ctx_bounds(intent: Intent, info: ModelInfo) -> tuple[tuple[int, ...], int, 
 def _make_env(intent: Intent, info: ModelInfo, host: Host, base: Profile, pct: float,
               calibration: Calibration | None) -> _Env:
     """Assemble the planning environment."""
-    cands, target, floor = _ctx_bounds(intent, info)
+    cands, target, floor = ctx_bounds(intent, info)
     prof = base.merged(parallel=intent.slots, **intent.extra)
     return _Env(intent, info, host, prof, pct, calibration_factor(host, calibration),
                 cands, target, floor, gpu_limit(host, pct), spill_limit(host, pct))

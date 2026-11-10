@@ -381,7 +381,7 @@ def test_stop_escalates_to_sigkill(env, monkeypatch: pytest.MonkeyPatch) -> None
     sent: list[int] = []
     monkeypatch.setattr(gateway.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(gateway.os, "killpg", lambda pgid, sig: sent.append(sig))
-    gateway._terminate(st.pid, timeout=0.2, sleep=lambda s: None)
+    gateway.terminate_group(st.pid, timeout=0.2, sleep=lambda s: None)
     assert sent == [signal.SIGTERM, signal.SIGKILL]
 
 
@@ -391,7 +391,7 @@ def test_stop_without_group_leadership_signals_only_the_pid(monkeypatch: pytest.
     monkeypatch.setattr(gateway.os, "getpgid", lambda pid: 1)
     monkeypatch.setattr(gateway.os, "kill", lambda pid, sig: calls.append(("kill", pid)))
     monkeypatch.setattr(gateway.os, "killpg", lambda *a: calls.append(("killpg", 0)))
-    gateway._terminate(55)
+    gateway.terminate_group(55)
     assert calls == [("kill", 55)]
 
 
