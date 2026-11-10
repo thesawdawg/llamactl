@@ -277,7 +277,9 @@ def render_tune(d: dict, style: Style) -> str:
     """Text for the result of ``llamactl tune``."""
     head = "cancelled" if d["cancelled"] else ("tuned" if d["ok"] else "tune failed")
     colour = "green" if d["ok"] and not d["cancelled"] else "red" if not d["ok"] else "yellow"
-    lines = [f"{style.paint(head, colour)}: {d['model']} for {d['intent']}: {d['message']}"]
+    said = d["message"].startswith(head)          # "cancelled; ..." already says it
+    lines = [f"{'' if said else style.paint(head, colour) + ': '}{d['model']} for "
+             f"{d['intent']}: {d['message']}"]
     best = d["best"]
     if best:
         m = best["measurement"]

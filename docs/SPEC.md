@@ -374,6 +374,29 @@ data; models are named by alias, file stem or unique substring):
 
 Exit codes: 0 ok, 1 runtime failure, 2 usage / unknown or ambiguous model.
 
+As built:
+
+- `cli.py` only parses arguments and runs commands. Each command is `cmd_x(args, services)`;
+  `Services` holds the config, lazy host detection, model list, GGUF cache, calibration, `Gateway`,
+  `SessionStore`, the tune `Runner` factory, clocks and the output streams, and tests replace it
+  wholesale (`main(argv, services)`). `report.py` turns core objects into plain dicts (also what
+  `--json` prints) and `render.py` turns those into aligned text; colour only on a TTY with
+  `NO_COLOR` unset. Importing `cli` never imports Textual; no arguments launch the TUI.
+- The multi-step logic the TUI needs too lives in `actions.py`: `choose_intent`, `plan_for`,
+  `store_plan`, `pick_preset` (plan and store an `estimated` preset only when it is missing),
+  `served_name` (`alias`, or `alias@preset` for a non-active preset), `ensure_gateway`,
+  `serve_gateway`, `wait_loaded`, `wait_unloaded`, `wait_server_ready`, `run_tune` (preflight,
+  search, save, reload the gateway) and `curl_snippet`.
+- `hw`, `ls`, `plan` (without `--save`), `ps` and `logs` never write the config or a state file
+  (`Services(read_only=True)`: no GGUF cache writes, `sessions.json` and `gateway.json` untouched).
+  Commands that save the config perform the v2 -> v3 migration and its backup.
+- `plan --save` stores an `estimated` preset and refuses to replace a tuned or edited one without
+  `--force`. `serve` uses an existing preset as is; `--for` makes the preset active (so it is served
+  as plain `alias`) unless `--no-activate`, which serves `alias@intent`. `serve` waits for the model
+  (progress dots on stderr, timeout as the tuner's health timeout, `--no-wait` to skip) and prints
+  the base URL, the model name and a `curl` line. `tune` streams one line per trial to stderr;
+  Ctrl-C stops the running trial's server and keeps the trials so far (exit 1).
+
 ## 9. TUI
 
 Five views in a sidebar shell (shell, gauges and status bar carry over from v1):

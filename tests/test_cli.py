@@ -59,6 +59,8 @@ class FakeGateway:
         self.healthy = True
         self.listen_url = "http://127.0.0.1:8080"
         self.exit_code = 1
+        self.unload_polls = 0            # listings that still show the model after an unload
+        self._unloading: dict[str, int] = {}
 
     @property
     def state(self) -> GatewayState | None:
@@ -103,6 +105,11 @@ class FakeGateway:
     def models(self) -> list[GatewayModel]:
         out = []
         for n in self.names():
+            if n in self._unloading:
+                self._unloading[n] -= 1
+                if self._unloading[n] <= 0:
+                    self.states[n] = UNLOADED
+                    del self._unloading[n]
             if self.states.get(n) == LOADING:
                 self._left[n] = self._left.get(n, self.polls) - 1
                 if self._left[n] <= 0:
@@ -125,7 +132,10 @@ class FakeGateway:
 
     def unload(self, name: str) -> None:
         self.calls.append(("unload", name))
-        self.states[name] = UNLOADED
+        if self.unload_polls:
+            self._unloading[name] = self.unload_polls
+        else:
+            self.states[name] = UNLOADED
 
 
 class FakeStore:
@@ -570,6 +580,13 @@ def test_tune_ctrl_c_stops_cleanly_and_records_the_trials_so_far(world, capsys) 
     assert len(world.runner.profiles) == 2
 
 
+def test_cancelled_tune_text_does_not_repeat_itself(world, capsys) -> None:
+    world.runner = FakeRunner(KeyboardInterrupt())
+    r = world.run(capsys, "tune", "qwen3")
+    assert r.code == 1
+    assert r.out.splitlines()[0] == "qwen3-8b-q4_k_m for chat: cancelled before any trial ran"
+
+
 def test_tune_needs_the_binary(world, capsys) -> None:
     world.cfg.bin_dir = str(world.bin_dir / "missing")
     r = world.run(capsys, "tune", "qwen3")
@@ -851,6 +868,18 @@ def test_load_waits_and_unload_works(world, capsys) -> None:
     assert r.code == 0 and "already loaded" in r.out
     r = world.run(capsys, "unload", "llama-3")                 # unique substring
     assert r.code == 0 and ("unload", "llama-3-q8_0") in world.gw.calls
+
+
+def test_unload_waits_for_the_model_to_leave(world, capsys) -> None:
+    _gateway_with_two_presets(world)
+    world.gw.states["llama-3-q8_0"] = LOADED
+    world.gw.unload_polls = 3
+    r = world.run(capsys, "unload", "llama-3-q8_0")
+    assert r.code == 0 and "llama-3-q8_0 unloaded" in r.out and world.clock.sleeps == 2
+    world.gw.states["llama-3-q8_0"] = LOADED
+    world.gw.unload_polls = 10 ** 9
+    r = world.run(capsys, "unload", "llama-3-q8_0")
+    assert r.code == 0 and "still lists it as running" in r.out
 
 
 def test_load_by_preset_name_no_wait_and_failure(world, capsys) -> None:

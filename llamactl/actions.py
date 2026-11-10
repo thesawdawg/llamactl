@@ -334,6 +334,35 @@ def wait_loaded(gw: Gateway, name: str, timeout: float, *, clock: Clock = time.m
     return seen[0]
 
 
+def wait_unloaded(gw: Gateway, name: str, timeout: float, *, clock: Clock = time.monotonic,
+                  sleep: Sleep = time.sleep, tick: Tick | None = None,
+                  interval: float = 0.5) -> bool:
+    """Wait until the router no longer reports a model as loaded, loading or sleeping.
+
+    The router answers an unload request before the model is gone.
+
+    Args:
+        gw: The gateway.
+        name: Model id.
+        timeout: Seconds to wait.
+        clock: Monotonic clock.
+        sleep: Sleep function.
+        tick: Progress callback, called once per pause.
+        interval: Seconds between checks.
+
+    Returns:
+        True when the model is down, False when `timeout` passed first.
+
+    Raises:
+        GatewayError: When the gateway cannot be asked.
+    """
+    def gone() -> bool:
+        found = next((m for m in gw.models() if m.name == name), None)
+        return found is None or found.state not in (LOADED, LOADING, SLEEPING)
+
+    return _wait_until(gone, timeout, interval=interval, clock=clock, sleep=sleep, tick=tick)
+
+
 def wait_server_ready(session: Session, health: Callable[[str], str], timeout: float, *,
                       clock: Clock = time.monotonic, sleep: Sleep = time.sleep,
                       tick: Tick | None = None, interval: float = 0.5) -> None:

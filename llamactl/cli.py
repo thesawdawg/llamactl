@@ -36,6 +36,7 @@ EXIT_OK, EXIT_FAILURE, EXIT_USAGE = 0, 1, 2
 DEFAULT_TAIL = 40
 FOLLOW_INTERVAL = 0.5
 HEALTH_PROBE_TIMEOUT = 1.0
+UNLOAD_TIMEOUT = 30.0            # seconds to wait for a model to leave memory
 DEFAULT_LOAD_TIMEOUT = 300.0     # seconds to wait for a model whose file size is unknown
 STATE_READY, STATE_LOADING, STATE_DOWN = "ready", "loading", "down"
 GATEWAY_LOG = "gateway"          # the NAME `logs` uses for the gateway's own log
@@ -583,7 +584,10 @@ def cmd_unload(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl unload NAME``: ask the gateway to unload a model."""
     name = _match(args.name, _require_gateway(sv), "gateway model")
     sv.gateway.unload(name)
-    sv.say(f"{name} unloaded")
+    if actions.wait_unloaded(sv.gateway, name, UNLOAD_TIMEOUT, clock=sv.clock, sleep=sv.sleep):
+        sv.say(f"{name} unloaded")
+    else:
+        sv.say(f"{name}: unload requested, but the gateway still lists it as running")
     return EXIT_OK
 
 
