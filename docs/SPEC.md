@@ -161,6 +161,17 @@ class Preset:
   and editable.
 - `seen.json` is retired; "new" means the model has no presets.
 
+### 4.4 State directory
+
+Every state file (`config.json`, `gateway.ini`, `gateway.json`, `sessions.json`, `gguf_cache.json`,
+`tuning.json`, `hf_token`, `logs/`) lives in one directory, resolved once by
+`config.state_dir()` when the package is imported: `$LLAMACTL_HOME` if set, else
+`$XDG_CONFIG_HOME/llamactl` if set, else `~/.config/llamactl`. Empty variables count as unset.
+Each module derives its path constants from `config.CONFIG_DIR`; the tests redirect those
+constants in the `isolated` fixture, and `tests/conftest.py` additionally points
+`LLAMACTL_HOME` at a temp dir for the whole session before anything is imported, so a test that
+forgets `isolated` still cannot reach the real directory.
+
 ## 5. Intents and the planner
 
 ### 5.1 Intents (`intents.py`)

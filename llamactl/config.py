@@ -2,16 +2,41 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from . import schema
 from .measure import Measurement
 
-CONFIG_DIR = Path.home() / ".config" / "llamactl"
+STATE_ENV = "LLAMACTL_HOME"
+
+
+def state_dir(env: Mapping[str, str] | None = None, home: Path | None = None) -> Path:
+    """The one place that decides where llamactl keeps its state.
+
+    ``LLAMACTL_HOME`` wins, then ``$XDG_CONFIG_HOME/llamactl``, then ``~/.config/llamactl``.
+    Empty variables count as unset; a leading ``~`` is expanded.
+
+    Args:
+        env: Environment to read (default: ``os.environ``).
+        home: Home directory for the last fallback (default: the user's).
+
+    Returns:
+        The directory (it may not exist yet).
+    """
+    env = os.environ if env is None else env
+    if explicit := env.get(STATE_ENV, "").strip():
+        return Path(explicit).expanduser()
+    if xdg := env.get("XDG_CONFIG_HOME", "").strip():
+        return Path(xdg).expanduser() / "llamactl"
+    return (home or Path.home()) / ".config" / "llamactl"
+
+
+CONFIG_DIR = state_dir()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LOG_DIR = CONFIG_DIR / "logs"
 DEFAULT_BIN_DIR = Path.home() / "llama.cpp" / "build" / "bin"

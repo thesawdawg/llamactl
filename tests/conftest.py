@@ -1,14 +1,24 @@
 """Shared test fixtures: synthetic GGUF blobs and an isolated environment."""
 from __future__ import annotations
 
+import os
+import shutil
 import struct
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 
-from llamactl import calibration, config, gateway, gguf, hardware, sessions, tuner
-from llamactl.hardware import Device, Host
+# Second line of defence: llamactl resolves its state directory when it is imported, so the
+# variable must be set before the import below. Whatever a test forgets to redirect lands here,
+# never in the real ~/.config/llamactl.
+SESSION_HOME = Path(tempfile.mkdtemp(prefix="llamactl-test-home-"))
+os.environ["LLAMACTL_HOME"] = str(SESSION_HOME)
+
+from llamactl import calibration, config, gateway, gguf, hardware, sessions, tuner  # noqa: E402
+from llamactl.hardware import Device, Host  # noqa: E402
 
 _U32, _F32, _STR, _ARR, _I32 = 4, 6, 8, 9, 5
 
@@ -58,6 +68,18 @@ MINI_KVS = [
     kv_u32("testarch.attention.head_count_kv", 2),
     kv_u32("testarch.context_length", 8192),
 ]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def session_state_dir() -> Iterator[Path]:
+    """Keep the whole session's default state directory in a temp dir and remove it at the end.
+
+    Yields:
+        The directory every state path defaults to when a test does not use `isolated`.
+    """
+    assert config.CONFIG_DIR == SESSION_HOME, "llamactl was imported before LLAMACTL_HOME was set"
+    yield SESSION_HOME
+    shutil.rmtree(SESSION_HOME, ignore_errors=True)
 
 
 @pytest.fixture

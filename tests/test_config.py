@@ -224,3 +224,36 @@ def test_legacy_dict_measured_still_loads(cfg_dir: Path) -> None:
     cfg.save()
     assert json.loads((cfg_dir / "config.json").read_text())["models"]["/m/a.gguf"][
         "presets"]["agent"]["measured"]["gen_tps"] == 41.5
+
+
+# ---------------------------------------------------------------------------- state directory
+
+def test_state_dir_prefers_llamactl_home(tmp_path: Path) -> None:
+    env = {"LLAMACTL_HOME": str(tmp_path / "mine"), "XDG_CONFIG_HOME": str(tmp_path / "xdg")}
+    assert config.state_dir(env, tmp_path / "home") == tmp_path / "mine"
+
+
+def test_state_dir_falls_back_to_xdg_config_home(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path / "xdg")}
+    assert config.state_dir(env, tmp_path / "home") == tmp_path / "xdg" / "llamactl"
+
+
+def test_state_dir_defaults_to_dot_config_and_ignores_empty_variables(tmp_path: Path) -> None:
+    default = tmp_path / "home" / ".config" / "llamactl"
+    assert config.state_dir({}, tmp_path / "home") == default
+    assert config.state_dir({"LLAMACTL_HOME": " ", "XDG_CONFIG_HOME": ""}, tmp_path / "home") == default
+
+
+def test_state_dir_expands_a_tilde() -> None:
+    assert config.state_dir({"LLAMACTL_HOME": "~/state"}, Path("/x")) == Path.home() / "state"
+
+
+def test_session_default_state_dir_is_a_temp_dir_not_the_real_one() -> None:
+    """The conftest session fixture keeps un-isolated tests away from ~/.config/llamactl."""
+    assert config.CONFIG_DIR != Path.home() / ".config" / "llamactl"
+    assert config.CONFIG_DIR.name.startswith("llamactl-test-home-")
+    from llamactl import calibration, gateway, gguf, hf, sessions
+    for mod, name in ((gguf, "CACHE_FILE"), (calibration, "TUNING_FILE"), (gateway, "STATE_FILE"),
+                      (gateway, "PRESETS_FILE"), (sessions, "STATE_FILE"), (hf, "TOKEN_FILE")):
+        assert getattr(mod, name).parent == config.CONFIG_DIR, f"{mod.__name__}.{name}"
+    assert config.LOG_DIR.parent == config.CONFIG_DIR
