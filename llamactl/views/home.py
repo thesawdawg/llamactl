@@ -114,7 +114,7 @@ def gateway_lines(cfg: Config, state: str, url: str, problems: list[str]) -> Tex
         The card body.
     """
     g = cfg.gateway
-    idle = f"unload after {g.sleep_idle} s idle" if g.sleep_idle > 0 else "never unloaded"
+    idle = f"unload a model after {g.sleep_idle} s unused" if g.sleep_idle > 0 else "models stay loaded"
     t = Text()
     t.append(f"{'State':<10}")
     t.append(state, style=STATE_STYLE.get(state, ""))

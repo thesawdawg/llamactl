@@ -416,8 +416,46 @@ Five views in a sidebar shell (shell, gauges and status bar carry over from v1):
    intent.
 
 Screens: `IntentPicker` (cards with verdict/ctx/why per intent), `PlanScreen` (was
-RecommendationScreen: reasons table, accept / edit / tune), `TuneScreen` (live trial table with
+RecommendationScreen: verdict, budget, Setting/Base/Planned/Why table; save as preset, edit, tune, serve), `TuneScreen` (live trial table with
 progress, cancel), `PresetEditor` (was ProfileEditor, unchanged mechanics), `Onboarding`.
+
+As built (Phase 6; Discover's fit-aware lists, the post-download picker and Onboarding are
+Phase 7):
+
+- **Services and threading.** `LlamaCtl` owns `cfg`, `host`, `models` + `infos` (GGUF headers),
+  `calibration`, `gateway`, `store`, the llama-server `build` string and the last
+  `ServingSnapshot`; every one is injectable (`LlamaCtl(cfg=, gateway=, store=, runner_factory=,
+  build=, health=)`), which is how the tests run without llama.cpp. Views never poll: the host
+  poll (`hardware.detect/refresh`), the model scan, and one serving poll (`serving.gather`:
+  gateway status + models + session health, every 2 s, every 6 s while nothing runs) run in thread
+  workers through `run_bg`, and the serving poll posts one `ServingChanged` message that Home and
+  Serving both consume. Workers hand results back with `LlamaCtl.ui`, which never blocks and drops
+  the call when the app is closing or the target widget is gone (a plain `call_from_thread`
+  raised `NoMatches` into the worker during shutdown: the old intermittent `WorkerFailed`).
+  Failures (`GatewayError`, `ActionError`, `LookupError`, `ValueError`, `OSError`, `GGUFError`)
+  become a status-bar message plus a notification, never a traceback. `presets_changed()` is the
+  one helper after any preset change: save the config, rewrite and reload the gateway presets in
+  a worker, refresh the rows.
+- **Keys.** `1`-`5` switch views; `r` rescans models; `q` quits.
+  Home: `u` start gateway, `d` stop (confirms), `y` copy base URL (`.../v1`), `c` copy curl, Enter
+  on a next step. Models: Enter serve (IntentPicker when the model has no preset or several),
+  `s` standalone, `t` tune, `p` plan, `e` edit preset, `a` set active, `Delete` remove preset,
+  `D` default profile. Serving: `l` load, `x` unload, `s` stop standalone (confirms), `u`/`d`
+  gateway up/down, `a` attach, `o` full log, `y` copy URL, `c` copy curl. Settings: `Ctrl+S`.
+  Inside editors the F-key / ctrl convention applies (`Ctrl+S`, `F1`, `F2`, `Ctrl+R`).
+- **Serve rules.** Enter on a model with exactly one preset serves it. Picking an intent in the
+  picker plans and stores an `estimated` preset when missing; it only becomes active when the
+  model had none, so an existing model's pick is served as `alias@intent` and its active preset
+  does not change (`a` changes it).
+- **Next steps** are `suggest.next_steps` (pure): llama-server missing, no models, models without
+  presets, estimated active presets (tune), stale tuned presets (re-tune), gateway stopped while
+  presets exist (start). At most three per rule.
+- **TuneScreen** runs `actions.run_tune` in a worker that outlives the screen. Cancel and closing
+  set the cancel flag, which the tuner polls between trials: the trial in flight finishes (its
+  server is stopped by the runner), later ones do not start, and the trials so far are recorded.
+- **Settings** saves in place into `cfg.gateway`, rewrites the presets and reloads a running
+  gateway; host, port, API key and models-max are command line options of the router, so
+  changing them tells the user to restart it.
 
 Onboarding runs when `onboarded` is false: (1) locate llama.cpp (`bin_dir`, then `PATH`) and show
 its version; (2) show detected hardware; (3) confirm model directories and scan; (4) no models:

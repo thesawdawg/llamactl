@@ -7,6 +7,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.widget import Widget
 from textual.validation import Function, Integer, Number
 from textual.widgets import Button, Input, Label, ListItem, ListView, Select, Static, Switch
 
@@ -32,17 +33,15 @@ class SettingsView(BaseView):
     DEFAULT_CSS = """
     SettingsView { height: 1fr; }
     #set_scroll { padding: 0 1; }
-    #set_scroll .hint { color: $text-muted; text-style: italic; }
     #set_scroll .section { text-style: bold; margin-top: 1; color: $accent; }
-    #set_scroll Input { margin-bottom: 0; }
-    #set_scroll Select { width: 40; }
-    #dir_list { height: auto; max-height: 8; border: round $primary-darken-2; }
+    #set_scroll .row { height: auto; }
+    #set_scroll .lbl { width: 28; padding: 0 1 0 0; }
+    #set_scroll .row Input { width: 50; }
+    #set_scroll .row Select { width: 50; }
+    #set_scroll .hint { color: $text-muted; text-style: italic; padding: 0 1; }
+    #dir_list { height: auto; max-height: 6; border: round $primary-darken-2; }
     #set_buttons { height: auto; margin-top: 1; }
     #set_buttons Button { margin-right: 1; }
-    #token_row { height: auto; }
-    #token_state { color: $text-muted; padding: 1 1; }
-    #autostart_row { height: auto; }
-    #autostart_row Label { padding: 1 1; }
     #set_msg { height: auto; margin-top: 1; }
     """
 
@@ -50,54 +49,54 @@ class SettingsView(BaseView):
         cfg = self.app.cfg
         g = cfg.gateway
         intent_keys = [i.key for i in INTENTS]
+
+        def row(label: str, widget: Widget, hint: str = "") -> Horizontal:
+            """A label on the left, the control on the right, an optional hint after it."""
+            kids: list[Widget] = [Label(label, classes="lbl"), widget]
+            if hint:
+                kids.append(Label(hint, classes="hint"))
+            return Horizontal(*kids, classes="row")
+
         with VerticalScroll(id="set_scroll"):
             yield Label("llama.cpp", classes="section")
-            yield Label("Bin dir")
-            yield Input(cfg.bin_dir, id="bin_dir",
-                        validators=[Function(self._bin_ok, "needs llama-server inside")])
-            yield Label("Folder holding llama-server (your build/bin).", classes="hint")
-            yield Label("Model folders", classes="section")
+            yield row("Bin dir", Input(cfg.bin_dir, id="bin_dir", compact=True, validators=[
+                Function(self._bin_ok, "needs llama-server inside")]), "folder holding llama-server")
+            yield Label("Model folders (scanned recursively for .gguf; Delete removes the "
+                        "highlighted one)", classes="section")
             yield ListView(*[ListItem(Label(d)) for d in cfg.model_dirs], id="dir_list")
-            yield Input(placeholder="Add directory - press Enter (Delete removes the highlighted one)",
-                        id="add_dir", validators=[Function(self._dir_ok, "not a directory")])
-            yield Label("Folders scanned (recursively) for .gguf models.", classes="hint")
+            yield row("Add folder", Input(placeholder="path, then Enter", id="add_dir",
+                                          compact=True, validators=[
+                Function(self._dir_ok, "not a directory")]))
             yield Label("Serving", classes="section")
-            yield Label("Default intent")
-            yield Select([(i.label, i.key) for i in INTENTS],
-                         value=cfg.default_intent if cfg.default_intent in intent_keys else "chat",
-                         allow_blank=False, id="default_intent")
-            yield Label("What a model is planned for when you do not say (Serve, plan, tune).",
-                        classes="hint")
+            yield row("Default intent", Select(
+                [(i.label, i.key) for i in INTENTS], allow_blank=False, id="default_intent",
+                compact=True, value=cfg.default_intent if cfg.default_intent in intent_keys
+                else "chat"), "used when you do not pick one")
             yield Label("Gateway", classes="section")
-            yield Label("Host")
-            yield Input(g.host, id="gw_host", validators=[Function(
-                lambda v: bool(v.strip()) and " " not in v.strip(), "a host name or address")])
-            yield Label("Port")
-            yield Input(str(g.port), id="gw_port", validators=[Integer(minimum=1, maximum=65535)])
-            yield Label("API key")
-            yield Input(g.api_key, id="gw_api_key", password=True)
-            yield Label("Clients must send it as a Bearer token; empty means no key.",
-                        classes="hint")
-            yield Label("Models loaded at once (models-max)")
-            yield Input(str(g.models_max), id="gw_models_max", validators=[Integer(minimum=1)])
-            yield Label("Unload a model after this many idle seconds (0 = never)")
-            yield Input(str(g.sleep_idle), id="gw_sleep_idle", validators=[Integer(minimum=0)])
-            with Horizontal(id="autostart_row"):
-                yield Switch(g.autostart, id="gw_autostart")
-                yield Label("Start the gateway when llamactl opens")
+            yield row("Host", Input(g.host, id="gw_host", compact=True, validators=[Function(
+                lambda v: bool(v.strip()) and " " not in v.strip(), "a host name or address")]))
+            yield row("Port", Input(str(g.port), id="gw_port", compact=True,
+                                    validators=[Integer(minimum=1, maximum=65535)]))
+            yield row("API key", Input(g.api_key, id="gw_api_key", password=True, compact=True),
+                      "Bearer token; empty = none")
+            yield row("Models loaded at once", Input(str(g.models_max), id="gw_models_max",
+                                                     compact=True,
+                                                     validators=[Integer(minimum=1)]),
+                      "models-max")
+            yield row("Unload after idle seconds", Input(str(g.sleep_idle), id="gw_sleep_idle",
+                                                         compact=True,
+                                                         validators=[Integer(minimum=0)]),
+                      "0 = never")
+            yield row("Start gateway on launch", Switch(g.autostart, id="gw_autostart"))
             yield Label("Planning and display", classes="section")
-            yield Label("VRAM headroom (%)")
-            yield Input(str(cfg.headroom_pct), id="headroom_pct",
-                        validators=[Integer(minimum=0, maximum=50)])
-            yield Label("Share of each device's memory plans keep free (at least 0.5 GB).",
-                        classes="hint")
-            yield Label("Gauge refresh interval (seconds, applies on the next start)")
-            yield Input(str(cfg.gauge_interval), id="gauge_interval",
-                        validators=[Number(minimum=1)])
+            yield row("VRAM headroom (%)", Input(str(cfg.headroom_pct), id="headroom_pct",
+                                                 compact=True, validators=[
+                Integer(minimum=0, maximum=50)]), "kept free per device (min 0.5 GB)")
+            yield row("Gauge interval (s)", Input(str(cfg.gauge_interval), id="gauge_interval",
+                                                  compact=True, validators=[Number(minimum=1)]),
+                      "applies on the next start")
             yield Label("Hugging Face", classes="section")
-            with Horizontal(id="token_row"):
-                yield Button("Set token", id="set_token")
-                yield Label("", id="token_state")
+            yield row("Access token", Button("Set token", id="set_token", compact=True))
             with Horizontal(id="set_buttons"):
                 yield Button("Save (Ctrl+S)", id="save", variant="primary")
                 yield Button("Edit default profile", id="edit_default")
@@ -120,7 +119,8 @@ class SettingsView(BaseView):
         return not value.strip() or Path(value).expanduser().is_dir()
 
     def _token_state(self) -> None:
-        self.query_one("#token_state", Label).update("token set" if hf.load_token() else "no token")
+        self.query_one("#set_token", Button).label = (
+            "Change token (set)" if hf.load_token() else "Set token (none yet)")
 
     def _msg(self, text: str) -> None:
         self.query_one("#set_msg", Static).update(text)

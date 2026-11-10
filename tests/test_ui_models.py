@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import Static
 
 from fakes import FakeGateway, FakeStore, plain, wait_for
 from llamactl.config import Config, Preset, Profile

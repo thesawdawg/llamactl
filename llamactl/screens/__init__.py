@@ -1,1 +1,1 @@
-"""Full screens and modals: ProfileEditor, HelpPanel."""
+"""Full screens and modals: PresetEditor, IntentPicker, PlanScreen, TuneScreen and small modals."""

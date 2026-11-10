@@ -9,7 +9,7 @@ from textual.widgets import DataTable, Input, OptionList, Static
 
 from fakes import FakeGateway, FakeRunner, FakeStore, plain, runner_factory, wait_for
 from llamactl.app import LlamaCtl, ServingChanged
-from llamactl.config import Preset, Profile
+from llamactl.config import Config, Preset, Profile
 from llamactl.gateway import FAILED, LOADED, UNLOADED, GatewayError
 from llamactl.screens.confirm import ConfirmScreen
 from llamactl.screens.log import LogScreen
@@ -409,3 +409,47 @@ async def test_a_failing_load_is_reported(ui_env: SimpleNamespace) -> None:
         await pilot.press("l")
         assert await wait_for(pilot, lambda: "no memory" in plain(app._status))
         assert app.is_running
+
+
+async def test_attached_server_shows_its_props(ui_env: SimpleNamespace, monkeypatch) -> None:
+    from llamactl.views import serving as serving_view
+
+    monkeypatch.setattr(serving_view, "probe", lambda url: {"model_path": "/x/m.gguf", "n_ctx": 4096})
+    ext = Session("ext-box-8081", "m", "http://10.0.0.5:8081", external=True, started=time.time())
+    app = make_app(ui_env, store=FakeStore([ext]), health=lambda url: "ready")
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.press("3")
+        sv = app.views["serving"]
+        assert await wait_for(pilot, lambda: sv.table.row_count == 1)
+        assert await wait_for(pilot, lambda: "n_ctx" in sv.detail_text())
+        assert "http://10.0.0.5:8081" in sv.detail_text()
+        await pilot.press("o")
+        await pilot.pause(0.1)
+        assert "attached server has no log" in plain(app._status)
+
+
+async def test_unwritable_config_is_a_message(ui_env: SimpleNamespace, monkeypatch) -> None:
+    m = ui_env.add_model()
+    app = make_app(ui_env, running=True)
+    async with app.run_test(size=SIZE) as pilot:
+        assert await wait_for(pilot, lambda: len(app.infos) == 1)
+
+        def boom(self) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Config, "save", boom)
+        ui_env.cfg.set_preset(str(m), Preset("chat", Profile(), "edited"))
+        app.presets_changed(str(m))
+        await pilot.pause(0.1)
+        assert "cannot save the config: disk full" in plain(app._status)
+        assert app.is_running
+
+
+async def test_ini_rendering_error_while_reloading_is_a_message(ui_env: SimpleNamespace) -> None:
+    gw = FakeGateway(ui_env.cfg, running=True)
+    gw.fail("reload", ValueError("extra_args: a bare token cannot be written"))
+    app = make_app(ui_env, gateway=gw)
+    async with app.run_test(size=SIZE) as pilot:
+        assert await wait_for(pilot, lambda: app.snapshot is not None)
+        app.presets_changed()
+        assert await wait_for(pilot, lambda: "bare token" in plain(app._status))

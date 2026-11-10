@@ -45,11 +45,11 @@ class ServingView(BaseView):
     BINDINGS = [
         Binding("l", "load", "Load"),
         Binding("x", "unload", "Unload"),
-        Binding("s", "stop", "Stop server"),
-        Binding("u", "start_gateway", "Gateway up"),
-        Binding("d", "stop_gateway", "Gateway down"),
-        Binding("a", "attach", "Attach URL"),
-        Binding("o", "open_log", "Full log"),
+        Binding("s", "stop", "Stop"),
+        Binding("u", "start_gateway", "GW up"),
+        Binding("d", "stop_gateway", "GW down"),
+        Binding("a", "attach", "Attach"),
+        Binding("o", "open_log", "Log"),
         Binding("y", "copy_url", "Copy URL"),
         Binding("c", "copy_snippet", "Copy curl"),
     ]

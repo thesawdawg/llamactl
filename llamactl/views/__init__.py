@@ -1,1 +1,1 @@
-"""Application views: ModelsView, SessionsView, HFView, SettingsView."""
+"""Application views: HomeView, ModelsView, ServingView, HFView (Discover), SettingsView."""

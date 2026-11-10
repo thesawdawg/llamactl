@@ -7,7 +7,7 @@ from textual.widgets import Input, ListView, Select, Static, Switch
 
 from fakes import FakeGateway, plain, wait_for
 from llamactl import hf
-from llamactl.config import Config, Preset, Profile
+from llamactl.config import Config
 from llamactl.gateway import GatewayError
 from test_ui_shell import SIZE, add_preset, make_app
 
