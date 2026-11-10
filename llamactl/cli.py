@@ -19,8 +19,6 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Sequence, TextIO
 
-import httpx
-
 from . import actions, gateway as gateway_mod, hardware, intents, library, render, report, tuner
 from .actions import ActionError
 from .calibration import TUNED, Calibration
@@ -29,16 +27,15 @@ from .gateway import Gateway, GatewayError
 from .gguf import GGUFError, ModelInfo, ModelInfoCache, read_model_info
 from .hardware import Host
 from .render import Style
+from .serving import http_health
 from .sessions import Session, SessionStore
 from .tuner import Runner, ServerRunner
 
 EXIT_OK, EXIT_FAILURE, EXIT_USAGE = 0, 1, 2
 DEFAULT_TAIL = 40
 FOLLOW_INTERVAL = 0.5
-HEALTH_PROBE_TIMEOUT = 1.0
 UNLOAD_TIMEOUT = 30.0            # seconds to wait for a model to leave memory
 DEFAULT_LOAD_TIMEOUT = 300.0     # seconds to wait for a model whose file size is unknown
-STATE_READY, STATE_LOADING, STATE_DOWN = "ready", "loading", "down"
 GATEWAY_LOG = "gateway"          # the NAME `logs` uses for the gateway's own log
 
 
@@ -51,23 +48,6 @@ class CliError(Exception):
 
 
 # --------------------------------------------------------------------------- services
-
-def http_health(url: str, timeout: float = HEALTH_PROBE_TIMEOUT) -> str:
-    """State of a llama-server from its ``/health`` endpoint.
-
-    Args:
-        url: Base URL of the server.
-        timeout: Seconds before giving up.
-
-    Returns:
-        "ready" for HTTP 200, "loading" for 503 (model still loading), "down" otherwise.
-    """
-    try:
-        code = httpx.get(f"{url.rstrip('/')}/health", timeout=timeout).status_code
-    except httpx.HTTPError:
-        return STATE_DOWN
-    return STATE_READY if code == 200 else STATE_LOADING if code == 503 else STATE_DOWN
-
 
 class Services:
     """Everything a command touches, created once in `main` and swappable in tests.
