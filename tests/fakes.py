@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from llamactl.config import PRESET_SEP, Config, Profile
-from llamactl.gateway import (FAILED, LOADED, LOADING, UNLOADED, GatewayError, GatewayModel,
+from llamactl.gateway import (FAILED, LOADED, UNLOADED, GatewayError, GatewayModel,
                               GatewayState, GatewayStatus)
 from llamactl.gguf import ModelInfo
 from llamactl.hardware import Device, Host
@@ -58,6 +58,7 @@ class FakeGateway:
         self.states: dict[str, GatewayModel] = {}
         self._running = running
         self.started = time.time() - 120
+        self.log = "/nonexistent/gateway.log"
         if running:
             self._sync()
 
@@ -101,7 +102,7 @@ class FakeGateway:
     @property
     def state(self) -> GatewayState | None:
         """Remembered state while running."""
-        return GatewayState(4242, self.listen_url, "/nonexistent/gateway.log", self.started) \
+        return GatewayState(4242, self.listen_url, self.log, self.started) \
             if self._running else None
 
     @property
@@ -257,3 +258,17 @@ class FakeRunner:
 def runner_factory(runner: FakeRunner) -> Callable[[], FakeRunner]:
     """A factory handing out the same runner."""
     return lambda: runner
+
+
+async def wait_for(pilot, cond: Callable[[], bool], tries: int = 60) -> bool:
+    """Poll `cond` while the app's workers settle; True as soon as it holds."""
+    for _ in range(tries):
+        await pilot.pause(0.05)
+        if cond():
+            return True
+    return False
+
+
+def plain(widget) -> str:
+    """The text a Static/Label currently shows."""
+    return str(widget.render())

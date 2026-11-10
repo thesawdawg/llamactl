@@ -47,12 +47,12 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 6 - TUI
 
-- [ ] Shell with five views; host polling through `hardware`
-- [ ] Home view
+- [x] Shell with five views; host polling through `hardware`
+- [x] Home view
 - [ ] Models view with per-intent detail
 - [ ] IntentPicker, PlanScreen, PresetEditor
 - [ ] TuneScreen
-- [ ] Serving view (gateway + standalone + attached)
+- [x] Serving view (gateway + standalone + attached)
 - [ ] Settings view: gateway and default intent
 
 ## Phase 7 - Onboarding and Discover

@@ -131,13 +131,13 @@ async def test_shell_models_view(isolated: SimpleNamespace, gguf_file: Path) -> 
         row_key = str(isolated.model_dir / gguf_file.name)
         fits = app.views["models"].model_table.get_cell(row_key, "fits")
         assert str(getattr(fits, "plain", fits)) != "..."
-        assert app.query_one("#main", ContentSwitcher).current == "models"
+        assert app.query_one("#main", ContentSwitcher).current == "home"
+
+        await pilot.press("3")
+        await pilot.pause()
+        assert app.query_one("#main", ContentSwitcher).current == "serving"
 
         await pilot.press("2")
-        await pilot.pause()
-        assert app.query_one("#main", ContentSwitcher).current == "sessions"
-
-        await pilot.press("1")
         await pilot.pause()
         app.views["models"].model_table.focus()
         await pilot.pause()
@@ -152,23 +152,12 @@ async def test_focus_moves_into_views(isolated: SimpleNamespace, gguf_file: Path
     app = LlamaCtl()
     async with app.run_test(size=(140, 45)) as pilot:
         assert await _wait(pilot, lambda: app.views["models"].model_table.row_count == 1)
-        await pilot.press("2")
+        await pilot.press("3")
         await pilot.pause(0.2)
-        assert app.screen.focused is app.views["sessions"].sess_table
-        await pilot.press("1")
+        assert app.screen.focused is app.views["serving"].table
+        await pilot.press("2")
         await pilot.pause(0.2)
         assert app.screen.focused is app.views["models"].model_table
-
-
-async def test_sessions_external_down(isolated: SimpleNamespace) -> None:
-    app = LlamaCtl()
-    async with app.run_test(size=(140, 45)) as pilot:
-        app.store.attach("127.0.0.1:59999")  # nothing listens -> probe fails
-        await pilot.press("2")
-        await pilot.pause()
-        sv = app.views["sessions"]
-        assert await _wait(pilot, lambda: sv.sess_table.row_count == 1)
-        assert await _wait(pilot, lambda: sv.state.get(app.store.sessions[0].id) == "down")
 
 
 async def test_confirm_screen() -> None:
@@ -246,7 +235,7 @@ async def test_settings_view(isolated: SimpleNamespace, tmp_path: Path,
     monkeypatch.setattr(hf, "TOKEN_FILE", isolated.cfg_dir / "hf_token")
     app = LlamaCtl()
     async with app.run_test(size=(140, 45)) as pilot:
-        await pilot.press("4")
+        await pilot.press("5")
         await pilot.pause(0.2)
         sv = app.views["settings"]
         bin_in = sv.query_one("#bin_dir", Input)
@@ -276,9 +265,9 @@ async def test_hf_view_tables(isolated: SimpleNamespace, monkeypatch) -> None:
         {"path": "m-Q8_0.gguf", "quant": "Q8_0", "size": int(8e9), "parts": 1}])
     app = LlamaCtl()
     async with app.run_test(size=(140, 45)) as pilot:
-        await pilot.press("3")
+        await pilot.press("4")
         await pilot.pause(0.2)
-        hv = app.views["hf"]
+        hv = app.views["discover"]
         hv.query_one("#hf_q", Input).value = "qwen"
         hv.query_one("#hf_q", Input).post_message(Input.Submitted(hv.query_one("#hf_q", Input), "qwen"))
         assert await _wait(pilot, lambda: hv.query_one("#repos", DataTable).row_count == 1)

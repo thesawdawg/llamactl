@@ -210,11 +210,5 @@ class HFView(BaseView):
             self.app.ui(setattr, bar, "display", False)
 
     def _post_download(self, path: Path, info) -> None:
-        """Rescan models and offer a recommendation for the new file."""
-        mv = self.app.views["models"]
-        if info is not None:
-            mv.infos[str(path)] = info
-            mv.rescan()
-            mv.open_recommendation(str(path))
-        else:
-            mv.rescan()
+        """Rescan models so the new file shows up in Models."""
+        self.app.rescan()

@@ -122,7 +122,7 @@ class SettingsView(BaseView):
         cfg.gauge_interval = float(self.query_one("#gauge_interval", Input).value)
         cfg.headroom_pct = int(self.query_one("#headroom_pct", Input).value)
         cfg.save()
-        self.app.views["models"].rescan()
+        self.app.rescan()
         self.say("Settings saved")
 
     @on(Button.Pressed, "#save")

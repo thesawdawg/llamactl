@@ -64,8 +64,9 @@ MINI_KVS = [
 def gguf_file(tmp_path: Path) -> Path:
     """A synthetic 8B-ish GGUF file in tmp_path (>= library.MIN_MODEL_BYTES is faked by size)."""
     p = tmp_path / "test.gguf"
-    # pad so it passes discover_models' 50 MB floor
-    p.write_bytes(gguf_blob(MINI_KVS) + b"\0" * (50 * 1024 * 1024))
+    p.write_bytes(gguf_blob(MINI_KVS))
+    with p.open("r+b") as fh:       # sparse padding: passes discover_models' 50 MB floor cheaply
+        fh.truncate(50 * 1024 * 1024 + 4096)
     return p
 
 
@@ -99,3 +100,29 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
     monkeypatch.setattr(hardware, "detect", lambda bin_dir=None, runner=None, clock=None: host)
     monkeypatch.setattr(hardware, "refresh", lambda h, bin_dir=None, runner=None, clock=None: host)
     return SimpleNamespace(cfg_dir=cfg_dir, model_dir=model_dir, host=host)
+
+
+@pytest.fixture
+def ui_env(isolated: SimpleNamespace, tmp_path: Path, gguf_file: Path) -> SimpleNamespace:
+    """`isolated` plus a llama.cpp folder with a (fake) llama-server and a model factory.
+
+    Returns:
+        Namespace with cfg_dir, model_dir, host, bin_dir, cfg (a Config using both folders) and
+        `add_model(name) -> Path`, which copies the synthetic GGUF into the model folder.
+    """
+    import shutil
+
+    from llamactl.config import Config
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "llama-server").touch()
+    cfg = Config(bin_dir=str(bin_dir), model_dirs=[str(isolated.model_dir)])
+
+    def add_model(name: str = "alpha.gguf") -> Path:
+        dest = isolated.model_dir / name
+        shutil.copy(gguf_file, dest)
+        return dest
+
+    return SimpleNamespace(cfg_dir=isolated.cfg_dir, model_dir=isolated.model_dir,
+                           host=isolated.host, bin_dir=bin_dir, cfg=cfg, add_model=add_model)

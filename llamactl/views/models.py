@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.text import Text
-from textual import on, work
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
@@ -14,9 +14,8 @@ from .. import hf
 from ..command import build_command, command_string
 from ..config import CUSTOM, Preset, Profile
 from ..fmt import FITS_STYLE, human, params_str
-from ..gguf import GGUFError, ModelInfo, read_model_info
+from ..gguf import ModelInfo
 from ..hardware import Host
-from ..library import discover_models
 from ..planner import estimate_budget, verdict
 from ..screens.profile import ProfileEditor
 from ..screens.recommend import RecommendationScreen
@@ -45,10 +44,10 @@ class ModelsView(BaseView):
     #m_buttons Button, #m_buttons2 Button { margin-right: 1; }
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.models: list[Path] = []
-        self.infos: dict[str, ModelInfo] = {}
+    @property
+    def infos(self) -> dict[str, ModelInfo]:
+        """Parsed headers by model path (owned by the app)."""
+        return self.app.infos
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="models_row"):
@@ -70,7 +69,8 @@ class ModelsView(BaseView):
                            ("Quant", "quant"), ("Fits", "fits"), ("Ctx", "ctx"),
                            ("Profile", "prof")):
             t.add_column(label, key=key)
-        self.rescan()
+        for p in self.app.models:
+            self._add_row(p, self.infos.get(str(p)))
 
     @property
     def model_table(self) -> DataTable:
@@ -130,29 +130,35 @@ class ModelsView(BaseView):
         else:
             self.model_table.add_row(*row, key=key)
 
-    @work(thread=True, exclusive=True, group="scan")
     def rescan(self) -> None:
-        """Scan model dirs, then parse headers progressively in this worker."""
-        models = discover_models(self.app.cfg.model_dirs)
-        infos = {}
-        for p in models:
-            info = self.app.info_cache.get(p)
-            if info is None:
-                try:
-                    info = read_model_info(p)
-                    self.app.info_cache.put(info)
-                except (GGUFError, OSError):
-                    info = None
-            if info:
-                infos[str(p)] = info
-            self.app.ui(self._add_row, p, info)
-        self.app.ui(self._scan_done, models, infos)
+        """Scan the model folders again (the app does the work)."""
+        self.app.rescan()
 
-    def _scan_done(self, models: list[Path], infos: dict[str, ModelInfo]) -> None:
-        self.models = models
-        self.infos = infos
-        self.say(f"{len(models)} model(s) in {', '.join(self.app.cfg.model_dirs)}")
+    def on_models(self, models: list[Path]) -> None:
+        """Add a row per model (headers fill in as they are read); drop rows of gone files."""
+        want = {str(p) for p in models}
+        for key in [k for k in self.model_table.rows if k.value not in want]:
+            self.model_table.remove_row(key)
+        for p in models:
+            self._add_row(p, self.infos.get(str(p)))
+
+    def on_info(self, path: Path) -> None:
+        """A header was read: fill its row."""
+        self._add_row(path, self.infos.get(str(path)))
+
+    def on_scan_done(self) -> None:
+        """All headers read: refresh the detail pane."""
         self.update_detail()
+
+    def select(self, path: str) -> None:
+        """Move the cursor to a model's row.
+
+        Args:
+            path: Model path.
+        """
+        if path in self.model_table.rows:
+            self.model_table.move_cursor(row=self.model_table.get_row_index(path))
+            self.model_table.focus()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table is self.model_table:
@@ -193,8 +199,7 @@ class ModelsView(BaseView):
         Args:
             model: Model path.
         """
-        self.app.sessions.launch(model)
-        self.app.switch_view("sessions")
+        self.app.serve_model(model)
 
     def open_editor(self, model: str, auto_recommend: bool) -> None:
         """Open the profile editor for a model and persist the result.
