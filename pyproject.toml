@@ -29,7 +29,7 @@ Changelog = "https://github.com/thesawdawg/llamactl/blob/main/CHANGELOG.md"
 dev = ["pytest", "pytest-asyncio"]
 
 [project.scripts]
-llamactl = "llamactl.app:main"
+llamactl = "llamactl.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,5 +1,7 @@
-"""Run the TUI with `python -m llamactl`."""
-from .app import main
+"""Run `python -m llamactl`."""
+import sys
+
+from .cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

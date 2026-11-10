@@ -41,9 +41,9 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 5 - CLI
 
-- [ ] `cli.py` dispatcher; no args opens the TUI
-- [ ] `hw`, `ls`, `plan` (with `--json`)
-- [ ] `tune`, `serve`, `up`, `down`, `ps`, `load`, `unload`, `stop`, `logs`
+- [x] `cli.py` dispatcher; no args opens the TUI
+- [x] `hw`, `ls`, `plan` (with `--json`)
+- [x] `tune`, `serve`, `up`, `down`, `ps`, `load`, `unload`, `stop`, `logs`
 
 ## Phase 6 - TUI
 
