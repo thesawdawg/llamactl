@@ -1,10 +1,15 @@
 """Textual TUI for launching and managing llama.cpp servers."""
 from __future__ import annotations
 
+from functools import partial
+from typing import Any, Callable
+
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Header, Label, ListItem, ListView
 
 from . import hardware
@@ -21,6 +26,20 @@ from .widgets.gauges import ResourceGauges
 
 VIEWS = (("models", "Models"), ("sessions", "Sessions"), ("hf", "Hugging Face"),
          ("settings", "Settings"))
+
+
+class UiCall(Message):
+    """A callable a worker thread asks the UI thread to run (see `LlamaCtl.ui`).
+
+    Args:
+        call: The callable with its arguments already bound.
+        owner: The object `call` is a method of, or None for a plain function.
+    """
+
+    def __init__(self, call: Callable[[], Any], owner: object | None) -> None:
+        super().__init__()
+        self.call = call
+        self.owner = owner
 
 
 class LlamaCtl(App):
@@ -80,9 +99,42 @@ class LlamaCtl(App):
         """The sessions view."""
         return self.views["sessions"]  # type: ignore[return-value]
 
+    def ui(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
+        """Run `fn(*args, **kwargs)` on the UI thread. Safe to call from any thread.
+
+        Never blocks the caller and never raises, whatever state the app is in. The call is
+        dropped when the app is closing, or when `fn` is a method of a widget or screen that
+        is no longer in the DOM: a worker that finishes after its view went away must not
+        touch it. (`call_from_thread` blocks until the callback ran and re-raises its error in
+        the worker, so a poll finishing during shutdown crashed the app with `WorkerFailed`.)
+
+        Args:
+            fn: Callable to run on the UI thread.
+            *args: Positional arguments for `fn`.
+            **kwargs: Keyword arguments for `fn`.
+
+        Returns:
+            True when the call was queued, False when it was dropped.
+        """
+        try:
+            return self.post_message(UiCall(partial(fn, *args, **kwargs),
+                                            getattr(fn, "__self__", None)))
+        except RuntimeError:        # the event loop is already closed
+            return False
+
+    def on_ui_call(self, message: UiCall) -> None:
+        """Run a call queued by `ui` unless the app, its base screen or the call's owner is gone."""
+        owner = message.owner
+        base = self.screen_stack[0] if self.screen_stack else None
+        if self._closing or self._closed or base is None or not base.is_running:
+            return                  # shutting down: the base screen closes before the app does
+        if isinstance(owner, Widget) and not owner.is_attached:
+            return
+        message.call()
+
     def say(self, msg: str) -> None:
         """Show a one-line status message (user actions only)."""
-        self.query_one("#status", Label).update(msg)
+        self.screen_stack[0].query_one("#status", Label).update(msg)
 
     def switch_view(self, name: str) -> None:
         """Activate a view by id and sync the sidebar cursor.
@@ -121,12 +173,13 @@ class LlamaCtl(App):
             host = hardware.refresh(self.host, bin_dir)
         else:
             host = hardware.detect(bin_dir)
-        self.call_from_thread(self._host_update, host)
+        self.ui(self._host_update, host)
 
     def _host_update(self, host: hardware.Host) -> None:
         self.host = host
-        self.query_one("#gauges", ResourceGauges).update_host(host)
-        current = self.query_one("#main", ContentSwitcher).current
+        base = self.screen_stack[0]      # not self.screen: a modal on top has none of these
+        base.query_one("#gauges", ResourceGauges).update_host(host)
+        current = base.query_one("#main", ContentSwitcher).current
         if current in self.views:
             self.views[current].on_host(host)
 

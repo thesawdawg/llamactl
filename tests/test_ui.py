@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -298,3 +299,35 @@ def test_recommendation_screen_picks_default_intent_when_it_applies(
     assert RecommendationScreen(cfg, "/e.gguf", embed, _host()).plan.intent == "embed"
     cfg.default_intent = "bogus"
     assert RecommendationScreen(cfg, "/m.gguf", _info(), _host()).plan.intent == "chat"
+
+
+async def test_pollers_finishing_during_shutdown_do_not_fail(isolated: SimpleNamespace) -> None:
+    """Regression for the intermittent `WorkerFailed`: a poll finishing as the app shuts down.
+
+    `call_from_thread` ran the poll's callback while the gauges were being torn down, and the
+    `NoMatches` it raised surfaced as `WorkerFailed` from `run_test`. Polling every 10 ms makes
+    that overlap near certain.
+    """
+    isolated.cfg_dir.mkdir(parents=True, exist_ok=True)
+    (isolated.cfg_dir / "config.json").write_text(
+        json.dumps({"version": 3, "gauge_interval": 0.01}))
+    for _ in range(8):
+        app = LlamaCtl()
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause(0.15)
+
+
+async def test_ui_helper_is_safe_when_the_target_is_gone(isolated: SimpleNamespace) -> None:
+    """`LlamaCtl.ui` drops calls to removed widgets and to a closed app instead of raising."""
+    app = LlamaCtl()
+    calls: list[str] = []
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.pause(0.1)
+        gauges = app.screen_stack[0].query_one("#gauges")
+        await gauges.remove()
+        assert app.ui(gauges.update_host, _host())          # queued, then dropped: no NoMatches
+        assert app.ui(calls.append, "kept")
+        await pilot.pause(0.1)
+        assert calls == ["kept"]
+    assert app.ui(calls.append, "after exit") is False
+    assert calls == ["kept"]

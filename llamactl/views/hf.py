@@ -96,7 +96,7 @@ class HFView(BaseView):
 
     def say_status(self, msg: str) -> None:
         """Thread-safe status update."""
-        self.app.call_from_thread(self.refresh_status, msg)
+        self.app.ui(self.refresh_status, msg)
 
     def action_focus_search(self) -> None:
         self.query_one("#hf_q", Input).focus()
@@ -125,7 +125,7 @@ class HFView(BaseView):
             self.repos = hf.search(query, self.token)
         except hf.HFError as e:
             return self.say_status(f"[red]{e}[/red]")
-        self.app.call_from_thread(self.fill_repos)
+        self.app.ui(self.fill_repos)
 
     def fill_repos(self) -> None:
         t = self.query_one("#repos", DataTable)
@@ -160,7 +160,7 @@ class HFView(BaseView):
             self.files = hf.list_gguf(repo, self.token)
         except hf.HFError as e:
             return self.say_status(f"[red]{e}[/red]")
-        self.app.call_from_thread(self.fill_files)
+        self.app.ui(self.fill_files)
 
     def fill_files(self) -> None:
         t = self.query_one("#files", DataTable)
@@ -188,7 +188,7 @@ class HFView(BaseView):
         bar = self.query_one("#hf_bar", ProgressBar)
 
         def progress(done: int, total: int, name: str) -> None:
-            self.app.call_from_thread(bar.update, total=total or None, progress=done)
+            self.app.ui(bar.update, total=total or None, progress=done)
             self.say_status(f"Downloading {name}: {human(done)} / {human(total)}")
 
         try:
@@ -202,12 +202,12 @@ class HFView(BaseView):
                 self.say_status(f"[yellow]Downloaded but could not read header: {e}[/yellow]")
             extra = f" (+{len(out) - 1} shards)" if len(out) > 1 else ""
             self.say_status(f"[green]Done: {out[0].name}{extra}.[/green]")
-            self.app.call_from_thread(self._post_download, out[0], info)
+            self.app.ui(self._post_download, out[0], info)
         except hf.HFError as e:
             self.say_status(f"[red]{e}[/red]")
         finally:
             self.downloading = False
-            self.app.call_from_thread(setattr, bar, "display", False)
+            self.app.ui(setattr, bar, "display", False)
 
     def _post_download(self, path: Path, info) -> None:
         """Rescan models and offer a recommendation for the new file."""

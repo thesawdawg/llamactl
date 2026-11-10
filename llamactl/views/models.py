@@ -145,8 +145,8 @@ class ModelsView(BaseView):
                     info = None
             if info:
                 infos[str(p)] = info
-            self.app.call_from_thread(self._add_row, p, info)
-        self.app.call_from_thread(self._scan_done, models, infos)
+            self.app.ui(self._add_row, p, info)
+        self.app.ui(self._scan_done, models, infos)
 
     def _scan_done(self, models: list[Path], infos: dict[str, ModelInfo]) -> None:
         self.models = models

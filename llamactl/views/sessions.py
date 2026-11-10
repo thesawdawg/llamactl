@@ -159,11 +159,11 @@ class SessionsView(BaseView):
         try:
             s = self.app.store.launch_server(self.app.cfg, model)
         except (RuntimeError, OSError, LookupError) as e:
-            self.app.call_from_thread(
+            self.app.ui(
                 self.notify, f"Could not launch {Path(model).stem}: {e}",
                 title="Launch failed", severity="error", timeout=15)
             return
-        self.app.call_from_thread(self._launch_done, s)
+        self.app.ui(self._launch_done, s)
 
     def _launch_done(self, s: Session) -> None:
         """Register the new session as pending and select its row."""
@@ -212,7 +212,7 @@ class SessionsView(BaseView):
         sessions = list(self.app.store.sessions)
         with ThreadPoolExecutor(max_workers=8) as ex:
             results = list(ex.map(_probe_one, sessions))
-        self.app.call_from_thread(self._apply_health, results)
+        self.app.ui(self._apply_health, results)
 
     def _apply_health(self, results: list) -> None:
         """Fold probe results into state, notify transitions, redraw cells."""
