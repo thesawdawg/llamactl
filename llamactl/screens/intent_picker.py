@@ -44,10 +44,10 @@ def card(row: IntentRow) -> Text:
     t.append(f"\n  {row.ctx_per_slot} ctx x {row.slots} slot{'s' * (row.slots != 1)}, "
              f"{row.kv} KV, needs {row.needs / GB:.1f} of {row.usable / GB:.1f} GB usable VRAM")
     if row.reason:
-        t.append(f"\n  why: {row.reason}", style="dim")
+        t.append(f"\n  why: {row.reason.split('; needs')[0]}", style="dim")
     for w in row.warnings:
         t.append(f"\n  ! {w}", style="yellow")
-    t.append(f"\n  preset: {preset_note(row)}")
+    t.append(f"\n  preset: {preset_note(row)}\n")
     return t
 
 

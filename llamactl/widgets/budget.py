@@ -27,7 +27,7 @@ class BudgetPanel(Vertical):
     DEFAULT_CSS = """
     BudgetPanel { height: auto; border: round $primary; padding: 0 1; }
     BudgetPanel .bar { height: 1; }
-    BudgetPanel .nums { color: $text-muted; }
+    BudgetPanel .nums { color: $text-muted; width: 100%; height: auto; }
     BudgetPanel .verdict { text-style: bold; }
     BudgetPanel ProgressBar { height: 1; margin-bottom: 0; }
     BudgetPanel ProgressBar.over Bar > .bar--bar { color: $error; }

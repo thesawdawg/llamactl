@@ -49,8 +49,8 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 - [x] Shell with five views; host polling through `hardware`
 - [x] Home view
-- [ ] Models view with per-intent detail
-- [ ] IntentPicker, PlanScreen, PresetEditor
+- [x] Models view with per-intent detail
+- [x] IntentPicker, PlanScreen, PresetEditor
 - [ ] TuneScreen
 - [x] Serving view (gateway + standalone + attached)
 - [ ] Settings view: gateway and default intent

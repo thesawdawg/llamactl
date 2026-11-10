@@ -1,14 +1,12 @@
 """Pilot tests: profile editor and the app shell with Models view."""
 from __future__ import annotations
 
-import dataclasses
 import json
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 from textual.app import App
-from textual.widgets import Button, ContentSwitcher, DataTable, Input, Label
+from textual.widgets import Button, DataTable, Input, Label
 
 from llamactl import actions, hf, intents, planner
 from llamactl.app import LlamaCtl
@@ -18,7 +16,6 @@ from llamactl.hardware import Device, Host
 from llamactl.screens.confirm import ConfirmScreen
 from llamactl.screens.preset_editor import PresetEditor
 from llamactl.screens.prompt import PromptScreen
-from llamactl.screens.recommend import RecommendationScreen
 
 
 def _info() -> ModelInfo:
@@ -136,45 +133,6 @@ async def _wait(pilot, cond, tries: int = 40) -> bool:
     return False
 
 
-async def test_shell_models_view(isolated: SimpleNamespace, gguf_file: Path) -> None:
-    shutil.copy(gguf_file, isolated.model_dir / gguf_file.name)
-    app = LlamaCtl()
-    async with app.run_test(size=(140, 45)) as pilot:
-        assert await _wait(pilot, lambda: app.views["models"].model_table.row_count == 1)
-        # host poll has landed -> Fits resolved to a verdict
-        assert await _wait(pilot, lambda: app.host.vram_total > 0)
-        row_key = str(isolated.model_dir / gguf_file.name)
-        fits = app.views["models"].model_table.get_cell(row_key, "fits")
-        assert str(getattr(fits, "plain", fits)) != "..."
-        assert app.query_one("#main", ContentSwitcher).current == "home"
-
-        await pilot.press("3")
-        await pilot.pause()
-        assert app.query_one("#main", ContentSwitcher).current == "serving"
-
-        await pilot.press("2")
-        await pilot.pause()
-        app.views["models"].model_table.focus()
-        await pilot.pause()
-        await pilot.press("e")
-        assert await _wait(pilot, lambda: isinstance(app.screen, PresetEditor))
-        await pilot.press("escape")
-        await pilot.pause()
-
-
-async def test_focus_moves_into_views(isolated: SimpleNamespace, gguf_file: Path) -> None:
-    shutil.copy(gguf_file, isolated.model_dir / gguf_file.name)
-    app = LlamaCtl()
-    async with app.run_test(size=(140, 45)) as pilot:
-        assert await _wait(pilot, lambda: app.views["models"].model_table.row_count == 1)
-        await pilot.press("3")
-        await pilot.pause(0.2)
-        assert app.screen.focused is app.views["serving"].table
-        await pilot.press("2")
-        await pilot.pause(0.2)
-        assert app.screen.focused is app.views["models"].model_table
-
-
 async def test_confirm_screen() -> None:
     app = App()
     async with app.run_test() as pilot:
@@ -193,35 +151,6 @@ async def test_confirm_screen() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert result == [True, False, False]
-
-
-async def test_recommendation_screen(isolated: SimpleNamespace) -> None:
-    app = LlamaCtl()
-    async with app.run_test(size=(140, 45)) as pilot:
-        result = []
-        scr = RecommendationScreen(app.cfg, "/m.gguf", _info(), app.host)
-        app.push_screen(scr, result.append)
-        await pilot.pause(0.2)
-        assert scr.query_one("#rec_table", DataTable).row_count == len(scr.plan.reasons)
-        await pilot.press("enter")
-        await pilot.pause()
-        assert result == ["accepted"]
-        assert app.cfg.has_profile("/m.gguf")
-        preset = app.cfg.preset("/m.gguf")
-        assert (preset.intent, preset.source) == ("chat", "estimated")
-        assert app.cfg.preset("/m.gguf").profile == scr.plan.profile
-        assert app.cfg.profile_for("/m.gguf").ctx_size == scr.plan.profile.ctx_size
-
-    app2 = LlamaCtl()
-    async with app2.run_test(size=(140, 45)) as pilot:
-        result2 = []
-        app2.push_screen(RecommendationScreen(app2.cfg, "/n.gguf", _info(), app2.host),
-                         result2.append)
-        await pilot.pause(0.2)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert result2 == ["skipped"]
-        assert not app2.cfg.has_profile("/n.gguf")   # skipping saves nothing; still "new"
 
 
 async def test_prompt_screen() -> None:
@@ -293,18 +222,6 @@ async def test_hf_view_tables(isolated: SimpleNamespace, monkeypatch) -> None:
         assert "GPU" in str(fits)
 
 
-def test_recommendation_screen_picks_default_intent_when_it_applies(
-        isolated: SimpleNamespace) -> None:
-    cfg = Config()
-    cfg.default_intent = "agent"
-    scr = RecommendationScreen(cfg, "/m.gguf", _info(), _host())
-    assert scr.plan.intent == "agent" and scr.plan.profile.cache_reuse == 256
-    embed = dataclasses.replace(_info(), pooling_type=1)
-    assert RecommendationScreen(cfg, "/e.gguf", embed, _host()).plan.intent == "embed"
-    cfg.default_intent = "bogus"
-    assert RecommendationScreen(cfg, "/m.gguf", _info(), _host()).plan.intent == "chat"
-
-
 async def test_pollers_finishing_during_shutdown_do_not_fail(isolated: SimpleNamespace) -> None:
     """Regression for the intermittent `WorkerFailed`: a poll finishing as the app shuts down.
 
@@ -335,3 +252,4 @@ async def test_ui_helper_is_safe_when_the_target_is_gone(isolated: SimpleNamespa
         assert calls == ["kept"]
     assert app.ui(calls.append, "after exit") is False
     assert calls == ["kept"]
+

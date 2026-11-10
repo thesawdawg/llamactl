@@ -1,157 +1,184 @@
-"""ModelsView: model table with metadata, budget, Fits verdict and actions."""
+"""ModelsView: every model with what it suits, its preset, and per-intent detail and actions."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Iterable
 
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Button, DataTable, Label, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.timer import Timer
+from textual.widgets import DataTable, Static
 
-from .. import hf
+from .. import hf, planner
 from ..command import build_command, command_string
-from ..config import CUSTOM, Preset, Profile
+from ..config import Preset
 from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import ModelInfo
 from ..hardware import Host
-from ..planner import estimate_budget, verdict
+from ..intents import by_key
+from ..modelrows import (IntentRow, PresetState, best_for, default_intent_key, intent_rows,
+                         preset_state)
+from ..planner import Plan
+from ..screens.confirm import ConfirmScreen
+from ..screens.intent_picker import IntentPicker
+from ..screens.plan import EDIT, SAVED, SERVE, TUNE, PlanScreen
 from ..screens.preset_editor import PresetEditor
-from ..screens.recommend import RecommendationScreen
 from ..widgets.budget import BudgetPanel
 from .base import BaseView
 
+COLUMNS = (("Model (alias)", "model"), ("Size", "size"), ("Quant", "quant"),
+           ("Best for", "best"), ("Preset", "preset"), ("Measured", "measured"))
+INTENT_COLUMNS = (("Intent", "intent"), ("Verdict", "verdict"), ("Ctx", "ctx"), ("KV", "kv"),
+                  ("Needs / usable", "mem"), ("tok/s", "tps"), ("Preset", "preset"))
+SOURCE_STYLE = {"tuned": "green", "estimated": "dim", "edited": "cyan"}
+DEBOUNCE = 0.1          # seconds: detail pane waits for the cursor to settle; plans for the scan
+GB = 1e9
+EDITED = "edited"     # Preset.source of a hand-edited preset
+
+
+def best_text(plans: dict[str, Plan] | None, readable: bool) -> Text:
+    """The "Best for" cell: the intents with the best verdict, in that verdict's colour."""
+    if not readable:
+        return Text("unreadable", style="red")
+    if plans is None:
+        return Text("...", style="dim")
+    b = best_for(plans)
+    return Text(b.text() if b.keys else "-", style=FITS_STYLE.get(b.verdict, ""))
+
+
+def preset_text(st: PresetState) -> Text:
+    """The "Preset" cell: ``New``, or the active preset's name, source and a stale flag."""
+    if st.new:
+        return Text("New", style="bold cyan")
+    t = Text(f"{st.name} ")
+    t.append(st.source, style=SOURCE_STYLE.get(st.source, ""))
+    if st.stale:
+        t.append(" stale", style="bold yellow")
+    if st.count > 1:
+        t.append(f" (+{st.count - 1})", style="dim")
+    return t
+
+
+def intent_cells(r: IntentRow) -> tuple:
+    """Cells of one row of the per-intent table."""
+    source = Text(r.source or "-", style=SOURCE_STYLE.get(r.source, "dim"))
+    if r.stale:
+        source.append(" stale", style="bold yellow")
+    if r.active:
+        source.append(" *", style="bold")
+    return (Text(r.label, style="bold" if r.active else ""),
+            Text(r.verdict, style=FITS_STYLE.get(r.verdict, "")),
+            f"{r.ctx_per_slot} x{r.slots}", r.kv, f"{r.needs / GB:.1f} / {r.usable / GB:.1f} GB",
+            f"{r.tps:.1f}" if r.tps else "-", source)
+
+
+class ModelTable(DataTable):
+    """The model table; Enter serves (the footer says so, which a bare DataTable would hide)."""
+
+    BINDINGS = [Binding("enter", "select_cursor", "Serve")]
+
+
+class IntentTable(DataTable):
+    """The per-intent table; Enter serves that intent."""
+
+    BINDINGS = [Binding("enter", "select_cursor", "Serve intent")]
+
 
 class ModelsView(BaseView):
-    """Model table (left) plus metadata/budget/command detail pane (right)."""
+    """Model table (left); metadata, per-intent rows, budget and command (right)."""
 
     BINDINGS = [
-        Binding("enter", "launch_server", "Launch server"),
-        Binding("l", "launch_server", "Launch", show=False),
-        Binding("e", "edit_profile", "Edit profile"),
-        Binding("d", "edit_default", "Defaults"),
-        Binding("f2", "recommend", "Recommend"),
-        Binding("R", "recommend", "Recommend", show=False),
-        Binding("delete", "delete_profile", "Delete profile"),
+        Binding("s", "serve_standalone", "Standalone"),
+        Binding("t", "tune", "Tune"),
+        Binding("p", "plan", "Plan"),
+        Binding("e", "edit", "Edit preset"),
+        Binding("a", "activate", "Set active"),
+        Binding("delete", "delete_preset", "Delete preset"),
+        Binding("D", "edit_default", "Defaults"),
     ]
-    CSS = """
-    #models_row { height: 1fr; }
-    #model_table { width: 3fr; }
-    #detail { width: 2fr; padding: 0 1; }
-    #detail Static { margin-bottom: 1; }
-    #m_buttons, #m_buttons2 { height: auto; }
-    #m_buttons Button, #m_buttons2 Button { margin-right: 1; }
+    DEFAULT_CSS = """
+    ModelsView { height: 1fr; }
+    #m_top { height: auto; max-height: 45%; }
+    #model_table { height: auto; max-height: 100%; }
+    #m_empty { color: $text-muted; padding: 1 2; height: auto; }
+    #m_bottom { height: 1fr; }
+    #detail { width: 3fr; padding: 0 1; }
+    #detail Static { margin-bottom: 1; height: auto; }
+    #intent_table { height: auto; max-height: 12; margin-bottom: 1; }
+    #m_side { width: 2fr; padding: 0 1; }
+    #m_command { color: $text-muted; }
     """
 
-    @property
-    def infos(self) -> dict[str, ModelInfo]:
-        """Parsed headers by model path (owned by the app)."""
-        return self.app.infos
+    def __init__(self) -> None:
+        super().__init__()
+        self.plans: dict[str, dict[str, Plan]] = {}
+        self._intent = ""                    # intent the actions apply to
+        self._shown = ""                     # model the detail pane shows
+        self._host_sig: tuple = ()
+        self._unreadable: set[str] = set()
+        self._detail_timer: Timer | None = None
+        self._plan_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="models_row"):
-            yield DataTable(id="model_table", cursor_type="row")
-            with VerticalScroll(id="detail"):
-                yield Static("", id="meta")
-                yield BudgetPanel()
-                yield Static("", id="prof_summary")
-                with Horizontal(id="m_buttons"):
-                    yield Button("Launch", id="m_launch", variant="primary")
-                    yield Button("Edit", id="m_edit")
-                with Horizontal(id="m_buttons2"):
-                    yield Button("Recommend", id="m_rec")
-                    yield Button("Delete profile", id="m_del")
+        with Vertical():
+            with VerticalScroll(id="m_top"):
+                yield ModelTable(id="model_table", cursor_type="row")
+                yield Static("", id="m_empty")
+            with Horizontal(id="m_bottom"):
+                with VerticalScroll(id="detail"):
+                    yield Static("", id="meta")
+                    yield IntentTable(id="intent_table", cursor_type="row")
+                    yield Static("", id="m_warnings")
+                    yield Static("", id="m_command")
+                with VerticalScroll(id="m_side"):
+                    yield BudgetPanel()
 
     def on_mount(self) -> None:
-        t = self.model_table
-        for label, key in (("Model", "m"), ("Size", "size"), ("Params", "params"),
-                           ("Quant", "quant"), ("Fits", "fits"), ("Ctx", "ctx"),
-                           ("Profile", "prof")):
-            t.add_column(label, key=key)
+        for label, key in COLUMNS:
+            self.model_table.add_column(label, key=key)
+        for label, key in INTENT_COLUMNS:
+            self.query_one("#intent_table", DataTable).add_column(label, key=key)
         for p in self.app.models:
-            self._add_row(p, self.infos.get(str(p)))
+            self._row(p)
+        self._empty_state()
+        self.plan_async()
+
+    # -- accessors ---------------------------------------------------------------------
 
     @property
     def model_table(self) -> DataTable:
+        """The model table."""
         return self.query_one("#model_table", DataTable)
 
-    def selected_model(self) -> str | None:
-        """Path of the highlighted model row."""
-        rows = list(self.model_table.rows)  # insertion order == cursor order
-        if not rows:
-            return None
-        return str(rows[min(self.model_table.cursor_row, len(rows) - 1)].value)
+    @property
+    def intent_table(self) -> DataTable:
+        """The per-intent table of the detail pane."""
+        return self.query_one("#intent_table", DataTable)
 
-    def on_activate(self) -> None:
-        self.update_detail()
-        super().on_activate()
+    def selected_model(self) -> str | None:
+        """Path of the highlighted model row, None when there are none."""
+        t = self.model_table
+        if not t.row_count:
+            return None
+        return str(list(t.rows)[min(t.cursor_row, t.row_count - 1)].value)
+
+    def selected_intent(self) -> str:
+        """Intent the actions apply to: the highlighted intent row, else the model's default."""
+        model = self.selected_model()
+        plans = self.plans.get(model or "")
+        if not plans:
+            return ""
+        return self._intent if self._intent in plans else default_intent_key(
+            self.app.cfg.models.get(model or ""), plans, self.app.cfg.default_intent)
 
     def focus_primary(self) -> None:
         self.model_table.focus()
 
-    def on_host(self, host: Host) -> None:
-        """Recompute the Fits cells and the detail pane for a fresh host snapshot."""
-        for key, row in self.model_table.rows.items():
-            model = str(key.value)
-            if model in self.infos:
-                self.model_table.update_cell(key, "fits",
-                                             self._fits(model, self.infos[model]))
-        self.update_detail()
-
-    def _fits(self, model: str, info: ModelInfo) -> Text:
-        """Coloured verdict for a model under its current profile."""
-        v = verdict(estimate_budget(info, self.app.cfg.profile_for(model), self.app.host,
-                                    self.app.calibration),
-                    self.app.host, self.app.cfg.headroom_pct)
-        return Text(v, style=FITS_STYLE.get(v, ""))
-
-    def _profile_tag(self, model: str) -> str:
-        """The active preset's name, or 'New' when the model has no presets."""
-        ent = self.app.cfg.models.get(model)
-        if ent is None or not ent.presets:
-            return "New"
-        return ent.active or "custom"
-
-    def _add_row(self, p: Path, info: ModelInfo | None) -> None:
-        """Insert or update one table row; Fits/Params fill in when info arrives."""
-        key = str(p)
-        prof = self.app.cfg.profile_for(key)
-        ctx = (str(prof.ctx_size) if prof.ctx_size
-               else f"{info.ctx_train} (max)" if info else "auto")
-        row = (p.name, f"{p.stat().st_size / 1e9:.2f} GB",
-               params_str(info.parameter_count) if info else "",
-               hf.quant_of(p.name), self._fits(key, info) if info else "...",
-               ctx, self._profile_tag(key))
-        if key in self.model_table.rows:
-            r = self.model_table.rows[key]
-            for col, v in zip(("m", "size", "params", "quant", "fits", "ctx", "prof"), row):
-                self.model_table.update_cell(key, col, v)
-        else:
-            self.model_table.add_row(*row, key=key)
-
-    def rescan(self) -> None:
-        """Scan the model folders again (the app does the work)."""
-        self.app.rescan()
-
-    def on_models(self, models: list[Path]) -> None:
-        """Add a row per model (headers fill in as they are read); drop rows of gone files."""
-        want = {str(p) for p in models}
-        for key in [k for k in self.model_table.rows if k.value not in want]:
-            self.model_table.remove_row(key)
-        for p in models:
-            self._add_row(p, self.infos.get(str(p)))
-
-    def on_info(self, path: Path) -> None:
-        """A header was read: fill its row."""
-        self._add_row(path, self.infos.get(str(path)))
-
-    def on_scan_done(self) -> None:
-        """All headers read: refresh the detail pane."""
-        self.update_detail()
-
     def select(self, path: str) -> None:
-        """Move the cursor to a model's row.
+        """Move the cursor to a model's row and focus the table.
 
         Args:
             path: Model path.
@@ -160,142 +187,401 @@ class ModelsView(BaseView):
             self.model_table.move_cursor(row=self.model_table.get_row_index(path))
             self.model_table.focus()
 
-    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        if event.data_table is self.model_table:
-            if t := getattr(self, "_hl", None):
-                t.stop()
-            self._hl = self.set_timer(0.1, self.update_detail)
+    # -- rows --------------------------------------------------------------------------
+
+    def _state(self, path: str) -> PresetState:
+        a = self.app
+        return preset_state(a.cfg.models.get(path), Path(path), a.calibration, a.build)
+
+    def _cells(self, path: str) -> tuple:
+        a = self.app
+        info = a.infos.get(path)
+        st = self._state(path)
+        size = info.size if info else _size(Path(path))
+        return (a.alias_of(path), human(size) if size else "-", hf.quant_of(Path(path).name),
+                best_text(self.plans.get(path), path not in self._unreadable or info is not None),
+                preset_text(st), f"{st.measured:.1f} t/s" if st.measured else "-")
+
+    def _row(self, p: Path) -> None:
+        """Insert or update one row, in place by key."""
+        key, t = str(p), self.model_table
+        cells = self._cells(key)
+        if key in t.rows:
+            for col, v in zip([c for _, c in COLUMNS], cells):
+                t.update_cell(key, col, v, update_width=True)
+        else:
+            t.add_row(*cells, key=key)
+
+    def _empty_state(self) -> None:
+        a = self.app
+        msg = ""
+        if not self.model_table.row_count:
+            msg = ("Scanning models..." if a.scanning else
+                   f"No models found in {', '.join(a.cfg.model_dirs) or '(no folders set)'}. "
+                   "Add a folder in Settings (5) or download one in Discover (4).")
+        w = self.query_one("#m_empty", Static)
+        w.update(msg)
+        w.display = bool(msg)
+
+    # -- hooks -------------------------------------------------------------------------
+
+    def on_models(self, models: list[Path]) -> None:
+        want = {str(p) for p in models}
+        for key in [k for k in self.model_table.rows if k.value not in want]:
+            self.model_table.remove_row(key)
+        self._unreadable.clear()
+        for p in models:
+            self._row(p)
+        self._empty_state()
+
+    def on_info(self, path: Path) -> None:
+        if str(path) not in self.app.infos:
+            self._unreadable.add(str(path))
+        self._row(path)
+        self._schedule_plan()
+
+    def on_scan_done(self) -> None:
+        self._empty_state()
+        self.plan_async()
+
+    def on_host(self, host: Host) -> None:
+        sig = (tuple((d.id, d.total) for d in host.gpus), host.ram_free // (512 << 20))
+        if sig != self._host_sig:
+            self._host_sig = sig
+            self.plan_async()
+        else:
+            self._schedule_detail()          # free memory moved a little: budget bars only
+
+    def on_presets_changed(self, paths: Iterable[str]) -> None:
+        keys = list(paths) or [str(p) for p in self.app.models]
+        for k in keys:
+            if k in self.model_table.rows:
+                self._row(Path(k))
+        self.update_detail()
+
+    def on_config_changed(self) -> None:
+        self.plan_async()
+
+    # -- planning (worker) -------------------------------------------------------------
+
+    def _schedule_plan(self) -> None:
+        if self._plan_timer is not None:
+            self._plan_timer.stop()
+        self._plan_timer = self.set_timer(DEBOUNCE, self.plan_async)
+
+    def plan_async(self) -> None:
+        """Plan every readable model for every applicable intent in a worker."""
+        a = self.app
+        infos, host, base = dict(a.infos), a.host, a.cfg.default_profile
+        pct, cal = a.cfg.headroom_pct, a.calibration
+        if not infos or (not host.gpus and not host.ram_total):
+            return
+
+        def work() -> dict[str, dict[str, Plan]]:
+            return {p: planner.plan_all(i, host, base, pct, cal) for p, i in infos.items()}
+
+        a.run_bg(work, label="Planning models", group="plan", exclusive=True,
+                 done=self._plans_ready, quiet=True)
+
+    def _plans_ready(self, plans: dict[str, dict[str, Plan]]) -> None:
+        self.plans = plans
+        for key in list(self.model_table.rows):
+            self._row(Path(str(key.value)))
+        self.update_detail()
+
+    # -- detail pane -------------------------------------------------------------------
+
+    @on(DataTable.RowHighlighted, "#model_table")
+    def _model_highlighted(self) -> None:
+        self._intent = ""
+        self._schedule_detail()
+
+    def _schedule_detail(self) -> None:
+        if self._detail_timer is not None:
+            self._detail_timer.stop()
+        self._detail_timer = self.set_timer(DEBOUNCE, self.update_detail)
+
+    @on(DataTable.RowHighlighted, "#intent_table")
+    def _intent_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is not None and event.row_key.value != self._intent:
+            self._intent = str(event.row_key.value)
+            self._show_intent()
+
+    def rows_for(self, model: str) -> list[IntentRow]:
+        """Per-intent rows of a model from the cached plans (empty while planning)."""
+        a = self.app
+        plans = self.plans.get(model)
+        if not plans:
+            return []
+        return intent_rows(plans, a.cfg.models.get(model), Path(model), a.host,
+                           a.cfg.headroom_pct, a.calibration, a.build)
 
     def update_detail(self) -> None:
         """Fill the right pane for the highlighted model."""
         model = self.selected_model()
-        if model is None:
-            return
-        info = self.infos.get(model)
         meta = self.query_one("#meta", Static)
-        if info is None:
-            meta.update("Reading model header...")
+        it = self.intent_table
+        if model is None:
+            meta.update("")
+            it.clear()
+            self.query_one(BudgetPanel).display = False
+            self.query_one("#m_warnings", Static).update("")
+            self.query_one("#m_command", Static).update("")
             return
-        is_new = self._profile_tag(model) == "New"
-        meta.update(
-            f"[b]{info.name}[/b]\n"
-            f"arch {info.architecture} | {info.n_layer} layers | {info.n_head_kv} kv heads | "
-            f"trained ctx {info.ctx_train} | experts {info.expert_count} | "
-            f"file type {info.file_type} | shards {info.sharded}"
-            + ("\n[yellow]No profile yet. Press F2 for a recommendation.[/]" if is_new else ""))
-        prof = self.app.cfg.profile_for(model)
-        self.query_one(BudgetPanel).update_budget(
-            estimate_budget(info, prof, self.app.host, self.app.calibration), self.app.host)
-        changed = prof.non_default()
-        cmd = command_string(build_command(self.app.cfg, model, prof, prof.port or 0))
-        if not prof.port:
-            cmd = cmd.replace(f"--port 0", "--port <auto>")
-        self.query_one("#prof_summary", Static).update(
-            ("\n".join(f"{k}={v}" for k, v in changed.items()) or "(all defaults)") + "\n\n" + cmd)
+        info = self.app.infos.get(model)
+        if info is None:
+            meta.update("Cannot read this file's header." if model in self._unreadable
+                        else "Reading model header...")
+            it.clear()
+            return
+        meta.update(self._meta_text(model, info))
+        rows = self.rows_for(model)
+        want = {r.key for r in rows}
+        for key in [k for k in it.rows if k.value not in want]:
+            it.remove_row(key)
+        for r in rows:
+            cells = intent_cells(r)
+            if r.key in it.rows:
+                for col, v in zip([c for _, c in INTENT_COLUMNS], cells):
+                    it.update_cell(r.key, col, v, update_width=True)
+            else:
+                it.add_row(*cells, key=r.key)
+        if model != self._shown:
+            self._shown = model
+            self._intent = ""
+        key = self.selected_intent()
+        if key and key in it.rows and it.cursor_row != it.get_row_index(key):
+            it.move_cursor(row=it.get_row_index(key))
+        self._show_intent()
 
-    def _launch(self, model: str) -> None:
-        """Launch a server for the model.
+    def _meta_text(self, model: str, info: ModelInfo) -> Text:
+        a = self.app
+        ent = a.cfg.models.get(model)
+        t = Text()
+        t.append(f"{info.name}\n", style="bold")
+        t.append(f"{Path(model).name}\n", style="dim")
+        t.append(f"served as {a.alias_of(model)}  |  {human(info.size)}  |  "
+                 f"{params_str(info.parameter_count) or '?'} params  |  "
+                 f"{hf.quant_of(Path(model).name) or 'quant ?'}\n")
+        t.append(f"{info.architecture}, {info.n_layer} layers, {info.n_head_kv} kv heads, trained "
+                 f"ctx {info.ctx_train}" + (f", {info.expert_count} experts" if info.expert_count
+                                            else "") + (f", {info.sharded} shards"
+                                                        if info.sharded > 1 else "")
+                 + ("  |  embedding model" if info.is_embedding else ""))
+        if ent is None or not ent.presets:
+            t.append("\nNo preset yet: Enter picks what it is for and serves it; t tunes it.",
+                     style="yellow")
+        return t
+
+    def _show_intent(self) -> None:
+        """Budget panel, warnings and command for the highlighted intent."""
+        a = self.app
+        model, key = self.selected_model(), self.selected_intent()
+        panel = self.query_one(BudgetPanel)
+        plans = self.plans.get(model or "")
+        if not model or not plans or key not in plans:
+            panel.display = False
+            return
+        plan = plans[key]
+        panel.display = True
+        panel.update_budget(plan.budget, a.host, a.cfg.headroom_pct)
+        self.query_one("#m_warnings", Static).update(
+            Text("\n".join(f"! {w}" for w in plan.warnings), style="yellow"))
+        existing = a.cfg.preset(model, key)
+        prof = existing.profile if existing else plan.profile
+        argv = build_command(a.cfg, model, prof, prof.port or 0)
+        cmd = command_string(argv).replace("--port 0", "--port <auto>")
+        self.query_one("#m_command", Static).update(
+            Text.assemble((f"{'Preset' if existing else 'Plan'} command ({key}):\n", "bold"), cmd))
+
+    # -- actions -----------------------------------------------------------------------
+
+    def _need_model(self) -> tuple[str, ModelInfo] | None:
+        """The highlighted model and its header, or None (with a message)."""
+        model = self.selected_model()
+        if model is None:
+            self.say("No model selected.")
+            return None
+        info = self.app.infos.get(model)
+        if info is None:
+            self.say("Still reading the model header - try again in a moment."
+                     if model not in self._unreadable else "That file's header cannot be read.")
+            return None
+        return model, info
+
+    def _need_intent(self) -> tuple[str, ModelInfo, str] | None:
+        got = self._need_model()
+        if got is None:
+            return None
+        key = self.selected_intent()
+        if not key:
+            self.say("Still planning - try again in a moment.")
+            return None
+        return got[0], got[1], key
+
+    @on(DataTable.RowSelected, "#model_table")
+    def _row_selected(self) -> None:
+        self.action_serve()
+
+    @on(DataTable.RowSelected, "#intent_table")
+    def _intent_selected(self) -> None:
+        got = self._need_intent()
+        if got:
+            self.app.serve_model(got[0], got[2])
+
+    def _pick_intent(self, model: str, then) -> None:
+        """Ask what the model is for, then call `then(intent_key)`."""
+        rows = self.rows_for(model)
+        if not rows:
+            return self.say("Still planning - try again in a moment.")
+        ent = self.app.cfg.models.get(model)
+
+        def done(key: str | None) -> None:
+            if key:
+                then(key)
+
+        self.app.push_screen(IntentPicker(self.app.alias_of(model), rows,
+                                          self.selected_intent() if ent is None
+                                          else (ent.active or self.selected_intent())), done)
+
+    def action_serve(self) -> None:
+        """Serve the model: the active preset, or an intent picker when it has none or several."""
+        got = self._need_model()
+        if got is None:
+            return
+        model = got[0]
+        ent = self.app.cfg.models.get(model)
+        if ent is None or len(ent.presets) != 1:
+            return self._pick_intent(model, lambda key: self.app.serve_model(model, key))
+        self.app.serve_model(model)
+
+    def action_serve_standalone(self) -> None:
+        """Serve the model on a llama-server of its own (picker when it has no preset)."""
+        got = self._need_model()
+        if got is None:
+            return
+        model = got[0]
+        ent = self.app.cfg.models.get(model)
+        if ent is None or not ent.presets:
+            return self._pick_intent(model, lambda key: self.app.serve_model(
+                model, key, standalone=True))
+        self.app.serve_model(model, standalone=True)
+
+    def action_tune(self) -> None:
+        """Tune the highlighted intent."""
+        got = self._need_intent()
+        if got:
+            self.app.open_tune(got[0], got[2])
+
+    def action_plan(self) -> None:
+        """Show the plan of the highlighted intent."""
+        got = self._need_intent()
+        if got is None:
+            return
+        model, info, key = got
+        a = self.app
+        screen = PlanScreen(a.cfg, model, a.alias_of(model), info, a.host, by_key[key],
+                            a.calibration)
+
+        def done(result: str | None) -> None:
+            if result == SAVED:
+                a.presets_changed(model)
+            elif result == EDIT:
+                self.edit(model, key)
+            elif result == TUNE:
+                a.open_tune(model, key)
+            elif result == SERVE:
+                a.serve_model(model, key)
+
+        a.push_screen(screen, done)
+
+    def action_edit(self) -> None:
+        """Edit the highlighted intent's preset (a missing one starts from the plan)."""
+        got = self._need_intent()
+        if got:
+            self.edit(got[0], got[2])
+
+    def edit(self, model: str, key: str) -> None:
+        """Open the preset editor for a model's preset named `key`.
+
+        Saving stores the profile with ``source="edited"`` (the measurement is kept); an
+        unchanged profile changes nothing.
 
         Args:
             model: Model path.
+            key: Preset name (an intent key).
         """
-        self.app.serve_model(model)
-
-    def open_editor(self, model: str, auto_recommend: bool) -> None:
-        """Open the profile editor for a model and persist the result.
-
-        Args:
-            model: Model path (must be in self.infos).
-            auto_recommend: Apply the recommendation once the editor opens.
-        """
-        info = self.infos.get(model)
+        a = self.app
+        info = a.infos.get(model)
         if info is None:
-            return self.say("Still reading the model header - try again.")
+            return self.say("Still reading the model header - try again in a moment.")
+        old = a.cfg.preset(model, key)
+        prof = old.profile if old else a.cfg.default_profile
 
-        def done(new: Profile | None) -> None:
-            if new is not None:
-                self.app.cfg.set_preset(model, Preset(CUSTOM, new, "edited"))
-                self.app.cfg.save()
-            if model in self.model_table.rows:
-                self._add_row(Path(model), self.infos.get(model))
-            self.update_detail()
+        def done(new) -> None:
+            if new is None or (old is not None and new == old.profile):
+                return
+            a.cfg.set_preset(model, Preset(key, new, EDITED, old.measured if old else None),
+                             activate=False)
+            a.presets_changed(model)
+            self.say(f"Saved the '{key}' preset of {a.alias_of(model)} (edited)")
 
-        self.app.push_screen(
-            PresetEditor(self.app.cfg, self.app.cfg.profile_for(model), self.app.host,
-                         info, Path(model).name, apply_plan=auto_recommend,
-                         calibration=self.app.calibration), done)
-
-    def open_recommendation(self, model: str) -> None:
-        """Push the RecommendationScreen for a model; "editor" opens the editor.
-
-        Args:
-            model: Model path (must be in self.infos).
-        """
-        info = self.infos.get(model)
-        if info is None:
-            return self.say("Still reading the model header - try again.")
-
-        def done(result: str | None) -> None:
-            if result == "editor":
-                return self.open_editor(model, auto_recommend=True)
-            if model in self.model_table.rows:
-                self._add_row(Path(model), self.infos.get(model))
-            self.update_detail()
-
-        self.app.push_screen(
-            RecommendationScreen(self.app.cfg, model, info, self.app.host,
-                                 self.app.calibration), done)
-
-    def _edit(self, model: str | None) -> None:
-        """Open the profile editor (or the default profile when model is None)."""
-        if model is None:
-            def done(new: Profile | None) -> None:
-                if new is not None:
-                    self.app.cfg.default_profile = new
-                    self.app.cfg.save()
-
-            self.app.push_screen(
-                PresetEditor(self.app.cfg, self.app.cfg.default_profile, self.app.host,
-                              None, "Default profile"), done)
-            return
-        self.open_editor(model, auto_recommend=False)
-
-    def action_launch_server(self) -> None:
-        if m := self.selected_model():
-            self._launch(m)
-
-    def action_edit_profile(self) -> None:
-        if m := self.selected_model():
-            self._edit(m)
+        a.push_screen(PresetEditor(a.cfg, prof, a.host, info, f"{a.alias_of(model)} - {key}",
+                                   intent=by_key[key], apply_plan=old is None,
+                                   calibration=a.calibration), done)
 
     def action_edit_default(self) -> None:
-        self._edit(None)
+        """Edit the default profile every plan starts from."""
+        a = self.app
 
-    def action_recommend(self) -> None:
-        if m := self.selected_model():
-            self.open_recommendation(m)
+        def done(new) -> None:
+            if new is not None and new != a.cfg.default_profile:
+                a.cfg.default_profile = new
+                try:
+                    a.cfg.save()
+                except OSError as e:
+                    return a.fail(f"cannot save the config: {e}")
+                a.config_changed()
+                self.say("Default profile saved; plans are recomputed")
 
-    def action_delete_profile(self) -> None:
-        m = self.selected_model()
-        ent = self.app.cfg.models.get(m) if m else None
-        if m and ent and self.app.cfg.delete_preset(m, ent.active):
-            self.app.cfg.save()
-            self._add_row(Path(m), self.infos.get(m))
-            self.update_detail()
-            self.say(f"Profile for {Path(m).name} deleted.")
+        a.push_screen(PresetEditor(a.cfg, a.cfg.default_profile, a.host, None,
+                                   "Default profile"), done)
 
-    @on(Button.Pressed, "#m_launch")
-    def _b_launch(self) -> None:
-        self.action_launch_server()
+    def action_activate(self) -> None:
+        """Make the highlighted intent's preset the one served as plain alias."""
+        got = self._need_intent()
+        if got is None:
+            return
+        model, _, key = got
+        a = self.app
+        if a.cfg.preset(model, key) is None:
+            return self.say(f"No '{key}' preset yet: p plans it, t tunes it, Enter serves it.")
+        if a.cfg.models[model].active == key:
+            return self.say(f"'{key}' is already the active preset.")
+        if a.activate_preset(model, key):
+            self.say(f"'{key}' is now served as {a.alias_of(model)}")
 
-    @on(Button.Pressed, "#m_edit")
-    def _b_edit(self) -> None:
-        self.action_edit_profile()
+    def action_delete_preset(self) -> None:
+        """Delete the highlighted intent's preset after a confirmation."""
+        got = self._need_intent()
+        if got is None:
+            return
+        model, _, key = got
+        a = self.app
+        if a.cfg.preset(model, key) is None:
+            return self.say(f"No '{key}' preset to delete.")
 
-    @on(Button.Pressed, "#m_rec")
-    def _b_rec(self) -> None:
-        self.action_recommend()
+        def done(yes: bool | None) -> None:
+            if yes and a.cfg.delete_preset(model, key):
+                a.presets_changed(model)
+                self.say(f"Deleted the '{key}' preset of {a.alias_of(model)}")
 
-    @on(Button.Pressed, "#m_del")
-    def _b_del(self) -> None:
-        self.action_delete_profile()
+        a.push_screen(ConfirmScreen(f"Delete the '{key}' preset of {a.alias_of(model)}?"), done)
+
+
+def _size(path: Path) -> int:
+    """File size, 0 when unreadable."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
