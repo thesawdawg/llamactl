@@ -253,3 +253,22 @@ async def test_ui_helper_is_safe_when_the_target_is_gone(isolated: SimpleNamespa
     assert app.ui(calls.append, "after exit") is False
     assert calls == ["kept"]
 
+
+async def test_setting_field_impact_set_before_it_is_mounted_is_shown_later() -> None:
+    """Regression: the editor's first preview ran while the field's label was not composed yet.
+
+    That raised `NoMatches` when the editor was opened right after startup (the intermittent
+    crash of the "edit default profile" test); the text is now kept and painted on mount.
+    """
+    from llamactl import schema
+    from llamactl.widgets.field import SettingField
+
+    app = App()
+    async with app.run_test() as pilot:
+        field = SettingField(schema.by_key["ctx_size"], 0, None, _host())
+        field.set_impact("Needs ~1 GB")             # not mounted: must not raise
+        field.show_reason("planned for chat")
+        await app.mount(field)
+        await pilot.pause(0.1)
+        lbl = field.query_one(".impact", Label)
+        assert "planned for chat" in str(lbl.render()) and lbl.has_class("recommended")

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from textual import events, on
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.validation import Integer, Number, ValidationResult, Validator
 from textual.widget import Widget
@@ -87,6 +88,7 @@ class SettingField(Widget):
         self._disabled_reason = disabled_reason
         self._value = value
         self._reason = ""  # active recommendation reason, kept until user edits
+        self._impact = ("", False)  # impact line text and whether it is a plan reason
         self._pending = 0  # programmatic set_value calls with a Changed event in flight
         if setting.kind == Kind.INT:
             inp: Widget = (_StepInput(str(value), step=setting.step, integer=True,
@@ -118,8 +120,10 @@ class SettingField(Widget):
         yield Label("", classes="impact")
 
     def on_mount(self) -> None:
+        """Disable the input when the field is not applicable; paint any impact already set."""
         if self._disabled_reason:
             self.input.disabled = True
+        self._paint()
 
     @property
     def value(self) -> Any:
@@ -160,16 +164,27 @@ class SettingField(Widget):
         """Update the impact line (no highlighting); skipped while a reason shows."""
         if self._reason:
             return
-        lbl = self.query_one(".impact", Label)
-        lbl.remove_class("recommended")
-        lbl.update(text)
+        self._impact = (text, False)
+        self._paint()
 
     def show_reason(self, text: str) -> None:
         """Show a recommendation reason, highlighted, until the user edits."""
         self._reason = text
-        lbl = self.query_one(".impact", Label)
-        lbl.add_class("recommended")
-        lbl.update(text)
+        self._impact = (text, True)
+        self._paint()
+
+    def _paint(self) -> None:
+        """Show the stored impact line; a field whose children are not mounted yet shows it later.
+
+        The editor computes its first preview while the collapsible groups are still being
+        composed, so the label may not exist yet (`on_mount` paints again).
+        """
+        try:
+            lbl = self.query_one(".impact", Label)
+        except NoMatches:
+            return
+        lbl.set_class(self._impact[1], "recommended")
+        lbl.update(self._impact[0])
 
     def _check(self) -> None:
         """Re-validate and mark the field, then notify the editor."""
@@ -184,7 +199,8 @@ class SettingField(Widget):
             try:
                 self.value
             except ValueError as e:
-                self.query_one(".impact", Label).update(str(e))
+                self._impact = (str(e), False)
+                self._paint()
         self.post_message(self.Changed(self))
 
     @on(Input.Changed)
