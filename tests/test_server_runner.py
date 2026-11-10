@@ -320,7 +320,27 @@ def test_early_exit_with_other_reason(world: World, model: Path) -> None:
                        "architecture: 'clef'\nsrv load_model: failed to load model\n")
     m = make(world).measure(model, Profile())
     assert m.error.startswith(f"{ERR_LOAD}: ") and not m.resource_failure
-    assert "failed to load model" in m.error
+    assert "unknown model architecture: 'clef'" in m.error
+
+
+REAL_UNKNOWN_ARCH_LOG = """\
+0.00.078.575 I srv  llama_server: initializing ...
+0.00.078.895 W srv  llama_server: security: no API key is set and CORS allows all origins
+0.00.082.327 I srv    load_model: loading model '/home/u/models/clef-flash-Q8_0.gguf'
+0.00.175.656 E llama_model_load: error loading model: unknown model architecture: 'clef'
+0.00.175.675 E llama_model_load_from_file_impl: failed to load model
+0.00.175.687 E srv    load_model: failed to load model, '/home/u/models/clef-flash-Q8_0.gguf'
+0.00.175.689 I srv    operator(): operator(): cleaning up before exit...
+0.00.176.331 E srv  llama_server: exiting due to model loading error
+"""
+
+
+def test_real_unknown_architecture_log_names_the_root_cause(world: World, model: Path) -> None:
+    """Seen with llama.cpp 5fc4f3c: the last error line is generic, the first says why."""
+    world.exit_text = REAL_UNKNOWN_ARCH_LOG
+    m = make(world).measure(model, Profile())
+    assert m.error.startswith(f"{ERR_LOAD}: llama_model_load: error loading model: "
+                              "unknown model architecture: 'clef' (log: ")
 
 
 def test_empty_log_still_gives_a_reason(world: World, model: Path) -> None:
@@ -418,6 +438,8 @@ def test_parse_build() -> None:
 
 @pytest.mark.parametrize("log,kind", [
     ("cudaMalloc failed: out of memory", ERR_OOM),
+    ("0.06.1 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 500000.00 MiB on device 0: "
+     "cudaMalloc failed: out of memory", ERR_OOM),
     ("llama_kv_cache: failed to allocate buffer for kv cache", ERR_OOM),
     ("main: failed to fit params to free device memory", ERR_OOM),
     ("vk::Device::allocateMemory: ErrorOutOfDeviceMemory", ERR_OOM),

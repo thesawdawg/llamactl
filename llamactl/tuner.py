@@ -48,7 +48,7 @@ BENCH_TIMEOUT = 300.0
 STOP_GRACE = 15.0         # SIGTERM first; SIGKILL when the group is still alive after this
 GONE_WAIT = 10.0          # after SIGKILL, how long to wait for the process to disappear
 VERSION_TIMEOUT = 20.0
-LOG_TAIL_BYTES = 16384
+LOG_TAIL_BYTES = 65536
 PREFLIGHT_MARGIN = 0.9    # refuse only when free memory is below 90% of the budget
 
 BENCH_PROMPT = (
@@ -528,6 +528,11 @@ def parse_build(text: str) -> str:
     return ""
 
 
+_PREFIX_RE = re.compile(r"^\d+(?:\.\d+)*\s+[A-Z]\s+")      # "0.00.175.656 E " log prefix
+_ERROR_LEVEL_RE = re.compile(r"^\S+\s+E\s")
+_ROOT_CAUSE_RE = re.compile(r"error loading model|unknown model architecture|^error:", re.I)
+
+
 def classify_failure(log_tail: str) -> str:
     """Name why llama-server failed to come up, from the end of its log.
 
@@ -535,17 +540,24 @@ def classify_failure(log_tail: str) -> str:
         log_tail: The last part of the server's output.
 
     Returns:
-        ``"out of memory: <line>"``, ``"unknown argument: <line>"`` or ``"load failed: <line>"``,
-        where the line is the first log line matching the kind (the root cause comes
-        before its follow-up errors), or for "load failed" the last error line.
+        ``"out of memory: <line>"``, ``"unknown argument: <line>"`` or ``"load failed: <line>"``.
+        The line is the first one matching the kind (the root cause comes before its
+        follow-up errors); for "load failed" the first line naming a loading error, else the
+        first error-level line, else the last line. The timestamp/level prefix is removed.
     """
     lines = [ln.strip() for ln in log_tail.splitlines() if ln.strip()]
+
+    def show(line: str) -> str:
+        return _PREFIX_RE.sub("", line)[:200]
+
     for kind, pattern in ((ERR_OOM, _OOM_RE), (ERR_ARGS, _ARGS_RE)):
         hits = [ln for ln in lines if pattern.search(ln)]
         if hits:
-            return f"{kind}: {hits[0][:200]}"
-    errors = [ln for ln in lines if re.search(r"\berror\b|\bfailed\b|\bE\b", ln, re.I)]
-    return f"{ERR_LOAD}: {(errors or lines or ['no log output'])[-1][:200]}"
+            return f"{kind}: {show(hits[0])}"
+    errors = [ln for ln in lines if _ERROR_LEVEL_RE.match(ln) or re.search(r"\berror\b", ln, re.I)]
+    cause = [ln for ln in errors if _ROOT_CAUSE_RE.search(_PREFIX_RE.sub("", ln))]
+    pick = (cause or errors or lines[-1:] or ["no log output"])[0]
+    return f"{ERR_LOAD}: {show(pick)}"
 
 
 def live_devices(bin_dir: str) -> list[Device]:
