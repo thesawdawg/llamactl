@@ -370,6 +370,56 @@ llama-server --models-preset ~/.config/llamactl/gateway.ini --models-max N \
 Kept for pinned servers on their own port (`serve --standalone`) and for attaching external
 URLs. `launch_server(cfg, model, preset_name)` takes the preset explicitly.
 
+### 7.3 Network access (`network.py`)
+
+llamactl serves other frontends and harnesses, often on other machines, so binding to the
+local network is a first-class path, not a hidden text field. Loopback stays the default.
+
+- **Bind modes.** `gateway.host` keeps its meaning (any listen address). The UI and CLI talk in
+  three modes: `local` (`127.0.0.1`), `lan` (`0.0.0.0`) and `custom` (any other address).
+  `network.bind_mode(host) -> str` and `network.is_exposed(host) -> bool` (false only for
+  loopback addresses and `localhost`) are pure.
+- **Client URLs.** `network.lan_addresses() -> list[str]` lists this machine's non-loopback IPv4
+  addresses, ignoring container bridges (`docker*`, `br-*`, `veth*`, `virbr*`, `cni*`, `flannel*`)
+  and link-local `169.254/16`. It reads `ip -o -4 addr show` and falls back to the address of the
+  default route, which it gets from a UDP socket `connect` that sends no packets. It is
+  injectable and cached per process. `network.client_urls(host, port) -> list[str]` is the
+  loopback URL plus one URL per LAN address for a wildcard bind, and the bind address itself
+  otherwise. llamactl's own probes still connect over loopback (`Gateway.listen_url`).
+  Everything that shows an endpoint to a person uses `client_urls`: Home, Serving, onboarding's
+  finish pane, `up`, `serve`, `ps` (`urls` in `--json`) and the curl snippet, which uses the
+  first LAN URL when the server is exposed. A standalone server bound to `0.0.0.0` is never
+  shown as `http://0.0.0.0:port`.
+- **API key.** When the bind is exposed and `api_key` is empty, starting the gateway or a
+  standalone server warns (CLI on stderr, TUI as a notice) but does not refuse.
+  `network.new_api_key()` returns `secrets.token_urlsafe(32)`.
+- **WSL.** `network.wsl_mode() -> str | None` returns `None` off WSL (checked through
+  `/proc/sys/kernel/osrelease`), else `mirrored` or `nat` (from `wslinfo --networking-mode`
+  when present, else whether `eth0` has a `172.16/12` address), else `unknown`.
+  `network.exposure_notes(host) -> list[str]` explains what an exposed bind needs on this
+  machine: in NAT mode, that other machines cannot reach WSL without mirrored networking or a
+  `netsh portproxy`; in mirrored mode, that the Hyper-V firewall may block inbound connections
+  until a rule allows the port. Settings, `up` and `config` show these notes.
+- **TUI.** Settings replaces the Host input with a "Listen on" select (This machine / Local
+  network / Custom). The Custom address input is enabled only for Custom. Under the select a line
+  shows the resulting client URLs, a warning when the bind is exposed without a key, and the WSL
+  notes. The API key row gains a "Generate" button. Onboarding's finish step has a "Reachable
+  from other machines" checkbox (off by default). When checked, it sets `lan` and generates a
+  key if none is set. The PresetEditor's Host field for standalone servers gets the same three
+  choices.
+- **CLI.**
+  - `up` and `serve` (gateway path) accept `--lan` or `--host ADDR` (mutually exclusive). They
+    apply to that start only and are never saved. When the gateway is already running with a
+    different bind, they fail with a hint to run `down` first.
+  - `serve --standalone` accepts the same flags for that server.
+  - New `llamactl config [KEY=VALUE ...] [--new-api-key] [--json]`. Without arguments it prints
+    the gateway settings, `default_intent` and `headroom_pct`, with the API key masked. With
+    `KEY=VALUE` pairs it validates and saves them. Keys: `gateway.host`, `gateway.port`,
+    `gateway.api_key`, `gateway.models_max`, `gateway.sleep_idle`, `gateway.autostart`,
+    `default_intent`, `headroom_pct`. `gateway.host` also accepts `local` and `lan`.
+    `--new-api-key` generates, saves and prints a key once.
+  - Changing a restart field while the gateway runs says that `down` and `up` apply it.
+
 ## 8. CLI (`cli.py`)
 
 `llamactl` with no arguments opens the TUI. Subcommands (all accept `--json` where they print
@@ -382,7 +432,8 @@ data; models are named by alias, file stem or unique substring):
 | `llamactl plan MODEL [--for INTENT]` | print the plan, reasons and exact command; changes nothing |
 | `llamactl tune MODEL [--for INTENT] [--trials N]` | measured tune, saves the preset |
 | `llamactl serve MODEL [--for INTENT] [--standalone] [--port P]` | ensure a preset exists (plan if not), then load it in the gateway (starting it if needed) or start a standalone server |
-| `llamactl up` / `llamactl down` | start / stop the gateway |
+| `llamactl up [--lan\|--host ADDR]` / `llamactl down` | start / stop the gateway |
+| `llamactl config [KEY=VALUE ...] [--new-api-key]` | show or change gateway and planning settings (section 7.3) |
 | `llamactl ps` | gateway models and standalone sessions with state |
 | `llamactl load NAME` / `unload NAME` | gateway model control |
 | `llamactl stop NAME\|--all` | stop standalone servers |
@@ -545,3 +596,5 @@ Each phase lands as Conventional Commits on the `redesign-v2` branch. No pushing
 6. **TUI** - Home, Models, Serving, IntentPicker, PlanScreen, TuneScreen, PresetEditor.
 7. **Onboarding and Discover** - first-run flow, fit-aware file lists.
 8. **Release prep** - README, CHANGELOG, AGENTS.md, version 0.2.0 (no tag, no publish).
+9. **Network access** - LAN bind modes, client URLs, API key prompts, WSL notes, `config`
+   command (section 7.3); part of 0.2.0.
