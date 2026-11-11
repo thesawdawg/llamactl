@@ -6,6 +6,58 @@ there are no earlier tagged releases. Commit entries retain their original subje
 
 ## [Unreleased]
 
+## [0.2.0] - Unreleased
+
+llamactl is now a server-only manager: you choose what a model is for, it plans and
+measures the settings, and everything is served from one OpenAI-compatible endpoint.
+Design: `docs/SPEC.md`.
+
+### Added
+
+- Six intents (chat, agent, context, speed, api, embed) and a planner that estimates context,
+  KV cache type, offload, threads and parallel slots for the detected hardware, with a reason
+  for each setting (`dab39cf`, `0bc3a1b`, `e6e0bdc`, `9d892cb`).
+- Backend-agnostic hardware detection through `llama-server --list-devices`, with an
+  `nvidia-smi` fallback (`bf38263`).
+- Measured tuning: launch a model with candidate settings, record memory and tokens per
+  second, keep the best result, cancel a running trial, and use the trials to calibrate later
+  estimates (`d8b00b4`, `1f3cffc`, `21322cc`).
+- A gateway: one `llama-server` in router mode serves every model, named `alias` or
+  `alias@intent`, with models loaded on demand and optional API key and idle sleep
+  (`66bda9f`, `534a7ec`). Standalone servers stay available.
+- Per-model presets and aliases in config version 3, with migration from 0.1.x (`ea9b0dc`,
+  `7950799`).
+- A headless CLI: `hw`, `ls`, `plan`, `tune`, `serve`, `up`, `down`, `ps`, `load`, `unload`,
+  `stop` and `logs`, with `--json` where data is printed (`a624804`, `a99540f`).
+- A TUI with five views: Home, Models, Serving, Discover and Settings, plus intent picker,
+  plan, tune and preset editor screens (`64339d3`, `4cef172`, `cc75287`, `f16b6d6`).
+- Guided first-run setup, repeatable from Settings (`29c5536`).
+- Discover marks the largest quant whose weights fit the GPU and opens the intent picker
+  after a download (`aab416e`).
+- New settings: `fit`, `fit_target`, `device`, `cache_reuse`, `sleep_idle`, `embedding`,
+  `pooling` and `threads_batch`; embedding models are recognised from the GGUF pooling type
+  (`e42459d`, `24f7eba`).
+- `LLAMACTL_HOME` and `XDG_CONFIG_HOME` choose the state directory (`ef69d94`).
+
+### Changed
+
+- Serving goes through the gateway by default; `llamactl serve --standalone` runs a separate
+  server.
+- A 0.1.x `config.json` is upgraded to version 3 on the first save: each model profile becomes
+  a `custom` preset, and the old file is copied to `config.v2.bak.json` once.
+- Hardware detection moved from `hostinfo` to `hardware`.
+- The UI no longer blocks on workers that finish while the app closes (`a28d781`, `cd0d8c2`,
+  `c19a191`).
+- Tests are faster and no longer fill the temporary volume with copies of model files
+  (`7953e92`, `227d8b4`).
+
+### Removed
+
+- The built-in chat screen and the `llama-cli` launch mode (`242d81a`). Connect a frontend to
+  the gateway instead.
+- Launch modes in the settings registry, and `seen.json`.
+- The recommender (`recommend.py`) and its prompts, replaced by the planner (`bbe6d1c`).
+
 ## [0.1.3] - 2026-10-07
 
 ### Fixed
