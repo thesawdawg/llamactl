@@ -340,3 +340,102 @@ async def test_run_setup_again_from_settings_and_cancel_changes_nothing(
         await press(pilot, app, "ob_skip")
         assert await wait_for(pilot, lambda: not isinstance(app.screen, OnboardingScreen))
         assert not (ui_env.cfg_dir / "config.json").exists()                    # no save on cancel
+
+
+# ---------------------------------------------------------------------------- reachable
+
+from conftest import FAKE_LAN  # noqa: E402
+
+
+async def test_reachable_checkbox_is_off_by_default_and_changes_nothing(
+        ui_env: SimpleNamespace) -> None:
+    ui_env.add_model()
+    cfg = fresh(ui_env)
+    app = make_app(ui_env, gateway=FakeGateway(cfg), which=lambda name: None)
+    async with app.run_test(size=SIZE) as pilot:
+        scr = await open_setup(pilot, app)
+        await to_step(pilot, app, 5)
+        box = scr.query_one("#ob_reachable", Checkbox)
+        assert not box.value and not box.disabled         # usable even without a model
+        await press(pilot, app, "ob_next")
+        assert await wait_for(pilot, lambda: scr.result is not None)
+        assert cfg.gateway.host == "127.0.0.1" and cfg.gateway.api_key == ""
+        result = plain(scr.query_one("#ob_result", Static))
+        assert FAKE_LAN not in result and "API key" not in result
+        assert not shown(app, "ob_reachable")
+
+
+async def test_reachable_sets_lan_generates_a_key_and_shows_the_urls_once(
+        ui_env: SimpleNamespace) -> None:
+    m = ui_env.add_model()
+    cfg = fresh(ui_env)
+    gw = FakeGateway(cfg)
+    app = make_app(ui_env, gateway=gw, which=lambda name: None)
+    async with app.run_test(size=SIZE) as pilot:
+        scr = await open_setup(pilot, app)
+        await to_step(pilot, app, 4)
+        models = scr.query_one("#ob_models", OptionList)
+        assert await wait_for(pilot, lambda: models.option_count == 2)
+        models.highlighted = 1
+        assert await wait_for(pilot, lambda: scr.draft.model == str(m))
+        await to_step(pilot, app, 5)
+        scr.query_one("#ob_reachable", Checkbox).value = True
+        await press(pilot, app, "ob_next")
+        assert await wait_for(pilot, lambda: gw.called("start"))
+        assert cfg.gateway.host == "0.0.0.0" and len(cfg.gateway.api_key) >= 43
+        saved = Config.load().gateway
+        assert (saved.host, saved.api_key) == ("0.0.0.0", cfg.gateway.api_key)
+        assert await wait_for(pilot, lambda: "Gateway running at" in plain(scr.query_one("#ob_result", Static)))
+        result = plain(scr.query_one("#ob_result", Static))
+        assert f"Endpoint  http://{FAKE_LAN}:8080/v1" in result
+        assert "http://127.0.0.1:8080/v1" in result and "0.0.0.0:" not in result
+        assert cfg.gateway.api_key in result and "shown only now" in result
+        assert f"curl http://{FAKE_LAN}:8080/v1/chat/completions" in result and "Bearer" in result
+        assert gw.bound_host == "0.0.0.0"
+
+
+async def test_reachable_keeps_an_existing_key(ui_env: SimpleNamespace) -> None:
+    ui_env.add_model()
+    cfg = fresh(ui_env)
+    cfg.gateway.api_key = "mine"
+    app = make_app(ui_env, gateway=FakeGateway(cfg), which=lambda name: None)
+    async with app.run_test(size=SIZE) as pilot:
+        scr = await open_setup(pilot, app)
+        await to_step(pilot, app, 5)
+        scr.query_one("#ob_reachable", Checkbox).value = True
+        await press(pilot, app, "ob_next")
+        assert await wait_for(pilot, lambda: scr.result is not None)
+        assert cfg.gateway.api_key == "mine" and cfg.gateway.host == "0.0.0.0"
+        assert "mine" not in plain(scr.query_one("#ob_result", Static))
+
+
+async def test_rerunning_setup_shows_the_current_choice_and_unchecking_goes_local(
+        ui_env: SimpleNamespace) -> None:
+    ui_env.add_model()
+    cfg = fresh(ui_env)
+    cfg.gateway.host = "0.0.0.0"
+    app = make_app(ui_env, gateway=FakeGateway(cfg), which=lambda name: None)
+    async with app.run_test(size=SIZE) as pilot:
+        scr = await open_setup(pilot, app)
+        await to_step(pilot, app, 5)
+        box = scr.query_one("#ob_reachable", Checkbox)
+        assert box.value
+        box.value = False
+        await press(pilot, app, "ob_next")
+        assert await wait_for(pilot, lambda: scr.result is not None)
+        assert cfg.gateway.host == "127.0.0.1"
+
+
+async def test_reachable_warns_when_the_running_gateway_has_the_old_bind(
+        ui_env: SimpleNamespace) -> None:
+    ui_env.add_model()
+    cfg = fresh(ui_env)
+    gw = FakeGateway(cfg, running=True)                # runs on 127.0.0.1
+    app = make_app(ui_env, gateway=gw, which=lambda name: None)
+    async with app.run_test(size=SIZE) as pilot:
+        scr = await open_setup(pilot, app)
+        await to_step(pilot, app, 5)
+        scr.query_one("#ob_reachable", Checkbox).value = True
+        await press(pilot, app, "ob_next")
+        assert await wait_for(pilot, lambda: scr.result is not None)
+        assert "already runs on 127.0.0.1" in plain(scr.query_one("#ob_result", Static))

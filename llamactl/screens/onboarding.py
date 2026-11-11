@@ -21,7 +21,7 @@ from textual.widgets import (Button, Checkbox, ContentSwitcher, Footer, Header, 
                              OptionList, Static)
 from textual.widgets.option_list import Option
 
-from .. import hardware, library, onboarding as ob
+from .. import hardware, library, network, onboarding as ob
 from ..fmt import FITS_STYLE, human
 from ..gguf import ModelInfo
 from ..hardware import Host
@@ -86,6 +86,7 @@ class OnboardingScreen(Screen[Dismissal]):
         self.choices: list[ob.ModelChoice] = []
         self.result: ob.FinishResult | None = None
         self.gateway_note = ""
+        self.bind_note = ""
         self._host_for = ""
         self._choices_for: tuple = ()
 
@@ -127,6 +128,11 @@ class OnboardingScreen(Screen[Dismissal]):
                     yield Checkbox("Start the gateway now (nothing else is made permanent)",
                                    True, id="ob_gateway")
                     yield Static("", id="ob_why", classes="hint")
+                    yield Checkbox("Reachable from other machines (listens on the whole network "
+                                   "and makes an API key)", self.app.cfg.gateway.host
+                                   == network.WILDCARD, id="ob_reachable")
+                    yield Static("Off keeps the gateway on this machine only.",
+                                 id="ob_reach_hint", classes="hint")
                     yield Static("", id="ob_result")
             yield Label("", id="ob_msg")
             with Horizontal(id="ob_buttons"):
@@ -510,6 +516,7 @@ class OnboardingScreen(Screen[Dismissal]):
         d = self.draft
         d.tune = self.query_one("#ob_tune", Checkbox).value
         d.start_gateway = self.query_one("#ob_gateway", Checkbox).value
+        d.reachable = self.query_one("#ob_reachable", Checkbox).value
         self._apply(model=d.model, then=None)
 
     def _apply(self, *, model: str, then: Dismissal | None) -> None:
@@ -529,6 +536,11 @@ class OnboardingScreen(Screen[Dismissal]):
         if then is not None:
             return self._close(then)
         self.result = res
+        running = a.gateway.state
+        self.bind_note = ""
+        if running is not None and running.host and network.is_exposed(running.host) != res.exposed:
+            self.bind_note = (f"The gateway already runs on {running.host}: stop it (d) and start "
+                              "it (u) in Home to apply the new setting.")
         self._draw_result(res)
         if res.start_gateway:
             self.gateway_note = "Starting the gateway..."
@@ -541,18 +553,29 @@ class OnboardingScreen(Screen[Dismissal]):
 
     def _gateway_finished(self, error: str) -> None:
         """The gateway start ended: say how."""
-        self.gateway_note = (f"Gateway running at {self.result.url if self.result else ''}"
-                             if not error else f"The gateway did not start: {error}")
+        urls = ", ".join(self.result.urls) if self.result else ""
+        self.gateway_note = (f"Gateway running at {urls}" if not error
+                             else f"The gateway did not start: {error}")
         if self.result is not None:
             self._draw_result(self.result)
 
     def _draw_result(self, res: ob.FinishResult) -> None:
         """The last pane after finishing: endpoint, model name, curl and the gateway note."""
-        for wid in ("ob_tune", "ob_gateway", "ob_why"):
+        for wid in ("ob_tune", "ob_gateway", "ob_why", "ob_reachable", "ob_reach_hint"):
             self.query_one(f"#{wid}").display = False
         t = Text()
         t.append("Setup saved.\n\n", style="bold green")
         t.append(f"Endpoint  {res.url}\n")
+        for other in res.urls:
+            if f"{other}/v1" != res.url:
+                t.append(f"          {other}/v1\n")
+        if res.new_key:
+            t.append("API key   ")
+            t.append(res.new_key, style="bold")
+            t.append("\n          shown only now; it is kept in Settings (clients send it as "
+                     "a Bearer token)\n")
+        for note in network.exposure_notes(self.app.cfg.gateway.host) if res.exposed else []:
+            t.append(f"          {note}\n", style="dim")
         if res.model:
             t.append(f"Model     {res.served} ({res.preset} preset"
                      f"{', planned just now' if res.created else ''})\n\n")
@@ -565,5 +588,7 @@ class OnboardingScreen(Screen[Dismissal]):
                      else "")
         elif res.model:
             t.append("\nThe gateway is not started: press u in Home to start it.", style="dim")
+        if self.bind_note:
+            t.append("\n" + self.bind_note, style="yellow")
         self.query_one("#ob_summary", Static).update("")
         self.query_one("#ob_result", Static).update(t)

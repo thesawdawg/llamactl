@@ -211,6 +211,52 @@ def test_finish_with_an_unread_model_header_changes_nothing(env) -> None:
     assert not env.cfg.onboarded and env.cfg.bin_dir == "/old"
 
 
+def test_finish_reachable_listens_on_the_network_and_makes_a_key(env) -> None:
+    env.draft.reachable = True
+    out = ob.finish(env.cfg, env.draft, {str(env.model): env.info}, make_host(), None,
+                    "http://127.0.0.1:8080")
+    g = env.cfg.gateway
+    assert g.host == "0.0.0.0" and len(g.api_key) >= 43 and out.new_key == g.api_key
+    assert out.exposed and out.urls == ("http://127.0.0.1:8080", "http://192.168.50.7:8080")
+    assert out.url == "http://192.168.50.7:8080/v1"
+    assert "http://192.168.50.7:8080/v1/chat/completions" in out.snippet and "Bearer" in out.snippet
+    assert Config.load().gateway.host == "0.0.0.0" and Config.load().gateway.api_key == g.api_key
+
+
+def test_finish_reachable_without_a_model_still_applies(env) -> None:
+    env.draft.model, env.draft.reachable = "", True
+    out = ob.finish(env.cfg, env.draft, {}, make_host(), None, "http://127.0.0.1:8080")
+    assert env.cfg.gateway.host == "0.0.0.0" and out.new_key and out.url.startswith("http://192.168")
+
+
+def test_finish_reachable_keeps_an_existing_key(env) -> None:
+    env.cfg.gateway.api_key = "mine"
+    env.draft.reachable = True
+    out = ob.finish(env.cfg, env.draft, {str(env.model): env.info}, make_host(), None, "http://x:1")
+    assert env.cfg.gateway.api_key == "mine" and out.new_key == ""
+
+
+def test_finish_not_reachable_leaves_the_bind_alone(env) -> None:
+    out = ob.finish(env.cfg, env.draft, {str(env.model): env.info}, make_host(), None, "http://x:1")
+    assert env.cfg.gateway.host == "127.0.0.1" and env.cfg.gateway.api_key == ""
+    assert not out.exposed and out.new_key == "" and out.urls == ("http://x:1",)
+    env.cfg.gateway.host = "10.0.0.5"                  # a custom address is not ours to undo
+    ob.finish(env.cfg, env.draft, {str(env.model): env.info}, make_host(), None, "http://x:1")
+    assert env.cfg.gateway.host == "10.0.0.5"
+    env.cfg.gateway.host = "0.0.0.0"                   # but unchecking after "lan" goes back
+    ob.finish(env.cfg, env.draft, {str(env.model): env.info}, make_host(), None, "http://x:1")
+    assert env.cfg.gateway.host == "127.0.0.1"
+
+
+def test_flow_starts_reachable_only_when_the_gateway_already_is() -> None:
+    assert not ob.Flow(Config()).draft.reachable
+    cfg = Config()
+    cfg.gateway.host = "0.0.0.0"
+    assert ob.Flow(cfg).draft.reachable
+    cfg.gateway.host = "10.0.0.5"
+    assert not ob.Flow(cfg).draft.reachable
+
+
 def test_skip_marks_onboarded_once_and_applies_nothing(isolated: SimpleNamespace) -> None:
     cfg = Config(bin_dir="/old")
     assert ob.skip(cfg) and cfg.onboarded and Config.load().onboarded

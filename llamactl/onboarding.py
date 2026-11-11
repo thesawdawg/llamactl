@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import actions, planner
+from . import actions, network, planner
 from .calibration import Calibration
 from .config import Config
 from .fmt import human
@@ -353,6 +353,8 @@ class Draft:
         model: Path of the first model to prepare, "" for none.
         tune: Open the tune screen when the flow ends.
         start_gateway: Start the gateway when the flow ends.
+        reachable: Let other machines connect: listen on every interface and make sure an API
+            key is set.
     """
 
     bin_dir: str = ""
@@ -361,6 +363,7 @@ class Draft:
     model: str = ""
     tune: bool = False
     start_gateway: bool = True
+    reachable: bool = False
 
 
 class Flow:
@@ -374,7 +377,8 @@ class Flow:
         self.index = 0
         keys = [i.key for i in INTENTS]
         self.draft = Draft(cfg.bin_dir, list(cfg.model_dirs),
-                           cfg.default_intent if cfg.default_intent in keys else "chat")
+                           cfg.default_intent if cfg.default_intent in keys else "chat",
+                           reachable=network.bind_mode(cfg.gateway.host) == network.LAN)
 
     @property
     def step(self) -> str:
@@ -452,7 +456,11 @@ class FinishResult:
         preset: Preset name, "".
         created: The preset was planned just now (it did not exist).
         served: Name clients request.
-        url: OpenAI-style base URL (``http://host:port/v1``).
+        url: OpenAI-style base URL (``http://host:port/v1``) to give to a client: the first LAN
+            address when the gateway is reachable from other machines.
+        urls: Every base URL a client can use, without ``/v1``: loopback first.
+        exposed: The gateway listens where other machines can reach it.
+        new_key: An API key generated just now (shown once), "" when none was made.
         snippet: A ``curl`` line, "" without a model.
         start_gateway: The caller should start the gateway.
         tune: The caller should open the tune screen.
@@ -466,11 +474,39 @@ class FinishResult:
     created: bool = False
     served: str = ""
     url: str = ""
+    urls: tuple[str, ...] = ()
+    exposed: bool = False
+    new_key: str = ""
     snippet: str = ""
     start_gateway: bool = False
     tune: bool = False
     bin_changed: bool = False
     dirs_changed: bool = False
+
+
+def _apply_reachable(cfg: Config, reachable: bool) -> str:
+    """Set the gateway's bind from the "reachable from other machines" choice.
+
+    Checked: listen on every interface, and generate an API key when none is set. Unchecked:
+    go back to this machine only when it was on every interface; a custom address is kept.
+
+    Args:
+        cfg: Config to update (not saved here).
+        reachable: The checkbox.
+
+    Returns:
+        The API key generated, "" when none was.
+    """
+    g = cfg.gateway
+    if not reachable:
+        if network.bind_mode(g.host) == network.LAN:
+            g.host = network.LOOPBACK
+        return ""
+    g.host = network.WILDCARD
+    if g.api_key:
+        return ""
+    g.api_key = network.new_api_key()
+    return g.api_key
 
 
 def finish(cfg: Config, draft: Draft, infos: dict[str, ModelInfo], host: Host,
@@ -479,7 +515,8 @@ def finish(cfg: Config, draft: Draft, infos: dict[str, ModelInfo], host: Host,
 
     Must run on the thread that owns the config. For a chosen model an ``estimated`` preset for
     the default intent is created when missing (it becomes the active preset only when the
-    model had none); an existing preset is never replaced.
+    model had none); an existing preset is never replaced. ``draft.reachable`` sets the gateway
+    to listen on every interface and generates an API key when none is set.
 
     Args:
         cfg: Config to update and save.
@@ -506,8 +543,12 @@ def finish(cfg: Config, draft: Draft, infos: dict[str, ModelInfo], host: Host,
     cfg.model_dirs = list(draft.model_dirs)
     cfg.default_intent = draft.default_intent
     cfg.onboarded = True
-    url = base_url.rstrip("/")
-    out = FinishResult(url=f"{url}/v1", bin_changed=bin_changed, dirs_changed=dirs_changed)
+    new_key = _apply_reachable(cfg, draft.reachable)
+    wildcard = network.is_wildcard(cfg.gateway.host)
+    urls = network.client_urls_for(base_url.rstrip("/"), cfg.gateway.host if wildcard else "")
+    url = network.primary_url(urls)
+    out = FinishResult(url=f"{url}/v1", urls=tuple(urls), exposed=network.is_exposed(cfg.gateway.host),
+                       new_key=new_key, bin_changed=bin_changed, dirs_changed=dirs_changed)
     if info is not None:
         intent = resolve(draft.default_intent, info)
         chosen = actions.pick_preset(cfg, info, host, calibration, intent.key,
@@ -516,7 +557,7 @@ def finish(cfg: Config, draft: Draft, infos: dict[str, ModelInfo], host: Host,
         runnable = not check_bin_dir(cfg.bin_dir)
         out = FinishResult(
             model=draft.model, intent=intent.key, preset=chosen.name, created=chosen.created,
-            served=served, url=out.url,
+            served=served, url=out.url, urls=out.urls, exposed=out.exposed, new_key=new_key,
             snippet=actions.curl_snippet(url, served, api_key=bool(cfg.gateway.api_key),
                                          embedding=info.is_embedding),
             start_gateway=draft.start_gateway and runnable, tune=draft.tune and runnable,
