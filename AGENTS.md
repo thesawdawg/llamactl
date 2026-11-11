@@ -1,12 +1,17 @@
 # llamactl agent notes
 
-Textual TUI for launching and managing llama.cpp servers. Python 3.14 venv at `.venv`.
+Server-only manager for llama.cpp (no chat): a Textual TUI plus a headless CLI over one core.
+Python 3.14 venv at `.venv`.
 
 ## Run
 
 ```sh
-.venv/bin/python -m llamactl
+.venv/bin/python -m llamactl            # the TUI
+.venv/bin/python -m llamactl ls         # CLI: hw, ls, plan, tune, serve, up, down, ps, load, unload, stop, logs
 ```
+
+For manual runs, point the state directory at a scratch folder so the real one is never
+touched: `LLAMACTL_HOME=$(mktemp -d) .venv/bin/python -m llamactl ...`.
 
 ## Test
 
