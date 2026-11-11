@@ -15,6 +15,7 @@ from rich.text import Text
 from .. import hf, network
 from ..intents import INTENTS
 from ..screens.prompt import PromptScreen
+from ..widgets.buttonbar import ButtonBar
 from ..widgets.folders import FolderList
 from .base import BaseView
 from .hf import TOKEN_HINT
@@ -31,20 +32,26 @@ class SettingsView(BaseView):
     """Form for the app's settings; saving applies them and reloads a running gateway."""
 
     BINDINGS = [Binding("ctrl+s", "save", "Save")]
+    # The -narrow rules key off a class of the screen (an ancestor), so this CSS has to
+    # stay unscoped.
+    SCOPED_CSS = False
     DEFAULT_CSS = """
     SettingsView { height: 1fr; }
     #set_scroll { padding: 0 1; }
-    #set_scroll .section { text-style: bold; margin-top: 1; color: $accent; }
+    #set_scroll .section { text-style: bold; margin-top: 1; color: $accent; width: 1fr; }
     #set_scroll .row { height: auto; }
     #set_scroll .lbl { width: 28; padding: 0 1 0 0; }
-    #set_scroll .row Input { width: 50; }
-    #set_scroll .row Select { width: 50; }
-    #set_scroll .hint { color: $text-muted; text-style: italic; padding: 0 1; }
+    #set_scroll .row Input { width: 1fr; max-width: 50; }
+    #set_scroll .row Select { width: 1fr; max-width: 50; }
+    #set_scroll .hint { color: $text-muted; text-style: italic; padding: 0 1; width: auto; }
     #set_scroll .row Button { margin-left: 1; }
     #gw_urls { height: auto; margin-left: 28; padding: 0 1; }
-    #set_buttons { height: auto; margin-top: 1; }
-    #set_buttons Button { margin-right: 1; }
-    #set_msg { height: auto; margin-top: 1; }
+    #set_buttons { margin: 0 1; }
+    #set_msg { height: auto; padding: 0 1; }
+    .-narrow #set_scroll .row { layout: vertical; }
+    .-narrow #set_scroll .lbl { width: 1fr; padding: 0; }
+    .-narrow #set_scroll .row Button { margin-left: 0; }
+    .-narrow #gw_urls { margin-left: 0; }
     """
 
     def compose(self) -> ComposeResult:
@@ -107,11 +114,11 @@ class SettingsView(BaseView):
                       "applies on the next start")
             yield Label("Hugging Face", classes="section")
             yield row("Access token", Button("Set token", id="set_token", compact=True))
-            with Horizontal(id="set_buttons"):
-                yield Button("Save (Ctrl+S)", id="save", variant="primary")
-                yield Button("Edit default profile", id="edit_default")
-                yield Button("Run setup again", id="run_setup")
-            yield Static("", id="set_msg")
+        with ButtonBar(id="set_buttons", classes="-docked"):
+            yield Button("Save (Ctrl+S)", id="save", variant="primary")
+            yield Button("Edit default profile", id="edit_default")
+            yield Button("Run setup again", id="run_setup")
+        yield Static("", id="set_msg")
 
     def on_mount(self) -> None:
         """Show whether a token is set and where clients would connect."""

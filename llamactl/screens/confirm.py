@@ -4,9 +4,12 @@ from __future__ import annotations
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label
+
+from ..widgets import layout
+from ..widgets.buttonbar import ButtonBar
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -21,12 +24,13 @@ class ConfirmScreen(ModalScreen[bool]):
         Binding("n", "no", "No", show=False),
         Binding("escape", "no", "Cancel"),
     ]
+    HORIZONTAL_BREAKPOINTS = layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = layout.VERTICAL_BREAKPOINTS
     CSS = """
     ConfirmScreen { align: center middle; }
-    ConfirmScreen #box { width: auto; max-width: 80; height: auto; padding: 1 2;
+    ConfirmScreen #box { width: 90%; max-width: 80; height: auto; padding: 1 2;
         border: round $accent; background: $surface; }
-    ConfirmScreen #cbuttons { height: auto; margin-top: 1; }
-    ConfirmScreen Button { margin-right: 1; }
+    ConfirmScreen #cbuttons { margin-top: 1; }
     """
 
     def __init__(self, prompt: str) -> None:
@@ -36,7 +40,7 @@ class ConfirmScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="box"):
             yield Label(self.prompt)
-            with Horizontal(id="cbuttons"):
+            with ButtonBar(id="cbuttons"):
                 yield Button("Yes (y)", id="yes", variant="error")
                 yield Button("No (n)", id="no")
 

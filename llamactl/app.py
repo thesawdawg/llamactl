@@ -47,6 +47,7 @@ from .views.home import HomeView
 from .views.models import ModelsView
 from .views.serving import ServingView
 from .views.settings import SettingsView
+from .widgets import layout
 from .widgets.gauges import ResourceGauges
 
 VIEWS = (("home", "Home"), ("models", "Models"), ("serving", "Serving"),
@@ -105,13 +106,17 @@ class LlamaCtl(App):
     """
 
     TITLE = "llamactl"
+    HORIZONTAL_BREAKPOINTS = layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = layout.VERTICAL_BREAKPOINTS
     CSS = """
+    * { scrollbar-size-vertical: 1; }
     #shell { height: 1fr; }
-    #nav { width: 14; }
+    #nav { width: 14; background: $surface; border-right: solid $panel; padding: 0 1; }
+    .-narrow #nav { width: 12; }
     #main { width: 1fr; height: 1fr; }
     #main > * { height: 1fr; }
     #gauges { height: 1; }
-    #statusbar { height: 1; padding: 0 1; }
+    #statusbar { height: 1; padding: 0 1; background: $panel; }
     #status { width: 1fr; height: 1; }
     #gwstate { width: auto; height: 1; color: $text-muted; }
     """

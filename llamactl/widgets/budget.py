@@ -25,7 +25,9 @@ class BudgetPanel(Vertical):
     """
 
     DEFAULT_CSS = """
-    BudgetPanel { height: auto; border: round $primary; padding: 0 1; }
+    BudgetPanel { height: auto; border: round $primary; padding: 0 1;
+        border-title-color: $accent; border-title-style: bold; }
+    BudgetPanel:focus-within { border: round $accent; }
     BudgetPanel .bar { height: 1; }
     BudgetPanel .nums { color: $text-muted; width: 100%; height: auto; }
     BudgetPanel .verdict { text-style: bold; }

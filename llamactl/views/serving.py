@@ -58,7 +58,9 @@ class ServingView(BaseView):
     #sv_gateway { height: 1; padding: 0 1; }
     #sv_table { height: 40%; }
     #sv_empty { color: $text-muted; padding: 1 2; height: auto; }
-    #sv_detail_box { height: 1fr; border: round $primary; }
+    #sv_detail_box { height: 1fr; border: round $primary; border-title-color: $accent;
+        border-title-style: bold; }
+    #sv_detail_box:focus-within { border: round $accent; }
     #sv_detail { height: 1fr; }
     """
 

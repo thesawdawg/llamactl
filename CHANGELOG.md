@@ -6,6 +6,9 @@ there are no earlier tagged releases. Commit entries retain their original subje
 
 ## [Unreleased]
 
+- Responsive TUI layout: button bars wrap instead of clipping, screens scroll and stack on
+  narrow terminals, and controls stay reachable down to small sizes.
+
 ## [0.2.0] - Unreleased
 
 llamactl is now a server-only manager: you choose what a model is for, it plans and

@@ -5,7 +5,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Label
 
@@ -17,7 +17,9 @@ from ..fmt import FITS_STYLE
 from ..gguf import ModelInfo
 from ..hardware import Host
 from ..intents import Intent
+from ..widgets import layout
 from ..widgets.budget import BudgetPanel
+from ..widgets.buttonbar import ButtonBar
 from .confirm import ConfirmScreen
 
 SAVED, EDIT, TUNE, SERVE = "saved", "edit", "tune", "serve"
@@ -47,12 +49,12 @@ class PlanScreen(Screen[str | None]):
         Binding("v", "serve", "Serve"),
         Binding("escape", "cancel", "Cancel"),
     ]
+    HORIZONTAL_BREAKPOINTS = layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = layout.VERTICAL_BREAKPOINTS
     CSS = """
     #plan_body { padding: 0 1; }
     #plan_table { height: auto; max-height: 50%; margin: 1 0; }
-    #plan_buttons { height: auto; }
-    #plan_buttons Button { margin-right: 1; }
-    #plan_msg { height: auto; }
+    #plan_msg { height: auto; padding: 0 1; }
     #plan_none { color: $text-muted; margin: 1 0; }
     """
 
@@ -66,7 +68,7 @@ class PlanScreen(Screen[str | None]):
         """Verdict, budget, planned settings table, message line and action buttons."""
         yield Header()
         v = self.plan.verdict
-        with Vertical(id="plan_body"):
+        with VerticalScroll(id="plan_body"):
             yield Label(Text.assemble(
                 (self.alias, "b"), (f"  -  {self.intent.label}: {self.intent.description}  -  ", ""),
                 (v, FITS_STYLE.get(v, ""))))
@@ -77,13 +79,13 @@ class PlanScreen(Screen[str | None]):
             yield BudgetPanel()
             yield DataTable(id="plan_table")
             yield Label("The plan changes nothing from the base profile.", id="plan_none")
-            yield Label("", id="plan_msg")
-            with Horizontal(id="plan_buttons"):
-                yield Button("Save as preset (s)", id="save", variant="success")
-                yield Button("Edit (e)", id="edit")
-                yield Button("Tune (t)", id="tune")
-                yield Button("Serve (v)", id="serve", variant="primary")
-                yield Button("Cancel (Esc)", id="cancel")
+        yield Label("", id="plan_msg")
+        with ButtonBar(id="plan_buttons", classes="-docked"):
+            yield Button("Save as preset (s)", id="save", variant="success")
+            yield Button("Edit (e)", id="edit")
+            yield Button("Tune (t)", id="tune")
+            yield Button("Serve (v)", id="serve", variant="primary")
+            yield Button("Cancel (Esc)", id="cancel")
         yield Footer()
 
     def on_mount(self) -> None:

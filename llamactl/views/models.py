@@ -99,6 +99,9 @@ class ModelsView(BaseView):
         Binding("delete", "delete_preset", "Delete preset"),
         Binding("D", "edit_default", "Defaults"),
     ]
+    # The -narrow rules key off a class of the screen (an ancestor), so this CSS has to
+    # stay unscoped.
+    SCOPED_CSS = False
     DEFAULT_CSS = """
     ModelsView { height: 1fr; }
     #m_top { height: auto; max-height: 45%; }
@@ -110,6 +113,9 @@ class ModelsView(BaseView):
     #intent_table { height: auto; max-height: 12; margin-bottom: 1; }
     #m_side { width: 2fr; padding: 0 1; }
     #m_command { color: $text-muted; }
+    .-narrow #m_bottom { layout: vertical; overflow-y: auto; }
+    .-narrow #detail { width: 1fr; height: auto; }
+    .-narrow #m_side { width: 1fr; height: auto; }
     """
 
     def __init__(self) -> None:

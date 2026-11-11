@@ -34,9 +34,12 @@ class HelpPanel(ModalScreen[None]):
         bits = [f"default: {s.default}"]
         if s.choices:
             bits.append(f"choices: {', '.join(s.choices)}")
-        if s.minimum is not None or s.maximum is not None:
-            bits.append(f"range: {s.minimum:g}..{s.maximum:g}" if s.minimum is not None
-                        and s.maximum is not None else f"min: {s.minimum or s.maximum:g}")
+        if s.minimum is not None and s.maximum is not None:
+            bits.append(f"range: {s.minimum:g}..{s.maximum:g}")
+        elif s.minimum is not None:
+            bits.append(f"min: {s.minimum:g}")
+        elif s.maximum is not None:
+            bits.append(f"max: {s.maximum:g}")
         with VerticalScroll(id="help"):
             yield Label(f"[b]{s.label}[/b]  {s.flag or '(no flag)'}")
             yield Label("  ".join(bits), classes="meta")

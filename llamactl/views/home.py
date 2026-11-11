@@ -150,19 +150,34 @@ class HomeView(BaseView):
         Binding("y", "copy_url", "Copy URL"),
         Binding("c", "copy_snippet", "Copy curl"),
     ]
+    # The -narrow / -wide.-short rules key off classes of the screen (an ancestor), so this
+    # CSS has to stay unscoped.
+    SCOPED_CSS = False
     DEFAULT_CSS = """
     HomeView { height: 1fr; }
     #home_row { height: 1fr; }
     #home_left { width: 1fr; height: 1fr; }
     #home_right { width: 1fr; height: 1fr; }
-    #hw_card { height: auto; border: round $primary; padding: 0 1; border-title-color: $text; }
-    #gw_card { height: 1fr; border: round $primary; padding: 0 1; border-title-color: $text; }
+    #hw_card, #gw_card, #loaded_box, #steps_box { border: round $primary; padding: 0 1;
+        border-title-color: $accent; border-title-style: bold; }
+    #hw_card:focus-within, #gw_card:focus-within, #loaded_box:focus-within,
+        #steps_box:focus-within { border: round $accent; }
+    #hw_card { height: auto; }
+    #gw_card { height: 1fr; }
     #gw_snippet { margin-top: 1; color: $text-muted; }
-    #loaded_box { height: auto; max-height: 12; border: round $primary; padding: 0 1; }
+    #loaded_box { height: auto; max-height: 12; }
     #loaded { height: auto; max-height: 9; }
     #loaded_empty, #steps_empty { color: $text-muted; padding: 0 1; }
-    #steps_box { height: 1fr; border: round $primary; padding: 0 1; }
+    #steps_box { height: 1fr; }
     #steps { height: 1fr; border: none; padding: 0; }
+    .-wide.-short #gw_card, .-wide.-short #steps_box { min-height: 8; }
+    .-narrow #home_row { layout: vertical; overflow-y: auto; }
+    .-narrow #home_left, .-narrow #home_right { width: 1fr; height: auto; }
+    .-narrow #gw_card { height: auto; min-height: 8; }
+    .-narrow #steps_box { height: auto; min-height: 8; }
+    .-narrow #steps { height: auto; max-height: 10; }
+    .-narrow #loaded { height: auto; max-height: 6; }
+    .-narrow #loaded_box { height: auto; max-height: 9; }
     """
 
     def __init__(self) -> None:
@@ -203,7 +218,10 @@ class HomeView(BaseView):
     def focus_primary(self) -> None:
         """Focus the next steps when there are any, else the loaded list."""
         steps = self.query_one("#steps", OptionList)
-        (steps if self._steps else self.query_one("#loaded", DataTable)).focus()
+        # scroll_visible=False: on `-narrow` the row scrolls, and auto-focus must not
+        # yank it to the bottom every time the view is shown.
+        (steps if self._steps else self.query_one("#loaded", DataTable)).focus(
+            scroll_visible=False)
 
     def on_host(self, host: Host) -> None:
         """Redraw the hardware card."""

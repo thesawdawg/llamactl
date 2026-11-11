@@ -10,7 +10,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Static
 
@@ -22,6 +22,8 @@ from ..hardware import Host
 from ..intents import Intent
 from ..measure import Measurement
 from ..planner import GB, Plan
+from ..widgets import layout
+from ..widgets.buttonbar import ButtonBar
 
 COLUMNS = (("#", "n"), ("change", "how"), ("ctx", "ctx"), ("load s", "load"), ("VRAM", "vram"),
            ("prompt tok/s", "pp"), ("gen tok/s", "tg"), ("outcome", "out"))
@@ -130,16 +132,21 @@ class TuneScreen(ModalScreen[str | None]):
     """
 
     BINDINGS = [Binding("escape", "close", "Close (cancels a running tune)")]
+    HORIZONTAL_BREAKPOINTS = layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = layout.VERTICAL_BREAKPOINTS
     CSS = """
     TuneScreen { align: center middle; }
     TuneScreen #tbox { width: 96%; height: 96%; padding: 0 2; border: round $accent;
         background: $surface; }
     TuneScreen #t_title { text-style: bold; margin-top: 1; }
-    TuneScreen #t_pre, TuneScreen #t_summary { height: auto; margin: 1 0; }
-    TuneScreen #t_trials { height: 1fr; }
+    TuneScreen .t_scroll { height: auto; max-height: 30%; margin: 1 0; }
+    TuneScreen #t_trials { height: 1fr; min-height: 4; }
     TuneScreen #t_progress { height: auto; color: $text-muted; }
-    TuneScreen #t_buttons { height: auto; margin: 1 0; }
-    TuneScreen #t_buttons Button { margin-right: 1; }
+    TuneScreen #t_buttons { margin-top: 1; }
+    TuneScreen.-short #t_title { margin-top: 0; }
+    TuneScreen.-short .t_scroll { max-height: 20%; margin: 0; }
+    TuneScreen.-short #t_trials { min-height: 3; }
+    TuneScreen.-short #t_buttons { margin-top: 0; }
     """
 
     def __init__(self, model: str, info: ModelInfo, intent: Intent,
@@ -160,11 +167,13 @@ class TuneScreen(ModalScreen[str | None]):
         """Title, pre-flight text, trial table, progress, summary and buttons."""
         with Vertical(id="tbox"):
             yield Label("", id="t_title")
-            yield Static("Checking free memory...", id="t_pre")
+            with VerticalScroll(classes="t_scroll"):
+                yield Static("Checking free memory...", id="t_pre")
             yield DataTable(id="t_trials", cursor_type="row")
             yield Label("", id="t_progress")
-            yield Static("", id="t_summary")
-            with Horizontal(id="t_buttons"):
+            with VerticalScroll(classes="t_scroll"):
+                yield Static("", id="t_summary")
+            with ButtonBar(id="t_buttons", classes="-docked"):
                 yield Button("Cancel tune", id="cancel", variant="warning")
                 yield Button("Unload gateway models and retry", id="unload", variant="primary")
                 yield Button("Tune anyway", id="anyway", variant="error")
@@ -199,6 +208,7 @@ class TuneScreen(ModalScreen[str | None]):
         }
         for bid, visible in show.items():
             self.query_one(f"#{bid}", Button).display = visible
+        self.query_one("#t_buttons", ButtonBar).reflow()
         focus = next((b for b in ("use", "unload", "close") if show[b]), None)
         if focus:
             self.query_one(f"#{focus}", Button).focus()

@@ -37,7 +37,7 @@ class FolderList(Vertical):
     FolderList #dir_list { height: auto; max-height: 6; border: round $primary-darken-2; }
     FolderList .add_row { height: auto; }
     FolderList .lbl { width: 14; padding: 0 1 0 0; }
-    FolderList #add_dir { width: 50; }
+    FolderList #add_dir { width: 1fr; max-width: 50; }
     FolderList #dir_note { color: $text-muted; height: auto; }
     """
 

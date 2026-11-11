@@ -4,9 +4,12 @@ from __future__ import annotations
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label
+
+from ..widgets import layout
+from ..widgets.buttonbar import ButtonBar
 
 SERVE, TUNE, DONE = "serve", "tune", "done"
 
@@ -25,13 +28,14 @@ class AfterDownload(ModalScreen[str]):
         Binding("t", "tune", "Tune", show=False),
         Binding("escape", "done", "Done"),
     ]
+    HORIZONTAL_BREAKPOINTS = layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = layout.VERTICAL_BREAKPOINTS
     CSS = """
     AfterDownload { align: center middle; }
-    AfterDownload #abox { width: auto; max-width: 90; height: auto; padding: 1 2;
+    AfterDownload #abox { width: 90%; max-width: 90; height: auto; padding: 1 2;
         border: round $accent; background: $surface; }
     AfterDownload .hint { color: $text-muted; }
-    AfterDownload #abuttons { height: auto; margin-top: 1; }
-    AfterDownload Button { margin-right: 1; }
+    AfterDownload #abuttons { margin-top: 1; }
     """
 
     def __init__(self, title: str) -> None:
@@ -44,7 +48,7 @@ class AfterDownload(ModalScreen[str]):
             yield Label(self.title_text)
             yield Label("Serve loads it in the gateway; Tune measures the best settings.",
                         classes="hint")
-            with Horizontal(id="abuttons"):
+            with ButtonBar(id="abuttons"):
                 yield Button("Serve (s)", id="serve", variant="primary")
                 yield Button("Tune (t)", id="tune")
                 yield Button("Done (Esc)", id="done")

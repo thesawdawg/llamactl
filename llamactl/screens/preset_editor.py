@@ -4,7 +4,7 @@ from __future__ import annotations
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Footer, Header, Label, Static
 
@@ -17,7 +17,9 @@ from ..hardware import Host
 from ..intents import Intent
 from ..planner import estimate_budget, placeholder_info
 from ..schema import Group
+from ..widgets import layout
 from ..widgets.budget import BudgetPanel
+from ..widgets.buttonbar import ButtonBar
 from ..widgets.field import SettingField
 from .help import HelpPanel
 
@@ -54,14 +56,18 @@ class PresetEditor(Screen[Profile | None]):
         Binding("ctrl+r", "reset_field", "Reset field"),
         Binding("question_mark", "help", "Help", show=False),
     ]
+    HORIZONTAL_BREAKPOINTS = layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = layout.VERTICAL_BREAKPOINTS
     CSS = """
     #editor { height: 1fr; }
     #fields { width: 3fr; padding: 0 1; }
     #side { width: 2fr; padding: 0 1; }
     #preview { border: round $primary; padding: 0 1; height: auto; }
-    #buttons { height: auto; margin-top: 1; }
-    #buttons Button { margin-right: 1; }
+    #preview:focus-within { border: round $accent; }
     #ed_status { height: auto; padding: 0 1; color: $text-muted; }
+    PresetEditor.-narrow #editor { layout: vertical; }
+    PresetEditor.-narrow #fields { width: 1fr; }
+    PresetEditor.-narrow #side { width: 1fr; height: auto; max-height: 45%; }
     """
 
     def __init__(self, cfg: Config, prof: Profile, host: Host,
@@ -100,14 +106,14 @@ class PresetEditor(Screen[Profile | None]):
                                              self.host, self._disabled_reason(s))
                             self.fields[s.key] = f
                             yield f
-            with Vertical(id="side"):
+            with VerticalScroll(id="side"):
                 yield BudgetPanel()
                 yield Static("", id="preview")
-                with Horizontal(id="buttons"):
-                    yield Button("Save", id="save", variant="primary")
-                    yield Button("Apply plan", id="plan")
-                    yield Button("Cancel", id="cancel")
-                yield Label("", id="ed_status")
+        with ButtonBar(id="buttons", classes="-docked"):
+            yield Button("Save", id="save", variant="primary")
+            yield Button("Apply plan", id="plan")
+            yield Button("Cancel", id="cancel")
+        yield Label("", id="ed_status")
         yield Footer()
 
     def on_mount(self) -> None:

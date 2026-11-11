@@ -27,6 +27,8 @@ from ..gguf import ModelInfo
 from ..hardware import Host
 from ..intents import INTENTS, by_key
 from ..onboarding import Dismissal
+from ..widgets import layout
+from ..widgets.buttonbar import ButtonBar
 from ..widgets.folders import FolderList
 
 ERRORS = (LookupError, OSError, ValueError)
@@ -45,6 +47,8 @@ class OnboardingScreen(Screen[Dismissal]):
         Binding("ctrl+b", "back", "Back"),
         Binding("escape", "skip", "Skip setup"),
     ]
+    HORIZONTAL_BREAKPOINTS = layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = layout.VERTICAL_BREAKPOINTS
     DEFAULT_CSS = """
     OnboardingScreen #ob_box { padding: 0 2; height: 1fr; }
     OnboardingScreen #ob_progress { text-style: bold; color: $accent; margin-top: 1; }
@@ -54,21 +58,26 @@ class OnboardingScreen(Screen[Dismissal]):
     OnboardingScreen .hint { color: $text-muted; height: auto; }
     OnboardingScreen .row { height: auto; }
     OnboardingScreen .row Label { width: 22; padding: 0 1 0 0; }
-    OnboardingScreen #ob_bin { width: 60; }
+    OnboardingScreen.-narrow .row { layout: vertical; }
+    OnboardingScreen.-narrow .row Label { width: 1fr; padding: 0; }
+    OnboardingScreen #ob_bin { width: 1fr; max-width: 60; }
     OnboardingScreen #ob_bin_msg { height: auto; margin-bottom: 1; }
     OnboardingScreen #ob_hw { height: auto; border: round $primary; padding: 0 1; margin-bottom: 1; }
+    OnboardingScreen #ob_hw:focus-within { border: round $accent; }
     OnboardingScreen #ob_sentence { height: auto; }
     OnboardingScreen #ob_scan { height: auto; margin-top: 1; text-style: bold; }
     OnboardingScreen #ob_find { margin-top: 1; width: auto; }
-    OnboardingScreen #ob_purpose { height: 1fr; }
+    OnboardingScreen #purpose { height: 1fr; }
+    OnboardingScreen.-narrow #purpose { layout: vertical; overflow-y: auto; }
+    OnboardingScreen.-narrow #purpose .pane { height: auto; min-height: 8; }
     OnboardingScreen .pane { width: 1fr; height: 1fr; padding: 0 1; }
     OnboardingScreen .pane Label { text-style: bold; }
     OnboardingScreen .pane OptionList { height: 1fr; }
     OnboardingScreen #ob_summary { height: auto; margin-bottom: 1; }
     OnboardingScreen #ob_result { height: auto; }
+    OnboardingScreen #finish Checkbox { width: 1fr; text-wrap: wrap; }
     OnboardingScreen #ob_msg { height: auto; color: $warning; }
-    OnboardingScreen #ob_buttons { height: auto; margin: 1 0; }
-    OnboardingScreen #ob_buttons Button { margin-right: 1; }
+    OnboardingScreen #ob_buttons { margin-top: 1; }
     """
 
     def __init__(self, which: Callable[[str], str | None] = shutil.which) -> None:
@@ -98,16 +107,16 @@ class OnboardingScreen(Screen[Dismissal]):
         with Vertical(id="ob_box"):
             yield Label("", id="ob_progress")
             with ContentSwitcher(id="ob_steps", initial=ob.STEP_LLAMA):
-                with Vertical(id=ob.STEP_LLAMA, classes="step"):
+                with VerticalScroll(id=ob.STEP_LLAMA, classes="step"):
                     yield Static("", id="ob_llama", classes="lead")
                     with Horizontal(classes="row"):
                         yield Label("llama.cpp folder")
                         yield Input(id="ob_bin", compact=True)
                     yield Static("", id="ob_bin_msg")
-                with Vertical(id=ob.STEP_HARDWARE, classes="step"):
+                with VerticalScroll(id=ob.STEP_HARDWARE, classes="step"):
                     yield Static("", id="ob_hw")
                     yield Static("", id="ob_sentence")
-                with Vertical(id=ob.STEP_MODELS, classes="step"):
+                with VerticalScroll(id=ob.STEP_MODELS, classes="step"):
                     yield Static("Folders llamactl scans for .gguf files (subfolders included).",
                                  classes="lead")
                     yield FolderList(self.app.cfg.model_dirs)
@@ -135,7 +144,7 @@ class OnboardingScreen(Screen[Dismissal]):
                                  id="ob_reach_hint", classes="hint")
                     yield Static("", id="ob_result")
             yield Label("", id="ob_msg")
-            with Horizontal(id="ob_buttons"):
+            with ButtonBar(id="ob_buttons", classes="-docked"):
                 yield Button("Back", id="ob_back")
                 yield Button("Next", id="ob_next", variant="primary")
                 yield Button("Skip setup", id="ob_skip")
@@ -197,6 +206,7 @@ class OnboardingScreen(Screen[Dismissal]):
         close = self.query_one("#ob_close", Button)
         close.display = finished
         close.label = "Close and tune" if finished and self.result and self.result.tune else "Close"
+        self.query_one("#ob_buttons", ButtonBar).reflow()
         {ob.STEP_LLAMA: self._enter_llama, ob.STEP_HARDWARE: self._enter_hardware,
          ob.STEP_MODELS: self._enter_models, ob.STEP_PURPOSE: self._enter_purpose,
          ob.STEP_FINISH: self._enter_finish}[f.step]()
