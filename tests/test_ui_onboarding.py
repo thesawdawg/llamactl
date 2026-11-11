@@ -198,8 +198,8 @@ async def test_no_models_offers_find_a_model_which_lands_on_discover(
         assert await wait_for(pilot, lambda: current(app) == "discover")
         assert Config.load().onboarded and gw.called("start") == []
 
-async def test_adding_a_folder_rescans_in_step_three(ui_env: SimpleNamespace, tmp_path: Path) -> None:
 
+async def test_adding_a_folder_rescans_in_step_three(ui_env: SimpleNamespace, tmp_path: Path) -> None:
     cfg = fresh(ui_env)
     extra = tmp_path / "extra"
     extra.mkdir()
