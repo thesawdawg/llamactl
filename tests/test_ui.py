@@ -132,6 +132,48 @@ async def test_default_profile_no_model() -> None:
         assert "No model" in str(ed.query_one("#ed_status", Label).render())
 
 
+async def test_host_field_has_the_three_bind_choices() -> None:
+    app = _make(_info())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        f = app.editor.fields["host"]
+        assert f.mode is not None and f.mode.value == "local" and f.input.disabled
+        assert f.value == "127.0.0.1"
+        f.mode.value = "lan"
+        assert await _wait(pilot, lambda: app.editor._draft.host == "0.0.0.0")
+        assert f.input.value == "0.0.0.0" and f.input.disabled
+        f.mode.value = "custom"
+        assert await _wait(pilot, lambda: not f.input.disabled)
+        f.input.value = "192.168.50.7"
+        assert await _wait(pilot, lambda: app.editor._draft.host == "192.168.50.7")
+        f.mode.value = "local"
+        assert await _wait(pilot, lambda: app.editor._draft.host == "127.0.0.1" and f.input.disabled)
+        f.mode.value = "lan"
+        assert await _wait(pilot, lambda: app.editor._draft.host == "0.0.0.0")
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app.result.host == "0.0.0.0"
+        assert [k for k, fld in app.editor.fields.items() if fld.mode is not None] == ["host"]
+
+
+async def test_host_field_starts_from_the_profile_and_follows_set_value() -> None:
+    for host, mode, editable in (("0.0.0.0", "lan", False), ("10.1.2.3", "custom", True)):
+        app = _App(PresetEditor(Config(), Profile(host=host), _host(), None, "test"))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            f = app.editor.fields["host"]
+            assert f.mode.value == mode and f.input.disabled is (not editable) and f.value == host
+    app = _make(None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        f = app.editor.fields["host"]
+        f.set_value("0.0.0.0")                                  # ctrl+r / a plan sets it this way
+        assert await _wait(pilot, lambda: f.mode.value == "lan")
+        f.set_value("127.0.0.1")
+        assert await _wait(pilot, lambda: f.mode.value == "local" and f.input.disabled)
+        assert f.value == "127.0.0.1"
+
+
 async def test_confirm_screen() -> None:
     app = App()
     async with app.run_test() as pilot:

@@ -10,10 +10,14 @@ from textual.validation import Integer, Number, ValidationResult, Validator
 from textual.widget import Widget
 from textual.widgets import Input, Label, Select, Switch
 
-from .. import schema
+from .. import network, schema
 from ..gguf import ModelInfo
 from ..hardware import Host
 from ..schema import Kind, Setting
+
+
+HOST_OPTIONS = [("This machine (127.0.0.1)", network.LOCAL),
+                ("Local network (0.0.0.0)", network.LAN), ("Custom address", network.CUSTOM)]
 
 
 class _StepInput(Input):
@@ -109,11 +113,19 @@ class SettingField(Widget):
         else:
             inp = Input(str(value), password=(setting.key == "api_key"))
         self.input = inp
+        self.mode: Select | None = None          # bind mode picker of the "host" field
+        self._syncing = False
+        if setting.key == "host":
+            mode = network.bind_mode(str(value))
+            self.mode = Select(HOST_OPTIONS, allow_blank=False, value=mode, compact=True)
+            inp.disabled = mode != network.CUSTOM
 
     def compose(self):
         """Label with flag, input, hint, empty impact line."""
         s = self.setting
         yield Label(f"{s.label} ({s.flag or 'extra'})")
+        if self.mode is not None:
+            yield self.mode
         yield self.input
         hint = f"disabled: {self._disabled_reason}" if self._disabled_reason else s.hint
         yield Label(hint, classes="hint")
@@ -123,6 +135,8 @@ class SettingField(Widget):
         """Disable the input when the field is not applicable; paint any impact already set."""
         if self._disabled_reason:
             self.input.disabled = True
+            if self.mode is not None:
+                self.mode.disabled = True
         self._paint()
 
     @property
@@ -160,6 +174,8 @@ class SettingField(Widget):
             self.input.value = str(v)
         if self.input.value != old:
             self._pending += 1
+        if self.mode is not None:
+            self._show_mode(str(v))
 
     def set_impact(self, text: str) -> None:
         """Update the impact line (no highlighting); skipped while a reason shows."""
@@ -203,6 +219,30 @@ class SettingField(Widget):
                 self._impact = (str(e), False)
                 self._paint()
         self.post_message(self.Changed(self))
+
+    def _show_mode(self, host: str) -> None:
+        """Point the bind picker at `host` and enable the address box only for Custom."""
+        assert self.mode is not None
+        mode = network.bind_mode(host)
+        self._syncing = True
+        try:
+            self.mode.value = mode
+        finally:
+            self._syncing = False
+        self.input.disabled = mode != network.CUSTOM
+
+    @on(Select.Changed)
+    def _mode_changed(self, event: Select.Changed) -> None:
+        """The user picked a bind mode: fill the address box, editable only for Custom."""
+        if event.control is not self.mode or self._syncing:
+            return
+        mode = str(event.value)
+        if mode == network.CUSTOM:
+            self.input.disabled = False
+            self.input.focus()
+        else:
+            self.input.disabled = True
+            self.input.value = network.host_for(mode)
 
     @on(Input.Changed)
     @on(Select.Changed)

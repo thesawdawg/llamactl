@@ -10,14 +10,17 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.validation import Function, Integer, Number
 from textual.widgets import Button, Input, Label, Select, Static, Switch
+from rich.text import Text
 
-from .. import hf
+from .. import hf, network
 from ..intents import INTENTS
 from ..screens.prompt import PromptScreen
 from ..widgets.folders import FolderList
 from .base import BaseView
 from .hf import TOKEN_HINT
 
+LISTEN_OPTIONS = [("This machine (127.0.0.1)", network.LOCAL),
+                  ("Local network (0.0.0.0)", network.LAN), ("Custom address", network.CUSTOM)]
 TEXT_INPUTS = ("bin_dir", "gauge_interval", "headroom_pct", "gw_host", "gw_port", "gw_models_max",
                "gw_sleep_idle")
 RESTART_FIELDS = (("host", "host"), ("port", "port"), ("api_key", "API key"),
@@ -37,6 +40,8 @@ class SettingsView(BaseView):
     #set_scroll .row Input { width: 50; }
     #set_scroll .row Select { width: 50; }
     #set_scroll .hint { color: $text-muted; text-style: italic; padding: 0 1; }
+    #set_scroll .row Button { margin-left: 1; }
+    #gw_urls { height: auto; margin-left: 28; padding: 0 1; }
     #set_buttons { height: auto; margin-top: 1; }
     #set_buttons Button { margin-right: 1; }
     #set_msg { height: auto; margin-top: 1; }
@@ -68,12 +73,22 @@ class SettingsView(BaseView):
                 compact=True, value=cfg.default_intent if cfg.default_intent in intent_keys
                 else "chat"), "used when you do not pick one")
             yield Label("Gateway", classes="section")
-            yield row("Host", Input(g.host, id="gw_host", compact=True, validators=[Function(
-                lambda v: bool(v.strip()) and " " not in v.strip(), "a host name or address")]))
+            mode = network.bind_mode(g.host)
+            yield row("Listen on", Select(
+                LISTEN_OPTIONS, allow_blank=False, id="gw_listen", compact=True, value=mode),
+                "who can connect")
+            yield row("Custom address", Input(
+                g.host, id="gw_host", compact=True, disabled=mode != network.CUSTOM,
+                validators=[Function(lambda v: bool(v.strip()) and " " not in v.strip(),
+                                     "a host name or address")]), "only for Custom")
             yield row("Port", Input(str(g.port), id="gw_port", compact=True,
                                     validators=[Integer(minimum=1, maximum=65535)]))
-            yield row("API key", Input(g.api_key, id="gw_api_key", password=True, compact=True),
-                      "Bearer token; empty = none")
+            yield Horizontal(
+                Label("API key", classes="lbl"),
+                Input(g.api_key, id="gw_api_key", password=True, compact=True),
+                Button("Generate", id="gw_gen_key", compact=True),
+                Label("Bearer token; empty = none", classes="hint"), classes="row")
+            yield Static("", id="gw_urls")
             yield row("Models loaded at once", Input(str(g.models_max), id="gw_models_max",
                                                      compact=True,
                                                      validators=[Integer(minimum=1)]),
@@ -99,12 +114,61 @@ class SettingsView(BaseView):
             yield Static("", id="set_msg")
 
     def on_mount(self) -> None:
-        """Show whether a token is set."""
+        """Show whether a token is set and where clients would connect."""
         self._token_state()
+        self._refresh_urls()
 
     def focus_primary(self) -> None:
         """Focus the first field."""
         self.query_one("#bin_dir", Input).focus()
+
+    def _form_host(self) -> str:
+        """The listen address the form currently describes."""
+        mode = str(self.query_one("#gw_listen", Select).value)
+        return network.host_for(mode, self.query_one("#gw_host", Input).value)
+
+    def _refresh_urls(self) -> None:
+        """Show where clients would connect, whether that needs a key, and what WSL needs."""
+        host = self._form_host()
+        port_text = self.query_one("#gw_port", Input).value.strip()
+        port = int(port_text) if port_text.isdigit() and 0 < int(port_text) < 65536 \
+            else self.app.cfg.gateway.port
+        key = self.query_one("#gw_api_key", Input).value
+        t = Text("Clients connect to  " + "  ".join(
+            f"{u}/v1" for u in network.client_urls(host, port)))
+        if warning := network.key_warning(host, key):
+            t.append(f"\n! {warning}", style="yellow")
+        for note in network.exposure_notes(host):
+            t.append(f"\n{note}", style="dim")
+        self.query_one("#gw_urls", Static).update(t)
+
+    @on(Select.Changed, "#gw_listen")
+    def _listen_changed(self) -> None:
+        """Another bind mode: the Custom address is editable only for Custom."""
+        mode = str(self.query_one("#gw_listen", Select).value)
+        box = self.query_one("#gw_host", Input)
+        if mode == network.CUSTOM:
+            box.disabled = False
+        else:
+            box.disabled = True
+            box.value = network.host_for(mode)
+        self._refresh_urls()
+
+    @on(Input.Changed, "#gw_host, #gw_port, #gw_api_key")
+    def _network_input_changed(self) -> None:
+        """The address, port or key was edited: redraw the URL line."""
+        self._refresh_urls()
+
+    @on(Button.Pressed, "#gw_gen_key")
+    def _generate_key(self) -> None:
+        """Fill the API key with a new random one, shown (not hidden) and copied once."""
+        key = network.new_api_key()
+        box = self.query_one("#gw_api_key", Input)
+        box.password = False
+        box.value = key
+        self.app.copy_to_clipboard(key)
+        self._msg("Generated an API key and copied it. Save to apply it; clients send it as "
+                  "a Bearer token.")
 
     @staticmethod
     def _bin_ok(value: str) -> bool:
@@ -159,7 +223,7 @@ class SettingsView(BaseView):
         cfg.gauge_interval = float(self.query_one("#gauge_interval", Input).value)
         cfg.headroom_pct = int(self.query_one("#headroom_pct", Input).value)
         cfg.default_intent = str(self.query_one("#default_intent", Select).value)
-        g.host = self.query_one("#gw_host", Input).value.strip()
+        g.host = self._form_host()
         g.port = int(self.query_one("#gw_port", Input).value)
         g.api_key = self.query_one("#gw_api_key", Input).value
         g.models_max = int(self.query_one("#gw_models_max", Input).value)

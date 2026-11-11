@@ -70,7 +70,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] `network.py`: bind modes, LAN addresses, client URLs, API key, WSL mode and notes
 - [ ] Client URLs everywhere an endpoint is shown (Home, Serving, onboarding, `up`, `serve`, `ps`, curl)
 - [x] Exposed-without-key warning when starting the gateway or a standalone server
-- [ ] Settings: "Listen on" select, URL line, Generate key; PresetEditor host choices
+- [x] Settings: "Listen on" select, URL line, Generate key; PresetEditor host choices
 - [ ] Onboarding: "Reachable from other machines" option
 - [x] CLI: `--lan` / `--host` on `up` and `serve`; `llamactl config`
 - [ ] README, CHANGELOG (0.2.0) and AGENTS.md updated
