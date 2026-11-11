@@ -54,7 +54,9 @@ def test_invalid_release(tmp_path: Path, version: str, tag: str, heading: str) -
 
 
 def test_repository_release() -> None:
-    """Verify that the initial release metadata and changelog agree.
+    """Verify that the release metadata and changelog agree.
+
+    While the changelog heading says "Unreleased", the release check must refuse the tag.
 
     Args:
         None.
@@ -65,4 +67,10 @@ def test_repository_release() -> None:
     root = Path(__file__).resolve().parents[1]
     with (root / "pyproject.toml").open("rb") as stream:
         version = tomllib.load(stream)["project"]["version"]
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    if f"## [{version}] - Unreleased" in changelog.splitlines():
+        # Before the release is dated, only the version and tag agreement can be checked.
+        with pytest.raises(ValueError, match="dated changelog heading"):
+            check_release(root, f"v{version}")
+        return
     assert check_release(root, f"v{version}") == version
