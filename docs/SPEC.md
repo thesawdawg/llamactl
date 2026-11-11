@@ -482,7 +482,7 @@ As built (Phase 6; Phase 7 additions follow):
 the file table has the full width. Each file is judged by its size alone, weights only
 (`planner.placeholder_info`: no KV cache is known before the download), so the label says so:
 `GPU (weights only)`, `GPU+CPU (weights only)`, `CPU (weights only)` or `NO`. Files are sorted
-largest first and the largest one whose verdict is `GPU` is marked `\u2605 best fit` (bold name, the
+largest first and the largest one whose verdict is `GPU` is marked `★ best fit` (bold name, the
 cursor starts on it); with no GPU, or before the host is known, nothing is marked. A one-line legend
 under the table explains the marker and names the default intent (the verdict itself does not
 depend on the intent, since the context cache is not counted). Sharded models are one row: the first
