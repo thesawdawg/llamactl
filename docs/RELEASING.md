@@ -18,7 +18,7 @@ modules are not a stable library API.
 - Documentation and test changes alone do not require a release. Packaging-only
   fixes that need republication receive a new PATCH version; never reuse a PyPI version.
 
-The current prepared release is 0.1.3. PyPI rejected the 0.1.0, 0.1.1 and 0.1.2
+The last published-name fix was 0.1.3; 0.2.0 is prepared and unreleased. PyPI rejected the 0.1.0, 0.1.1 and 0.1.2
 wheel filenames because they had previously been used and deleted; the original
 tags remain intact. Deleted filenames cannot be reused, so rerunning those tags
 will fail again. The 0.1.0 changelog covers all 24 initial source commits and the

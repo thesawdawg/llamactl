@@ -63,4 +63,4 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 ## Phase 8 - Release prep
 
 - [x] README rewrite, CHANGELOG, AGENTS.md
-- [ ] Version 0.2.0 (no tag, no publish)
+- [x] Version 0.2.0 (no tag, no publish)
