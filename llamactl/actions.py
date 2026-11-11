@@ -455,7 +455,7 @@ class TuneOutcome:
 
 
 def search_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: tuner.Runner,
-                calibration: Calibration, *, trials: int = 4, force: bool = False,
+                calibration: Calibration, *, trials: int = 6, force: bool = False,
                 progress: Callable[[tuner.TrialEvent], None] | None = None,
                 cancel: Callable[[], bool] | None = None) -> tuner.TuneResult:
     """Preflight and search: the part of a tune that needs no write access to the config.
@@ -529,7 +529,7 @@ def reload_after_tune(gw: Gateway, result: tuner.TuneResult) -> TuneOutcome:
 
 
 def run_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: tuner.Runner,
-             calibration: Calibration, gw: Gateway, *, trials: int = 4, force: bool = False,
+             calibration: Calibration, gw: Gateway, *, trials: int = 6, force: bool = False,
              progress: Callable[[tuner.TrialEvent], None] | None = None,
              cancel: Callable[[], bool] | None = None, save: bool = True) -> TuneOutcome:
     """Tune a model for an intent end to end: preflight, search, save, reload the gateway.

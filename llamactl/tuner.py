@@ -1,8 +1,12 @@
 """Measured tuning: launch candidate plans for real, keep the best, and learn from the numbers.
 
 The pure part (`SearchSpace`, `next_candidate`, `choose_best`, `tune`) decides which profile to
-try next from what the previous trials measured. The only parts that touch processes or HTTP
-are behind the `Runner` protocol; `ServerRunner` is the real one, with every subprocess,
+try next from what the previous trials measured: after the plan, an all-GPU trial when
+llama.cpp had to split the model, then a context fill that probes toward the largest context
+fitting fully on the GPU (predicted from the measured bytes per token, guarded by a headroom
+check so a driver silently falling back to system memory does not count as fitting), and a
+threads variant for a GPU+CPU best as the last resort. The only parts that touch processes or
+HTTP are behind the `Runner` protocol; `ServerRunner` is the real one, with every subprocess,
 HTTP, clock and device-memory call injectable so tests never start llama.cpp.
 """
 from __future__ import annotations
@@ -37,7 +41,10 @@ SPEED_INTENT = "speed"
 
 # How a candidate was derived (shown in progress events).
 HOW_PLAN, HOW_CTX_DOWN, HOW_KV_Q8, HOW_SPILL = "plan", "ctx down", "q8_0 KV", "spill"
-HOW_CTX_UP, HOW_THREADS = "ctx up", "threads"
+HOW_ALL_GPU, HOW_CTX_UP, HOW_THREADS = "all GPU", "ctx up", "threads"
+
+CTX_STEP = 4096             # context probes are multiples of this
+SPEED_TOLERANCE = 0.05      # extra context beyond the target may cost at most ~5% speed
 
 # ServerRunner timing (seconds).
 HEALTH_BASE = 60.0        # health timeout = HEALTH_BASE + HEALTH_PER_GB per GB of model file,
@@ -52,16 +59,32 @@ VERSION_TIMEOUT = 20.0
 LOG_TAIL_BYTES = 65536
 PREFLIGHT_MARGIN = 0.9    # refuse only when free memory is below 90% of the budget
 
-BENCH_PROMPT = (
-    "The lighthouse keeper climbed the spiral stairs each evening, counting the hundred and "
-    "twelve steps out of habit, a lantern swinging from one hand and a thermos of tea in the "
-    "other. Far below, the harbour lights flickered on one by one, and the fishing boats "
-    "turned for home against a sky the colour of old copper. He had kept this light for "
-    "thirty-one winters, and in all that time the sea had never once repeated itself. Tonight "
-    "the barometer was falling, the gulls had gone quiet, and a long low swell was rolling in "
-    "from the north-west. Write the next three paragraphs of the story, describing the storm "
-    "and what the keeper does when the power fails.")
+BENCH_PROMPT_TOKENS = 2048  # benchmark prompt length cap; shorter contexts get half of theirs
+_BENCH_PARA = (
+    "Field note {n}: the survey party reached marker {n} shortly after dawn, found frost on "
+    "the tripod and fresh mud on the level, argued briefly about the missing sandwiches, "
+    "checked the theodolite twice for safety, logged the bearing, the time and the weather, "
+    "and agreed the rest of the ridge could wait until the fog lifted off the valley.")
 EMBED_TEXT = " ".join(["The quick brown fox jumps over the lazy dog near the quiet riverbank."] * 8)
+
+
+def bench_prompt(ctx_per_slot: int) -> str:
+    """A deterministic benchmark prompt for a generative trial.
+
+    Args:
+        ctx_per_slot: Context each slot gets; the prompt aims for about
+            ``min(BENCH_PROMPT_TOKENS, ctx_per_slot // 2)`` tokens.
+
+    Returns:
+        Varied numbered paragraphs of ~80 tokens each, joined by blank lines (tokens are
+        approximated as a quarter of the character count).
+    """
+    want = max(1, min(BENCH_PROMPT_TOKENS, ctx_per_slot // 2))
+    parts: list[str] = []
+    while sum(len(p) for p in parts) // 4 < want:
+        parts.append(_BENCH_PARA.format(n=len(parts) + 1))
+    return "\n\n".join(parts)
+
 
 _OOM_RE = re.compile(
     r"out of memory|failed to allocate|unable to allocate|cudamalloc failed|"
@@ -192,6 +215,11 @@ def trial_verdict(profile: Profile, host: Host) -> str:
 class SearchSpace:
     """Everything candidate generation needs, with the step functions as methods.
 
+    `down` walks the failure ladder (smaller context, q8_0 KV, llama.cpp placement); `all_gpu`
+    re-tries a split model whole on the GPU; `fill` probes the largest context that still fits
+    fully on the GPU using the measured bytes-per-token slope; `fits` is the headroom guard a
+    loaded trial must pass to count; `threads` is the last-resort variant for a GPU+CPU best.
+
     Attributes:
         intent: Intent being tuned.
         info: Model metadata.
@@ -247,35 +275,111 @@ class SearchSpace:
             return self.candidate(p.merged(gpu_layers="auto", fit="on", fit_target=mib), HOW_SPILL)
         return None
 
-    def up(self, c: Candidate, m: Measurement) -> Candidate | None:
-        """The next larger context tier when the measurement shows room for it.
+    def _headroom(self) -> int:
+        """Headroom the planner keeps free, summed over the host's GPUs."""
+        return sum(planner.headroom_bytes(g.total, self.pct) for g in self.host.gpus)
 
-        Only for a candidate fully on the GPU and below the intent's target context. The
-        measured slack is the free VRAM at the start, minus what the model took, minus the
-        headroom; the step happens when that exceeds the extra KV cache of one more tier.
+    def all_gpu(self, c: Candidate) -> Candidate | None:
+        """`c` forced fully onto the GPU, for a loaded candidate llama.cpp had to split.
+
+        Applies only when the placement was llama.cpp's (``gpu_layers auto`` with ``fit``
+        on), no experts sit in RAM, the host has a real GPU, and the model file plus the
+        headroom fits the free VRAM.
 
         Args:
             c: A candidate that loaded.
+
+        Returns:
+            The same profile with ``gpu_layers="all", fit="off"`` at the same context,
+            or None when the step does not apply.
+        """
+        p = c.profile
+        if (p.gpu_layers != "auto" or p.fit != "on" or p.n_cpu_moe
+                or not self.host.gpus or self.host.unified):
+            return None
+        if self.info.size + self._headroom() >= self.host.vram_free:
+            return None
+        return self.candidate(p.merged(gpu_layers="all", fit="off", fit_target=0),
+                              HOW_ALL_GPU)
+
+    def fits(self, c: Candidate, m: Measurement) -> bool:
+        """True when a trial's measurement counts as "fits on this machine".
+
+        Every loaded trial fits except a GPU-verdict one on a non-unified GPU host that did
+        not leave the headroom free: on Windows/WSL the NVIDIA driver can satisfy an
+        oversized CUDA allocation with system memory instead of failing, so a load that
+        ate into the headroom does not prove the model really is on the GPU.
+
+        Args:
+            c: The tried candidate.
             m: Its measurement.
 
         Returns:
-            The next tier's candidate, or None.
+            Whether it loaded without eating into the headroom.
         """
-        p = c.profile
-        if (not m.ok or c.verdict != VERDICT_GPU or not self.host.gpus or self.host.unified
-                or p.gpu_layers != "all" or p.n_cpu_moe):
+        if not m.ok:
+            return False
+        if c.verdict != VERDICT_GPU or not self.host.gpus or self.host.unified:
+            return True
+        return self.host.vram_free - m.vram_used >= self._headroom()
+
+    def fill(self, history: History) -> Candidate | None:
+        """The next context probe toward the largest that still fits fully on the GPU.
+
+        Only trials of the best fitting all-GPU profile family count (same profile, context
+        aside). `lo` is the largest context that fitted, `hi` the smallest that provably did
+        not (a memory or timeout failure, or a load that failed the headroom guard). The
+        prediction is `lo` plus the slack left at `lo` divided by the bytes per token —
+        measured between the two largest fitting points when possible, else the planner's
+        estimate — rounded down to a `CTX_STEP` multiple, capped at the intent's `ctx_max`
+        ceiling and at `hi - CTX_STEP`. When the prediction cannot pass `lo`, the midpoint
+        of `lo` and `hi` is probed instead. Embedding models are never filled.
+
+        Args:
+            history: Trials so far as (candidate, measurement).
+
+        Returns:
+            The next candidate above `lo`, or None.
+        """
+        fitting = [(c, m) for c, m in history
+                   if c.verdict == VERDICT_GPU and self.fits(c, m)]
+        if not fitting:
             return None
-        cands, target, _ = planner.ctx_bounds(self.intent, self.info)
-        higher = [t for t in cands if c.ctx_per_slot < t <= target]
-        if not higher:
+        best = max(fitting, key=lambda cm: self.score(*cm))[0]
+        if best.profile.embedding:
             return None
-        nxt = higher[0]
-        slots = max(1, p.parallel)
-        extra = planner.kv_per_token(self.info, p.cache_type_k, p.cache_type_v) * (
-            nxt - c.ctx_per_slot) * slots
-        headroom = sum(planner.headroom_bytes(g.total, self.pct) for g in self.host.gpus)
-        slack = self.host.vram_free - m.vram_used - headroom
-        return self.with_ctx(c, nxt, HOW_CTX_UP) if slack > extra else None
+        key = profile_key(best.profile.merged(ctx_size=0))
+        same = [(c, m) for c, m in history
+                if profile_key(c.profile.merged(ctx_size=0)) == key]
+        family = [(c, m) for c, m in same if self.fits(c, m)]
+        lo = max(c.ctx_per_slot for c, _ in family)
+        his = [c.ctx_per_slot for c, m in same
+               if (m.ok and not self.fits(c, m)) or (not m.ok and m.resource_failure)]
+        hi = min(his, default=None)
+        ceiling = planner.ctx_ceiling(self.intent, self.info)
+        if lo >= ceiling:
+            return None
+        pts = sorted(c.ctx_per_slot for c, _ in family)
+        slope = 0.0
+        if len(pts) >= 2:
+            v = {c.ctx_per_slot: m.vram_used for c, m in family}
+            slope = (v[pts[-1]] - v[pts[-2]]) / (pts[-1] - pts[-2])
+        if slope <= 0:
+            slope = planner.kv_per_token(self.info, best.profile.cache_type_k,
+                                         best.profile.cache_type_v) * max(1, best.profile.parallel)
+        m_lo = next(m for c, m in family if c.ctx_per_slot == lo)
+        slack = self.host.vram_free - m_lo.vram_used - self._headroom()
+        nxt = (lo + int(slack / slope)) // CTX_STEP * CTX_STEP
+        nxt = min(nxt, ceiling)
+        if hi is not None:
+            nxt = min(nxt, hi - CTX_STEP)
+            if nxt <= lo:
+                nxt = (lo + hi) // 2 // CTX_STEP * CTX_STEP
+        seen = {profile_key(c.profile) for c, _ in history}
+        if nxt <= lo:
+            return None
+        cand = self.with_ctx(best, nxt, HOW_CTX_UP)
+        return cand if profile_key(cand.profile) not in seen else None
 
     def threads(self, c: Candidate) -> Candidate | None:
         """`c` with ``threads`` set to every logical core, for a GPU+CPU candidate.
@@ -301,23 +405,38 @@ class SearchSpace:
 
 
 def choose_best(space: SearchSpace, history: History) -> tuple[Candidate, Measurement] | None:
-    """The winning trial among those that loaded.
+    """The winning trial among those that loaded and fit.
 
     Trials reaching the intent's minimum context are preferred; when none does, the best of
-    the others is returned (the caller reports that it is below the minimum). Ties go to the
-    earlier trial.
+    the others is returned (the caller reports that it is below the minimum). The ``speed``
+    intent ranks tokens/s first. For the others the largest context capped at the target
+    wins; within that tier a trial more than ``SPEED_TOLERANCE`` slower than the tier's
+    fastest is dropped — extra context beyond the target wins unless it costs more than
+    ~5 % speed. Ties go to the higher speed, then the earlier trial.
 
     Args:
         space: Search space (for the intent's bounds and scoring).
         history: Trials so far as (candidate, measurement).
 
     Returns:
-        The winner, or None when nothing loaded.
+        The winner, or None when nothing loaded and fit.
     """
-    loaded = [(c, m) for c, m in history if m.ok]
     floor = planner.ctx_bounds(space.intent, space.info)[2]
-    usable = [(c, m) for c, m in loaded if c.ctx_per_slot >= floor] or loaded
-    return max(usable, key=lambda cm: space.score(*cm), default=None)
+    fit = [(c, m) for c, m in history if space.fits(c, m)]
+    usable = [(c, m) for c, m in fit if c.ctx_per_slot >= floor] or fit
+    if not usable:
+        return None
+    if space.intent.key == SPEED_INTENT:
+        return max(usable, key=lambda cm: space.score(*cm))
+    target = planner.ctx_bounds(space.intent, space.info)[1]
+    capped = max(min(c.ctx_per_slot, target) for c, _ in usable)
+    group = [(i, c, m) for i, (c, m) in enumerate(usable)
+             if min(c.ctx_per_slot, target) == capped]
+    top_tps = max(m.gen_tps or m.prompt_tps for _, _, m in group)
+    group = [icm for icm in group
+             if (icm[2].gen_tps or icm[2].prompt_tps) >= (1 - SPEED_TOLERANCE) * top_tps]
+    return max(group, key=lambda icm: (
+        icm[1].ctx_per_slot, icm[2].gen_tps or icm[2].prompt_tps, -icm[0]))[1:]
 
 
 def next_candidate(space: SearchSpace, history: History) -> Candidate | None:
@@ -325,9 +444,9 @@ def next_candidate(space: SearchSpace, history: History) -> Candidate | None:
 
     - The last trial failed with no success yet: step down, but only for a lack of memory
       or time (other failures, such as an unknown architecture, will not improve).
-    - The last trial loaded: step up one context tier if the measurement shows room.
-    - Otherwise (a step up failed, or no room): for the best GPU+CPU candidate, one trial with
-      all logical cores as threads. A threads trial is always the last.
+    - Otherwise: the all-GPU variant of the best fitting candidate when it exists, then a
+      larger context from `SearchSpace.fill`, then — always last — the threads trial for a
+      GPU+CPU best.
 
     Args:
         space: Search space.
@@ -341,13 +460,16 @@ def next_candidate(space: SearchSpace, history: History) -> Candidate | None:
     if last.how == HOW_THREADS:
         return None
     nxt: Candidate | None
-    if not m.ok and not any(mm.ok for _, mm in history):
-        nxt = space.down(last) if m.resource_failure else None
-    else:
-        nxt = space.up(last, m) if m.ok else None
-        if nxt is None or profile_key(nxt.profile) in seen:
-            best = choose_best(space, history)
-            nxt = space.threads(best[0]) if best else None
+    if not space.fits(last, m) and not any(space.fits(c, mm) for c, mm in history):
+        nxt = space.down(last) if (m.resource_failure or m.ok) else None
+        return nxt if nxt and profile_key(nxt.profile) not in seen else None
+    best = choose_best(space, history)
+    if best is None:
+        return None
+    for cand in (space.all_gpu(best[0]), space.fill(history)):
+        if cand is not None and profile_key(cand.profile) not in seen:
+            return cand
+    nxt = space.threads(best[0])
     return nxt if nxt and profile_key(nxt.profile) not in seen else None
 
 
@@ -376,7 +498,7 @@ def _verdict_message(space: SearchSpace, best: Candidate, m: Measurement, n: int
 
 
 def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Runner, *,
-         headroom_pct: float = 10, calibration: Calibration | None = None, max_trials: int = 4,
+         headroom_pct: float = 10, calibration: Calibration | None = None, max_trials: int = 6,
          progress: Callable[[TrialEvent], None] | None = None,
          cancel: Callable[[], bool] | None = None) -> TuneResult:
     """Find the best measured profile for an intent by launching real candidates.
@@ -756,8 +878,9 @@ class ServerRunner:
                 return failed(f"{ERR_CANCELLED}: stopped before the benchmark", load_s)
             vram_load, ram_load = self._snapshot()
             try:
-                prompt_tps, gen_tps = (self._embed(client) if prof.embedding
-                                       else self._complete(client))
+                prompt_tps, gen_tps = (self._embed(client) if prof.embedding else
+                                       self._complete(client, (prof.ctx_size or 4096) //
+                                                       max(1, prof.parallel)))
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
                 return failed(f"{ERR_BENCH}: {e}", load_s)
             vram_end, ram_end = self._snapshot()
@@ -767,8 +890,14 @@ class ServerRunner:
             gen_tps=gen_tps, at=_now(), build=build)
 
     @staticmethod
-    def _complete(client: Any) -> tuple[float, float]:
+    def _complete(client: Any, ctx_per_slot: int) -> tuple[float, float]:
         """Benchmark a generative model with ``POST /completion``.
+
+        Args:
+            client: HTTP client for the trial server.
+            ctx_per_slot: Context each slot gets; the prompt takes about half of it (capped
+                at ``BENCH_PROMPT_TOKENS``) so prompt processing exercises a realistic part
+                of the window.
 
         Returns:
             (prompt tokens/s, generation tokens/s) from the response's ``timings``.
@@ -777,8 +906,8 @@ class ServerRunner:
             ValueError: On an HTTP error status, a body without ``timings``, or no speed.
         """
         r = client.request("POST", "/completion", timeout=BENCH_TIMEOUT, json={
-            "prompt": BENCH_PROMPT, "n_predict": 128, "cache_prompt": False, "seed": 42,
-            "temperature": 0, "stream": False})
+            "prompt": bench_prompt(ctx_per_slot), "n_predict": 128, "cache_prompt": False,
+            "seed": 42, "temperature": 0, "stream": False})
         if r.status_code != 200:
             raise ValueError(f"HTTP {r.status_code}: {str(r.text).strip()[:120]}")
         timings = r.json()["timings"]

@@ -340,6 +340,23 @@ def ctx_bounds(intent: Intent, info: ModelInfo) -> tuple[tuple[int, ...], int, i
     return tuple(tiers), target, floor
 
 
+def ctx_ceiling(intent: Intent, info: ModelInfo) -> int:
+    """Largest context per slot worth serving for an intent.
+
+    Resolved like `ctx_bounds` resolves the target: ``ctx_max`` (TRAINED/0 → the trained
+    context), capped at the trained context.
+
+    Args:
+        intent: The intent.
+        info: Model metadata.
+
+    Returns:
+        Tokens.
+    """
+    cap = _trained(info)
+    return min(cap, intent.ctx_max or cap)
+
+
 def _make_env(intent: Intent, info: ModelInfo, host: Host, base: Profile, pct: float,
               calibration: Calibration | None) -> _Env:
     """Assemble the planning environment."""

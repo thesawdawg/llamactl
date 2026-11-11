@@ -256,7 +256,8 @@ async def test_tune_anyway_skips_the_check(ui_env: SimpleNamespace) -> None:
         assert not shown(app, "unload")                     # nothing loaded in the gateway
         scr.query_one("#anyway", Button).press()
         assert await wait_for(pilot, lambda: scr.state == "done")
-        assert len(runner.calls) == 1
+        # the full GPU fails the headroom guard: f16 -> q8 -> GPU+CPU -> threads
+        assert len(runner.calls) == 4
 
 
 async def test_nothing_loaded_is_reported_without_a_preset(ui_env: SimpleNamespace) -> None:

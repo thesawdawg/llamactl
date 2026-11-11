@@ -850,7 +850,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="with --save: replace a tuned or edited preset")
     sp = add("tune", cmd_tune, "measure candidate settings by launching the model and save the best",
              json_out=True, model=True, intent=True)
-    sp.add_argument("--trials", type=_positive, default=4, metavar="N", help="most launches (default 4)")
+    sp.add_argument("--trials", type=_positive, default=6, metavar="N", help="most launches (default 6)")
     sp.add_argument("--force", action="store_true", help="skip the free-memory check")
     sp = add("serve", cmd_serve, "make sure a preset exists, then serve it",
              model=True, intent=True)

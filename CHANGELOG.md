@@ -10,6 +10,8 @@ there are no earlier tagged releases. Commit entries retain their original subje
   narrow terminals, and controls stay reachable down to small sizes.
 - Per-model resource usage (`ps` and the Serving view): CPU, RAM and VRAM per gateway model
   and server, with `~` marking VRAM not measured per process.
+- `tune` tries the model fully on the GPU when the weights fit, then fills toward the largest
+  context that keeps the headroom free, and benchmarks with a realistic ~2k-token prompt.
 
 ## [0.2.0] - Unreleased
 

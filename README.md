@@ -16,7 +16,8 @@ How it works:
    supports). Each setting comes with a one-line reason.
 2. **Tune (optional).** `tune` launches the model with candidate settings, measures memory and
    tokens per second, keeps the best result and uses the measurements to correct later
-   estimates on this machine.
+   estimates on this machine. It also probes the largest context that still fits fully on the
+   GPU, with a headroom guard against drivers that silently spill to system memory.
 3. **Serve.** Models are served by one `llama-server` in router mode (the gateway). Each model
    loads on demand. Standalone servers on their own port are also available.
 

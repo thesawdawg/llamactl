@@ -278,7 +278,7 @@ class Runner(Protocol):                       # the only part that touches proce
     def measure(self, model: Path, profile: Profile,
                 cancel: Callable[[], bool] | None = None) -> Measurement: ...
 
-def tune(intent, info, host, base, runner, *, headroom_pct=10, calibration=None, max_trials=4,
+def tune(intent, info, host, base, runner, *, headroom_pct=10, calibration=None, max_trials=6,
          progress: Callable[[TrialEvent], None] | None = None,
          cancel: Callable[[], bool] | None = None) -> TuneResult
 def save_result(cfg, model, result, calibration, *, activate=False) -> None
@@ -288,8 +288,9 @@ def preflight(plan, host) -> str | None       # refusal text when free memory is
 - `ServerRunner` launches `llama-server` on a free port bound to 127.0.0.1 (host, port and API key
   of the profile are overridden, idle sleep off), logs to a temp file in the log directory, waits
   for `/health` (timeout 60 s + 20 s per GB of model file, at most 30 min), snapshots device
-  memory and RAM, posts a fixed prompt to `/completion` (`n_predict` 128, `cache_prompt` false,
-  seed 42, temperature 0), reads `timings`, then always stops the process group (SIGTERM, SIGKILL
+  memory and RAM, posts a deterministic prompt of about `min(2048, ctx_per_slot / 2)` tokens
+  (numbered paragraphs) to `/completion` (`n_predict` 128, `cache_prompt` false, seed 42,
+  temperature 0), reads `timings`, then always stops the process group (SIGTERM, SIGKILL
   after 15 s) and waits for it to be gone. Embedding profiles post a fixed text to
   `/v1/embeddings` instead and report `usage.prompt_tokens` over wall time as `prompt_tps`.
   `preflight` refuses to start when free memory is below 90% of the plan's budget; offering to
@@ -299,17 +300,28 @@ def preflight(plan, host) -> str | None       # refusal text when free memory is
   with `cancelled` (`Measurement.cancelled`). The search treats it as cancellation: it is neither a
   load failure to step down from nor a recorded trial (it is still reported to `progress`).
 - Search starts from `plan()` and is bounded by `max_trials`; a plan with verdict `NO` is not tried:
-  - load failed (memory or timeout): step down - next lower ctx tier (not below `ctx_min`); then
-    q8_0 KV if the intent allows; then let llama.cpp place the layers (`gpu_layers` auto, `fit` on);
-  - loaded fully on the GPU, below `ctx_target`, and the measured slack (free VRAM before the
-    launch, minus the model's `vram_used`, minus headroom) exceeds the extra KV of the next tier:
-    step up one tier. A failed step up ends the climb and keeps the last good trial;
+  - load failed (memory or timeout), or loaded but left less VRAM than the headroom free - a
+    trial only *fits* when it keeps `headroom` free after its measured `vram_used` (the Windows/
+    WSL driver may fall back to system memory instead of failing, so "loaded" alone does not
+    prove it fits). With nothing fitting yet: step down - next lower ctx tier (not below
+    `ctx_min`); then q8_0 KV if the intent allows; then let llama.cpp place the layers
+    (`gpu_layers` auto, `fit` on);
+  - otherwise, for the best fitting candidate: its all-GPU variant (`gpu_layers` all, `fit`
+    off) when the plan let llama.cpp split the model but the weights alone fit in VRAM - the
+    planner can overestimate KV enough to split a model that would fit whole;
+  - then `fill`: probe the largest context that stays fully on the GPU. The next ctx is the
+    largest fitting one plus the measured slack over the measured bytes-per-token slope (the
+    planner's KV estimate when only one fitting point exists), rounded down to 4096, capped at
+    the intent's `ctx_max` and below the smallest failing probe; when the prediction stalls it
+    tries the midpoint instead;
   - `GPU+CPU` candidates: one extra trial with `threads` = all logical cores, keep the faster;
   - an identical profile is never launched twice.
-- Score: among trials that loaded and reach `ctx_min`, the highest ctx up to `ctx_target`, then the
-  highest `gen_tps` (`prompt_tps` for embedding models); `speed` scores by `gen_tps` first. When
-  nothing reaches `ctx_min` the best loaded trial still wins and the message says it is below the
-  minimum. Nothing loaded: `ok` is false, the trials are still recorded.
+- Score: among trials that loaded, fit and reach `ctx_min`, the highest ctx up to `ctx_target`
+  wins; within that tier a trial more than 5% slower than the tier's fastest is dropped, then
+  the largest uncapped ctx, then higher `gen_tps` (`prompt_tps` for embedding models), then
+  the earlier trial; `speed` scores by `gen_tps` first. When nothing reaches `ctx_min` the best
+  loaded trial still wins and the message says it is below the minimum. Nothing loaded:
+  `ok` is false, the trials are still recorded.
 - `save_result` stores the winner as the model's preset with `source: "tuned"` and its
   `Measurement` (it becomes the active preset only when asked or when the model has none), and
   records every trial in `tuning.json`.

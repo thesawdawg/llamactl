@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
@@ -14,9 +15,9 @@ from llamactl.config import Config, Preset, Profile
 from llamactl.gguf import ModelInfo
 from llamactl.hardware import Device, Host
 from llamactl.measure import ERR_ARGS, ERR_OOM, Measurement
-from llamactl.tuner import (HOW_CTX_DOWN, HOW_CTX_UP, HOW_KV_Q8, HOW_PLAN, HOW_SPILL, HOW_THREADS,
-                            Candidate, SearchSpace, TrialEvent, TuneResult, choose_best,
-                            next_candidate, preflight, save_result, tune)
+from llamactl.tuner import (HOW_ALL_GPU, HOW_CTX_DOWN, HOW_CTX_UP, HOW_KV_Q8, HOW_PLAN, HOW_SPILL,
+                            HOW_THREADS, Candidate, SearchSpace, TrialEvent, TuneResult,
+                            choose_best, next_candidate, preflight, save_result, tune)
 
 GB = 1e9
 
@@ -76,11 +77,11 @@ def _run(intent: str, info: ModelInfo, host: Host, runner: Scripted, **kw) -> Tu
 
 # --------------------------------------------------------------------------- stepping down
 
-def test_plan_loads_first_try_and_gpu_plan_stops(dense8b: ModelInfo) -> None:
+def test_plan_loads_then_fills_to_the_intent_ceiling(dense8b: ModelInfo) -> None:
     runner = Scripted(lambda p: ok(10))
     r = _run("chat", dense8b, _host(), runner)
-    assert r.ok and len(r.trials) == 1 and r.best.how == HOW_PLAN
-    assert runner.shape == [(16384, "f16", "all")]       # target reached: nothing to step up
+    assert r.ok and runner.shape == [(16384, "f16", "all"), (32768, "f16", "all")]
+    assert r.best.how == HOW_CTX_UP and r.best.ctx_per_slot == 32768
 
 
 def test_failure_steps_down_ctx_then_q8_then_spill(dense8b: ModelInfo) -> None:
@@ -90,10 +91,12 @@ def test_failure_steps_down_ctx_then_q8_then_spill(dense8b: ModelInfo) -> None:
     runner = Scripted(answer)
     r = _run("chat", dense8b, _host(), runner)
     assert runner.shape == [(16384, "f16", "all"), (8192, "f16", "all"),
-                            (8192, "q8_0", "all"), (8192, "q8_0", "auto")]
+                            (8192, "q8_0", "all"), (8192, "q8_0", "auto"),
+                            (8192, "q8_0", "auto")]
     assert r.ok and r.best.profile.gpu_layers == "auto" and r.best.profile.fit == "on"
     assert r.best.profile.fit_target > 0 and r.best.verdict == "GPU+CPU"
-    assert [t.measurement.ok for t in r.trials] == [False, False, False, True]
+    # trial 5 is the threads variant; the all-GPU variant equals trial 3 (already tried)
+    assert [t.measurement.ok for t in r.trials] == [False, False, False, True, True]
 
 
 def test_step_down_candidates_directly(dense8b: ModelInfo) -> None:
@@ -150,40 +153,78 @@ def test_everything_fails_gives_nothing_loaded(dense8b: ModelInfo) -> None:
     assert r.message.startswith("nothing loaded after 4 trials") and "out of memory" in r.message
 
 
-# --------------------------------------------------------------------------- stepping up
+# --------------------------------------------------------------------------- filling up
 
-def test_step_up_when_the_measurement_shows_slack(dense27b: ModelInfo) -> None:
-    """16 GB card: the plan is 8192; the model took 11 GB, leaving room for 16384."""
+def test_fill_climbs_to_the_ceiling_on_the_measured_slack(dense27b: ModelInfo) -> None:
+    """16 GB card: the plan is 8192; the model took 11 GB, leaving room to grow."""
     host = _host(16)
     assert planner.plan(intents.by_key["chat"], dense27b, host, Profile()).ctx_per_slot == 8192
     runner = Scripted(lambda p: ok(11))
     r = _run("chat", dense27b, host, runner)
-    assert [s[0] for s in runner.shape] == [8192, 16384]
-    assert r.best.how == HOW_CTX_UP and r.best.ctx_per_slot == 16384 and r.ok
+    assert [s[0] for s in runner.shape] == [8192, 28672, 32768]
+    assert r.best.how == HOW_CTX_UP and r.best.ctx_per_slot == 32768 and r.ok
 
 
-def test_no_step_up_without_enough_slack(dense27b: ModelInfo) -> None:
-    runner = Scripted(lambda p: ok(14))       # 16 GB - 14 GB - 1.6 GB headroom < one tier of KV
+def test_no_fill_without_enough_slack(dense27b: ModelInfo) -> None:
+    runner = Scripted(lambda p: ok(14))       # 16 GB - 14 GB - 1.6 GB headroom < one ctx step
     r = _run("chat", dense27b, _host(16), runner)
     assert len(runner.profiles) == 1 and r.best.ctx_per_slot == 8192
 
 
-def test_failed_step_up_keeps_the_last_good_trial(dense27b: ModelInfo) -> None:
+def test_failed_fill_probe_bisects_down_and_keeps_the_last_good_trial(
+        dense27b: ModelInfo) -> None:
     runner = Scripted(lambda p: ok(11) if p.ctx_size == 8192 else oom())
     r = _run("chat", dense27b, _host(16), runner)
-    assert [s[0] for s in runner.shape] == [8192, 16384]      # no step down afterwards
+    assert [s[0] for s in runner.shape] == [8192, 28672, 24576, 20480, 16384, 12288]
     assert r.ok and r.best.ctx_per_slot == 8192 and r.measurement.ok
-    assert [t.measurement.ok for t in r.trials] == [True, False]
+    assert [t.measurement.ok for t in r.trials] == [True] + [False] * 5
 
 
-def test_step_up_never_exceeds_the_target_or_leaves_the_gpu(dense8b: ModelInfo) -> None:
+def test_fill_never_exceeds_the_ceiling_or_leaves_the_gpu(dense8b: ModelInfo) -> None:
     host = _host()
     space = SearchSpace(intents.by_key["chat"], dense8b, host)
     top = space.from_plan(planner.plan(space.intent, dense8b, host, Profile()))
-    assert space.up(top, ok(1)) is None                         # already at the target
+    nxt = space.fill([(top, ok(1))])
+    assert nxt is not None and nxt.ctx_per_slot == 32768      # intent ceiling, not the target
+    assert nxt.profile.gpu_layers == "all" and nxt.how == HOW_CTX_UP
+    at_top = space.with_ctx(top, 32768, HOW_CTX_UP)
+    assert space.fill([(top, ok(1)), (at_top, ok(1))]) is None    # already at the ceiling
     spilled = space.candidate(top.profile.merged(gpu_layers="auto"), HOW_SPILL)
-    assert space.up(spilled, ok(1)) is None                     # GPU+CPU: VRAM is full by design
-    assert space.up(top, oom()) is None                         # a failure shows no slack
+    assert space.fill([(spilled, ok(1))]) is None             # no fitting GPU trial yet
+    assert space.fill([(top, ok(15))]) is None                # loaded but below headroom
+
+
+def test_a_trial_below_the_headroom_never_wins_and_stops_the_fill(
+        dense8b: ModelInfo) -> None:
+    """Driver silently spilling to system memory: loaded but < headroom free does not fit."""
+    runner = Scripted(lambda p: ok(15) if p.ctx_size != 8192 else ok(8))
+    r = _run("chat", dense8b, _host(), runner)
+    assert [s[0] for s in runner.shape] == [16384, 8192, 12288]
+    assert r.ok and r.best.ctx_per_slot == 8192 and r.measurement.vram_used == int(8e9)
+
+
+def test_plan_then_all_gpu_then_fill_finds_the_largest_full_gpu_ctx(
+        dense27b: ModelInfo) -> None:
+    """The planner overestimates KV 3.6x; measured fill still finds the true all-GPU max."""
+    host = _host(16)
+    plan = planner.plan(intents.by_key["agent"], dense27b, host, Profile())
+    assert plan.verdict == "GPU+CPU"                    # the overestimate splits the model
+    base, slope, limit = 10.5e9, 39e3, 15e9             # weights + ~39 KB/token, driver OOM
+    headroom = sum(planner.headroom_bytes(g.total, 10) for g in host.gpus)
+
+    def answer(p: Profile) -> Measurement:
+        vram = base + slope * p.ctx_size
+        return ok(vram / GB) if vram <= limit else oom()
+
+    runner = Scripted(answer)
+    r = _run("agent", dense27b, host, runner)
+    assert [(p.ctx_size, p.gpu_layers, p.fit) for p in runner.profiles] == [
+        (65536, "auto", "on"), (65536, "all", "off"),
+        (73728, "all", "off"), (98304, "all", "off")]
+    want = int((host.vram_free - headroom - base) / slope) // 4096 * 4096
+    assert len(r.trials) <= 6 and r.best.ctx_per_slot == want == 98304
+    assert r.best.how == HOW_CTX_UP and r.best.profile.gpu_layers == "all"
+    assert r.best.profile.fit == "off" and r.ok
 
 
 # --------------------------------------------------------------------------- threads trial
@@ -194,12 +235,12 @@ def test_gpu_cpu_plan_gets_one_threads_trial_and_keeps_the_faster(dense27b: Mode
     assert plan.verdict == "GPU+CPU" and plan.profile.threads == 8
     runner = Scripted(lambda p: ok(14, gen=20.0 if p.threads == 8 else 26.0))
     r = _run("agent", dense27b, host, runner)
-    assert [p.threads for p in runner.profiles] == [8, 16]
+    assert [p.threads for p in runner.profiles] == [8, 8, 16]    # plan, all-GPU variant, threads
     assert r.best.how == HOW_THREADS and r.measurement.gen_tps == 26.0
     # the slower threads variant loses
     runner = Scripted(lambda p: ok(14, gen=20.0 if p.threads == 8 else 18.0))
     r = _run("agent", dense27b, host, runner)
-    assert [p.threads for p in runner.profiles] == [8, 16]
+    assert [p.threads for p in runner.profiles] == [8, 8, 16]
     assert r.best.how == HOW_PLAN and r.measurement.gen_tps == 20.0
 
 
@@ -207,9 +248,9 @@ def test_no_threads_trial_when_already_at_all_cores_or_all_gpu(dense27b: ModelIn
                                                                 dense8b: ModelInfo) -> None:
     host = _host(16, threads=8)               # physical == logical
     runner = Scripted(lambda p: ok(14))
-    assert len(_run("agent", dense27b, host, runner).trials) == 1
+    assert len(_run("agent", dense27b, host, runner).trials) == 2   # plan + its all-GPU variant
     runner = Scripted(lambda p: ok(9))
-    assert len(_run("agent", dense8b, _host(), runner).trials) == 1
+    assert len(_run("agent", dense8b, _host(), runner).trials) == 2  # plan already all-GPU: fill wins
 
 
 def test_never_repeats_an_identical_profile(dense27b: ModelInfo) -> None:
@@ -220,15 +261,19 @@ def test_never_repeats_an_identical_profile(dense27b: ModelInfo) -> None:
     assert len(keys) == len(set(keys))
 
 
-def test_next_candidate_ends_after_a_threads_trial(dense27b: ModelInfo) -> None:
+def test_next_candidate_orders_all_gpu_fill_then_threads(dense27b: ModelInfo) -> None:
     host = _host(16, threads=16)
     space = SearchSpace(intents.by_key["agent"], dense27b, host)
     first = space.from_plan(planner.plan(space.intent, dense27b, host, Profile()))
+    assert first.verdict == "GPU+CPU"
     hist = [(first, ok(14))]
     second = next_candidate(space, hist)
-    assert second.how == HOW_THREADS
-    assert next_candidate(space, [*hist, (second, ok(14, gen=99))]) is None
-    assert next_candidate(space, [*hist, (second, oom())]) is None
+    assert second is not None and second.how == HOW_ALL_GPU
+    hist.append((second, ok(14)))                            # no slack left for a fill step
+    third = next_candidate(space, hist)
+    assert third is not None and third.how == HOW_THREADS    # always the last trial
+    assert next_candidate(space, [*hist, (third, ok(14, gen=99))]) is None
+    assert next_candidate(space, [*hist, (third, oom())]) is None
 
 
 def test_trial_cap(dense8b: ModelInfo) -> None:
@@ -327,9 +372,11 @@ def test_progress_events(dense8b: ModelInfo) -> None:
     runner = Scripted(lambda p: ok(8) if p.ctx_size == 8192 else oom())
     r = _run("chat", dense8b, _host(), runner, max_trials=3, progress=events.append)
     assert [(e.index, e.phase, e.total) for e in events] == [
-        (1, "start", 3), (1, "done", 3), (2, "start", 3), (2, "done", 3)]
+        (1, "start", 3), (1, "done", 3), (2, "start", 3), (2, "done", 3),
+        (3, "start", 3), (3, "done", 3)]
     assert events[0].measurement is None and events[1].measurement.error.startswith(ERR_OOM)
     assert events[2].summary.startswith("ctx down: 8192 ctx") and events[3].measurement.ok
+    assert events[4].summary.startswith("ctx up: 12288 ctx") and not events[5].measurement.ok
     assert events[0].summary == "plan: 16384 ctx, f16 KV, GPU"
     assert r.ok
 
@@ -390,7 +437,7 @@ def test_save_result_stores_the_tuned_preset_and_all_trials(isolated: SimpleName
     p = cfg.preset("m.gguf", "chat")
     assert p.source == "tuned" and p.intent == "chat" and p.measured == r.measurement
     assert p.profile == r.best.profile and cfg.models["m.gguf"].active == "chat"
-    assert len(cal.trials) == 2 and len(Calibration.load().trials) == 2
+    assert len(cal.trials) == 3 and len(Calibration.load().trials) == 3
     assert Config.load().preset("m.gguf", "chat").measured == r.measurement
     assert Calibration.load().trials_for("m.gguf", "chat")[1].measurement.ok is True
 
@@ -422,10 +469,14 @@ def test_tune_then_calibrate_feeds_the_next_plan(isolated: SimpleNamespace,
                                                  dense8b: ModelInfo) -> None:
     host = _host()
     est = planner.plan(intents.by_key["chat"], dense8b, host, Profile()).budget.raw_total()
-    r = _run("chat", dense8b, host, Scripted(lambda p: ok(est * 1.2 / GB)))
+    runner = Scripted(lambda p: ok(est * 1.2 / GB))
+    r = _run("chat", dense8b, host, runner)
     cal = Calibration()
     save_result(Config(), "m.gguf", r, cal)
-    assert Calibration.load().factor("cuda") == pytest.approx(1.2, rel=1e-3)
+    ratios = [est * 1.2 / planner.estimate_budget(dense8b, p, host).raw_total()
+              for p in runner.profiles]
+    assert Calibration.load().factor("cuda") == pytest.approx(statistics.median(ratios),
+                                                            rel=1e-3)
 
 
 # --------------------------------------------------------------------------- preflight

@@ -556,7 +556,7 @@ def test_tune_saves_the_tuned_preset_and_records_trials(world, capsys) -> None:
     assert r.code == 0
     assert "tuned: qwen3-8b-q4_k_m for chat" in r.out and "saved as the 'chat' preset" in r.out
     assert "gateway reloaded" in r.out and "reload" in world.gw.calls
-    assert "[1/4] trying" in r.err and "[1/4] ok" in r.err and "60.0 tok/s" in r.err
+    assert "[1/6] trying" in r.err and "[1/6] ok" in r.err and "60.0 tok/s" in r.err
     assert preset_names(world, world.qwen) == {"chat": "tuned"}
     trials = json.loads((world.cfg_dir / "tuning.json").read_text())["trials"]
     assert len(trials) == 1 and trials[0]["measurement"]["ok"] and trials[0]["intent"] == "chat"
@@ -568,7 +568,7 @@ def test_tune_json_is_pure(world, capsys) -> None:
     d = json.loads(r.out)
     assert r.code == 0 and d["ok"] and d["intent"] == "chat" and not d["cancelled"]
     assert d["best"]["measurement"]["gen_tps"] == 60.0 and len(d["trials"]) == 1
-    assert d["gateway_reloaded"] is False and "[1/4]" in r.err
+    assert d["gateway_reloaded"] is False and "[1/6]" in r.err
 
 
 def test_tune_without_a_running_gateway_does_not_reload(world, capsys) -> None:
@@ -595,7 +595,8 @@ def test_tune_preflight_refuses_and_force_overrides(world, capsys) -> None:
     assert r.code == 1 and "cannot tune qwen3-8b-q4_k_m" in r.err and "--force" in r.err
     assert world.runner.profiles == []
     assert world.run(capsys, "tune", "qwen3", "--force").code == 0
-    assert len(world.runner.profiles) == 1
+    # the full GPU fails the headroom guard: the tune steps down to a GPU+CPU plan
+    assert len(world.runner.profiles) == 4
 
 
 def test_tune_ctrl_c_stops_cleanly_and_records_the_trials_so_far(world, capsys) -> None:

@@ -29,7 +29,7 @@ COLUMNS = (("#", "n"), ("change", "how"), ("ctx", "ctx"), ("load s", "load"), ("
            ("prompt tok/s", "pp"), ("gen tok/s", "tg"), ("outcome", "out"))
 SUMMARY_RE = re.compile(r"^(?P<how>[^:]+): (?P<ctx>\d+) ctx, (?P<kv>\S+) KV, (?P<verdict>[^,]+)"
                         r"(?:, (?P<threads>\d+) threads)?$")
-DEFAULT_TRIALS = 4
+DEFAULT_TRIALS = 6
 ERRORS = (GatewayError, ActionError, LookupError, ValueError, OSError)
 ELAPSED_EVERY = 1.0          # seconds between progress line refreshes while running
 OUTCOME_WIDTH = 60           # characters of an error shown in the outcome column

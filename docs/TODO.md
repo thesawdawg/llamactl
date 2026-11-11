@@ -82,3 +82,13 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
   fallback order process -> tuned -> estimate, `~` markers, sleeping models never estimated
 - [x] `ps` (text and `--json`) shows CPU/RAM/VRAM per gateway model and server
 - [x] Serving view CPU/RAM/VRAM columns, CPU deltas between polls
+
+## Phase 11 - Tuner: largest full-GPU context
+
+- [x] All-GPU trial when the plan split a model whose weights fit VRAM whole
+- [x] Headroom guard: a loaded GPU trial only counts when it keeps the headroom free
+  (Windows/WSL driver sysmem fallback), and it stops the fill
+- [x] Context fill probes the largest full-GPU context from the measured bytes-per-token
+  slope, in 4096 steps up to `ctx_max`
+- [x] Scoring: context beyond the target wins unless it costs more than 5% speed
+- [x] Realistic benchmark prompt (~2k tokens), `--trials` default 6

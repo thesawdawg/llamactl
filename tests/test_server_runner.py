@@ -164,7 +164,8 @@ def test_benchmark_request_is_fixed_and_deterministic(world: World, model: Path)
     body = post["json"]
     assert body["n_predict"] == 128 and body["cache_prompt"] is False
     assert body["seed"] == 42 and body["temperature"] == 0 and body["stream"] is False
-    assert body["prompt"] == tuner.BENCH_PROMPT and len(body["prompt"]) > 400
+    # ctx_size 0 -> safe 4096 per slot -> ~2k-token deterministic prompt
+    assert body["prompt"] == tuner.bench_prompt(4096) and len(body["prompt"]) > 4000
 
 
 def test_launch_overrides_host_port_key_and_runs_detached(world: World, model: Path) -> None:
