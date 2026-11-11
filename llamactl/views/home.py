@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .. import actions
+from .. import actions, network
 from ..calibration import Calibration
 from ..config import Config
 from ..hardware import Host
@@ -101,14 +101,16 @@ def hardware_text(host: Host, calibration: Calibration, bin_dir: str, found: boo
     return Text("\n").join(lines)
 
 
-def gateway_lines(cfg: Config, state: str, url: str, problems: list[str]) -> Text:
+def gateway_lines(cfg: Config, state: str, urls: list[str], problems: list[str],
+                  host: str = "") -> Text:
     """The gateway card body (without the curl snippet).
 
     Args:
         cfg: Config holding the gateway settings.
         state: "stopped", "starting", "running", "unhealthy" or "stopping".
-        url: Base URL (``http://host:port``).
+        urls: Base URLs clients use (``network.client_urls``): loopback first.
         problems: `Gateway.problems`: presets that could not be written.
+        host: The listen address (running, else configured); "" uses the configured one.
 
     Returns:
         The card body.
@@ -118,10 +120,17 @@ def gateway_lines(cfg: Config, state: str, url: str, problems: list[str]) -> Tex
     t = Text()
     t.append(f"{'State':<10}")
     t.append(state, style=STATE_STYLE.get(state, ""))
-    t.append(f"\n{'URL':<10}{url}/v1")
+    t.append(f"\n{'URL':<10}{urls[0]}/v1")
+    for extra in urls[1:]:
+        t.append(f"\n{'':<10}{extra}/v1")
     t.append(f"\n{'Models':<10}{g.models_max} loaded at a time")
     t.append(f"\n{'Idle':<10}{idle}")
     t.append(f"\n{'API key':<10}{'required' if g.api_key else 'none'}")
+    host = host or g.host
+    if warning := network.key_warning(host, g.api_key):
+        t.append(f"\n! {warning}", style="yellow")
+    for note in network.exposure_notes(host):
+        t.append(f"\n{note}", style="dim")
     if state == GW_STOPPED:
         t.append("\n\nStopped. Press u to start it; models then load on first use.", style="dim")
     elif state == GW_UNHEALTHY:
@@ -241,16 +250,16 @@ class HomeView(BaseView):
             hardware_text(a.host, a.calibration, a.cfg.bin_dir, binary_found(a.cfg), a.build))
 
     def gateway_url(self) -> str:
-        """Base URL of the gateway (running or planned)."""
-        snap = self.app.snapshot
-        return snap.status.url if snap else self.app.gateway.listen_url
+        """Base URL to hand out: the first LAN URL when the gateway is exposed, else loopback."""
+        return self.app.gateway_url()
 
     def render_gateway(self) -> None:
         """Gateway card and the curl snippet."""
         a = self.app
         state = a.gateway_state()
         self.query_one("#gw_info", Static).update(
-            gateway_lines(a.cfg, state, self.gateway_url(), list(a.gateway.problems)))
+            gateway_lines(a.cfg, state, a.gateway_urls(), list(a.gateway.problems),
+                          a.gateway_host()))
         snippet = self.snippet()
         self.query_one("#gw_snippet", Static).update(
             Text.assemble(("Try it", "bold"), (f"  ({self.snippet_name()}; c copies)\n", "dim"),

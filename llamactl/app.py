@@ -28,7 +28,7 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Header, Label, ListItem, ListView
 from textual.worker import Worker, get_current_worker
 
-from . import actions, hardware, library, onboarding, planner, tuner
+from . import actions, hardware, library, network, onboarding, planner, tuner
 from .actions import ActionError
 from .calibration import Calibration
 from .config import Config
@@ -37,7 +37,7 @@ from .gguf import GGUFError, ModelInfo, ModelInfoCache, read_model_info
 from .onboarding import Dismissal, FinishResult
 from .serving import (GW_STARTING, GW_STOPPING, Health, ServingSnapshot, gateway_state, gather,
                       http_health)
-from .sessions import SessionStore
+from .sessions import Session, SessionStore
 from .suggest import (ACT_DISCOVER, ACT_MODELS, ACT_SETTINGS, ACT_START_GATEWAY, ACT_TUNE,
                       Suggestion, binary_found)
 from .tuner import Runner, ServerRunner
@@ -524,6 +524,35 @@ class LlamaCtl(App):
         """The gateway's state in the words the Home card uses."""
         return gateway_state(self.snapshot, self.gw_busy)
 
+    def gateway_host(self) -> str:
+        """The address the gateway listens on (running), else the one it would start with."""
+        snap = self.snapshot
+        return (snap.status.host if snap else "") or self.cfg.gateway.host
+
+    def gateway_urls(self) -> list[str]:
+        """Base URLs a client can use for the gateway, running or planned.
+
+        Returns:
+            Loopback first, then one URL per LAN address when it listens on every interface.
+        """
+        snap = self.snapshot
+        return network.client_urls_for(snap.status.url if snap else self.gateway.listen_url,
+                                       self.gateway_host())
+
+    def gateway_url(self) -> str:
+        """The gateway URL to hand out: the first LAN URL when exposed, else loopback."""
+        return network.primary_url(self.gateway_urls())
+
+    def warn_exposed(self, host: str, api_key: str) -> None:
+        """Notify when a server others can reach has no API key.
+
+        Args:
+            host: Listen address.
+            api_key: The key clients must send, "" for none.
+        """
+        if warning := network.key_warning(host, api_key):
+            self.notify(warning, title="No API key", severity="warning", markup=False)
+
     def _show_gateway_state(self) -> None:
         """Right end of the status bar: gateway state and what is loaded."""
         snap = self.snapshot
@@ -559,16 +588,18 @@ class LlamaCtl(App):
         self._set_busy(GW_STARTING)
         self.say("Starting the gateway...")
 
-        def work() -> bool:
+        def work() -> tuple[bool, str, str]:
             with self._gw_lock:
-                _, started = actions.ensure_gateway(self.gateway)
-            return started
+                st, started = actions.ensure_gateway(self.gateway)
+            host = st.host or self.cfg.gateway.host
+            return started, host, ", ".join(network.client_urls_for(st.url, host))
 
-        def done(started: bool) -> None:
-            url = self.gateway.listen_url
-            self.say(f"Gateway running at {url}" if started else f"Gateway already running at {url}")
+        def done(result: tuple[bool, str, str]) -> None:
+            started, host, urls = result
+            self.say(f"Gateway running at {urls}" if started else f"Gateway already running at {urls}")
             if self.gateway.problems:
                 self.say("Gateway running; " + "; ".join(self.gateway.problems))
+            self.warn_exposed(host, self.cfg.gateway.api_key)
             if finished is not None:
                 finished("")
 
@@ -635,7 +666,7 @@ class LlamaCtl(App):
 
     def _loaded(self, name: str) -> None:
         """A model came up: say so in the status bar and as a notification."""
-        self.say(f"{name} is loaded at {self.gateway.listen_url}/v1")
+        self.say(f"{name} is loaded at {self.gateway_url()}/v1")
         self.notify(f"{name} is loaded", title="Model ready", markup=False)
 
     def _size_of_served(self, name: str) -> int:
@@ -692,6 +723,13 @@ class LlamaCtl(App):
 
     def _serve_gateway(self, path: str, preset: str, timeout: float) -> None:
         """Load a preset in the gateway in a worker and wait until it is loaded."""
+        fresh = not self.gateway.running
+
+        def loaded(name: str) -> None:
+            self._loaded(name)
+            if fresh:                       # this serve started the gateway: say if it is open
+                self.warn_exposed(self.gateway_host(), self.cfg.gateway.api_key)
+
         def work() -> str:
             with self._gw_lock:
                 name = actions.serve_gateway(
@@ -704,11 +742,11 @@ class LlamaCtl(App):
             return name
 
         self.run_bg(work, label=f"Serving {self.alias_of(path)}", group="serve",
-                    done=self._loaded, always=self.refresh_serving)
+                    done=loaded, always=self.refresh_serving)
 
     def _serve_standalone(self, path: str, preset: str, timeout: float) -> None:
         """Start a standalone server in a worker and wait until it answers."""
-        def work() -> str:
+        def work() -> tuple[str, Session]:
             try:
                 session = self.store.launch_server(self.cfg, path, preset)
             except RuntimeError as e:
@@ -717,10 +755,17 @@ class LlamaCtl(App):
             t0 = time.monotonic()
             actions.wait_server_ready(session, self.health, timeout, tick=lambda: self.ui(
                 self.say, f"Loading {session.name}... {time.monotonic() - t0:.0f} s"))
-            return f"{session.name} is ready at {session.url}"
+            return f"{session.name} is ready at {network.primary_url(session.urls)}", session
 
-        self.run_bg(work, label=f"Starting {Path(path).stem}", group="serve",
-                    done=lambda msg: (self.say(msg), self.notify(msg, markup=False)),
+        def done(result: tuple[str, Session]) -> None:
+            msg, session = result
+            self.say(msg)
+            self.notify(msg, markup=False)
+            preset_obj = self.cfg.preset(path, preset)
+            prof = preset_obj.profile if preset_obj else self.cfg.profile_for(path)
+            self.warn_exposed(session.host or prof.host, prof.api_key)
+
+        self.run_bg(work, label=f"Starting {Path(path).stem}", group="serve", done=done,
                     always=self.refresh_serving)
 
     # ------------------------------------------------------------------ presets

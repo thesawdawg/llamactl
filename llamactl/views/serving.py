@@ -12,7 +12,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, RichLog, Static
 
-from .. import actions
+from .. import actions, network
 from ..cli import tail_lines
 from ..gateway import FAILED, LOADED, LOADING, SLEEPING, UNLOADED, GatewayModel
 from ..screens.confirm import ConfirmScreen
@@ -118,11 +118,13 @@ class ServingView(BaseView):
         """
         out: dict[str, tuple] = {}
         for m in snap.models or ():
-            out[f"gw:{m.name}"] = (m.name, model_state_text(m), KIND_GATEWAY, snap.status.url, "-")
+            out[f"gw:{m.name}"] = (m.name, model_state_text(m), KIND_GATEWAY,
+                                   self.app.gateway_url(), "-")
         for s in snap.sessions:
             state = snap.health.get(s.id, "down")
             out[f"s:{s.id}"] = (s.name, Text(state, style=MODEL_STYLE.get(state, "")),
-                                KIND_ATTACHED if s.external else KIND_STANDALONE, s.url,
+                                KIND_ATTACHED if s.external else KIND_STANDALONE,
+                                network.primary_url(s.urls) if not s.external else s.url,
                                 uptime(s.started, snap.at))
         return out
 
@@ -166,7 +168,8 @@ class ServingView(BaseView):
         g = a.cfg.gateway
         t = Text("Gateway ", style="bold")
         t.append(state, style={"running": "green", "stopped": "dim"}.get(state, "yellow"))
-        t.append(f"  {snap.status.url}/v1  max {g.models_max} loaded at once")
+        t.append("  " + "  ".join(f"{u}/v1" for u in a.gateway_urls())
+                 + f"  max {g.models_max} loaded at once")
         if snap.error:
             t.append(f"  ! {snap.error}", style="red")
         self.query_one("#sv_gateway", Static).update(t)
@@ -372,9 +375,9 @@ class ServingView(BaseView):
         """(base URL, model id or None, embedding) of the highlighted row, else the gateway."""
         s = self.selected_session()
         if s is not None:
-            return s.url, None, False
+            return (s.url if s.external else network.primary_url(s.urls)), None, False
         m = self.selected_model()
-        url = self.app.snapshot.status.url if self.app.snapshot else self.app.gateway.listen_url
+        url = self.app.gateway_url()
         if m is None:
             return url, None, False
         alias = m.name.split("@", 1)[0]
