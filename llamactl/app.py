@@ -28,7 +28,7 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Header, Label, ListItem, ListView
 from textual.worker import Worker, get_current_worker
 
-from . import actions, hardware, library, onboarding, tuner
+from . import actions, hardware, library, onboarding, planner, tuner
 from .actions import ActionError
 from .calibration import Calibration
 from .config import Config
@@ -804,6 +804,70 @@ class LlamaCtl(App):
         except LookupError as e:
             return self.fail(str(e))
         self.push_screen(TuneScreen(path, info, intent))
+
+    def offer_new_model(self, path: Path) -> None:
+        """A model file just arrived (a download): ask what it is for, store the preset, then offer next steps.
+
+        Opens the `IntentPicker` for the model. Choosing an intent stores the estimated preset
+        (active only when the model had none) and offers Serve / Tune / Done; cancelling the
+        picker leaves the model without a preset (it shows as ``New``). Header reading and
+        planning run in a worker.
+
+        Args:
+            path: The model file (first shard when split).
+        """
+        key = str(path)
+        host, cfg, cal = self.host, self.cfg, self.calibration
+
+        def work() -> tuple[ModelInfo, dict]:
+            info = self.infos.get(key) or self.read_header(path)
+            if info is None:
+                raise ActionError(f"cannot read the GGUF header of {path.name}")
+            return info, planner.plan_all(info, host, cfg.default_profile, cfg.headroom_pct, cal)
+
+        self.run_bg(work, label=f"Planning {path.stem}", group="new-model",
+                    done=lambda result: self._pick_for_new_model(path, *result))
+
+    def _pick_for_new_model(self, path: Path, info: ModelInfo, plans: dict) -> None:
+        """Plans are ready: show the intent picker for the new model (UI thread)."""
+        from .modelrows import default_intent_key, intent_rows
+        from .screens.after_download import DONE, SERVE, TUNE, AfterDownload
+        from .screens.intent_picker import IntentPicker
+
+        key = str(path)
+        self.infos[key] = info
+        ent = self.cfg.models.get(key)
+        rows = intent_rows(plans, ent, path, self.host, self.cfg.headroom_pct, self.calibration,
+                           self.build)
+        alias = self.alias_of(path)
+
+        def after(choice: str | None) -> None:
+            if choice not in (SERVE, TUNE, DONE):
+                return
+            if choice == SERVE:
+                self.serve_model(key, intent)
+            elif choice == TUNE:
+                self.open_tune(key, intent)
+
+        def picked(intent_key: str | None) -> None:
+            nonlocal intent
+            if not intent_key:
+                return self.say(f"{alias} is in your library without a preset (it shows as New).")
+            intent = intent_key
+            try:
+                chosen = actions.pick_preset(self.cfg, info, self.host, self.calibration,
+                                             intent_key, activate=self.cfg.preset(key) is None,
+                                             save=False)
+            except LookupError as e:
+                return self.fail(str(e))
+            self.presets_changed(key)
+            how = "planned just now" if chosen.created else "already there"
+            self.push_screen(AfterDownload(
+                f"{alias} is ready: {chosen.name} preset ({how}, estimated)."), after)
+
+        intent = ""
+        self.push_screen(IntentPicker(
+            alias, rows, default_intent_key(ent, plans, self.cfg.default_intent)), picked)
 
     def show_onboarding(self) -> None:
         """Open the guided setup (first run, or "Run setup again" in Settings)."""

@@ -428,7 +428,8 @@ Five views in a sidebar shell (shell, gauges and status bar carry over from v1):
 3. **Serving** - gateway models (loaded / sleeping / unloaded / failed) and standalone or
    attached servers in one table; log tail; load, unload, stop, attach, copy URL.
 4. **Discover** - Hugging Face search and download (carried over). File lists mark the largest
-   quant that fully fits the GPU for the default intent; after a download the intent picker opens.
+   quant whose weights fully fit the GPU (weights only, KV unknown); after a download the intent
+   picker opens.
 5. **Settings** - llama.cpp path, model dirs, gateway settings, headroom, HF token, default
    intent.
 
@@ -476,6 +477,20 @@ As built (Phase 6; Phase 7 additions follow):
 - **Settings** saves in place into `cfg.gateway`, rewrites the presets and reloads a running
   gateway; host, port, API key and models-max are command line options of the router, so
   changing them tells the user to restart it.
+
+**Discover** (Phase 7; `discover.py` is the pure part). The repo list sits above the file list so
+the file table has the full width. Each file is judged by its size alone, weights only
+(`planner.placeholder_info`: no KV cache is known before the download), so the label says so:
+`GPU (weights only)`, `GPU+CPU (weights only)`, `CPU (weights only)` or `NO`. Files are sorted
+largest first and the largest one whose verdict is `GPU` is marked `\u2605 best fit` (bold name, the
+cursor starts on it); with no GPU, or before the host is known, nothing is marked. A one-line legend
+under the table explains the marker and names the default intent (the verdict itself does not
+depend on the intent, since the context cache is not counted). Sharded models are one row: the first
+shard's path, the summed size and the part count (`hf.list_gguf` groups them already, and the
+download fetches every shard). After a download the library is rescanned, the header is read and
+`LlamaCtl.offer_new_model` opens the `IntentPicker`; picking stores the `estimated` preset (active
+only when the model had none) and the `AfterDownload` modal offers Serve / Tune / Done; cancelling the
+picker leaves the model as `New`. Search results are unchanged and cost no extra requests.
 
 **Onboarding** (Phase 7; `onboarding.py` is the pure step logic, `screens/onboarding.py` the shell).
 It opens over the shell when `onboarded` is false and again from Settings ("Run setup again", where

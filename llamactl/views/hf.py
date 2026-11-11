@@ -7,14 +7,15 @@ from pathlib import Path
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.widgets import DataTable, Input, Label, ProgressBar
 
-from .. import hf
-from ..config import Profile
-from ..fmt import human, params_str
+from rich.text import Text
+
+from .. import discover, hf
+from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import GGUFError, read_model_info
-from ..planner import estimate_budget, placeholder_info, verdict
+from ..intents import by_key
 from ..screens.prompt import PromptScreen
 from .base import BaseView
 
@@ -24,7 +25,12 @@ TOKEN_HINT = ("Create one at huggingface.co/settings/tokens (read access). Neede
 
 
 class HFView(BaseView):
-    """Search box, repo list (left), file list (right), download progress."""
+    """Search box, repo list (left), file list (right), download progress.
+
+    The file list judges each file by its size alone (weights only, the KV cache is unknown
+    before the download), sorts the largest first and marks the best fit for the default intent.
+    After a download the library is rescanned and the intent picker opens for the new model.
+    """
 
     BINDINGS = [
         Binding("slash", "focus_search", "Search"),
@@ -34,27 +40,31 @@ class HFView(BaseView):
     CSS = """
     #hf_q { margin: 0 1; }
     #hf_body { height: 1fr; }
-    #repos { width: 3fr; }
-    #files { width: 2fr; }
+    #repos { height: 1fr; }
+    #files { height: 2fr; }
     #hf_bar { margin: 0 1; display: none; }
     #hf_note { color: $text-muted; padding: 0 1; height: auto; }
+    #hf_legend { color: $text-muted; padding: 0 1; height: auto; }
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.token = hf.load_token()
         self.repos: list[dict] = []
-        self.files: list[dict] = []
+        self.files: list[dict] = []              # as listed by hf.list_gguf, in table order
+        self.fits: list[discover.FileFit] = []   # the same files, judged and sorted
         self.repo = ""
+        self._shown_host: tuple = ()
         self.cancel_ev = threading.Event()
         self.downloading = False
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="Search GGUF models on Hugging Face (Enter), e.g. qwen3 7b",
                     id="hf_q")
-        with Horizontal(id="hf_body"):
+        with Vertical(id="hf_body"):
             yield DataTable(id="repos", cursor_type="row")
             yield DataTable(id="files", cursor_type="row")
+        yield Label("", id="hf_legend")
         yield ProgressBar(id="hf_bar", total=100, show_eta=True)
         yield Label("", id="hf_note")
 
@@ -72,17 +82,20 @@ class HFView(BaseView):
         self.query_one("#hf_q", Input).focus()
 
     def on_host(self, host) -> None:
-        """Refresh the Fits cells for the fresh host snapshot."""
-        t = self.query_one("#files", DataTable)
-        for i, key in enumerate(t.rows):
-            if i < len(self.files):
-                t.update_cell(key, "fits", self._fits(self.files[i]["size"]))
+        """Judge the files again for the fresh host snapshot (the free memory moved or arrived)."""
+        if self.files and (self._host_sig(host) != self._shown_host):
+            self.fill_files(keep=True)
         self.refresh_status()
 
-    def _fits(self, size: int) -> str:
-        """Weights-only verdict for a remote file size."""
-        b = estimate_budget(placeholder_info(size), Profile(), self.app.host)
-        return verdict(b, self.app.host, self.app.cfg.headroom_pct)
+    @staticmethod
+    def _host_sig(host) -> tuple:
+        """What the verdicts depend on: devices, their totals and the RAM."""
+        return (tuple((d.id, d.total) for d in host.gpus), host.ram_total)
+
+    def _intent_label(self) -> str:
+        """Label of the default intent."""
+        return by_key[self.app.cfg.default_intent].label if self.app.cfg.default_intent in by_key \
+            else "Chat"
 
     def refresh_status(self, msg: str = "") -> None:
         tok = "token set" if self.token else "no token (public models only)"
@@ -162,14 +175,42 @@ class HFView(BaseView):
             return self.say_status(f"[red]{e}[/red]")
         self.app.ui(self.fill_files)
 
-    def fill_files(self) -> None:
+    def fill_files(self, keep: bool = False) -> None:
+        """Fill the file table: largest first, verdicts weights only, the best fit marked.
+
+        Args:
+            keep: Keep the cursor on the same file (a redraw for new hardware data).
+        """
         t = self.query_one("#files", DataTable)
+        host, pct = self.app.host, self.app.cfg.headroom_pct
+        by_path = {f["path"]: f for f in self.files}
+        was = self.fits[t.cursor_row].path if keep and t.row_count and self.fits else None
+        self.fits = discover.rank_files(self.files, host, pct)
+        self.files = [by_path[x.path] for x in self.fits]      # row i of the table is files[i]
+        self._shown_host = self._host_sig(host)
         t.clear()
-        for f in self.files:
-            t.add_row(f["path"], f["quant"], human(f["size"]), f["parts"], self._fits(f["size"]))
-        self.refresh_status(f"{len(self.files)} GGUF file(s) in {self.repo}"
-                            if self.files else f"No GGUF files in {self.repo}")
-        t.focus()
+        for x in self.fits:
+            t.add_row(Text(x.path, style="bold" if x.best else ""), x.quant, human(x.size), x.parts,
+                      self._fit_cell(x, discover.host_ready(host)))
+        best = next((i for i, x in enumerate(self.fits) if x.best), None)
+        want = next((i for i, x in enumerate(self.fits) if x.path == was), best or 0)
+        if self.fits:
+            t.move_cursor(row=want)
+        self.query_one("#hf_legend", Label).update(discover.legend(host, self._intent_label()))
+        if not keep:
+            self.refresh_status(f"{len(self.files)} GGUF file(s) in {self.repo}"
+                                if self.files else f"No GGUF files in {self.repo}")
+            t.focus()
+
+    @staticmethod
+    def _fit_cell(x: discover.FileFit, ready: bool) -> Text:
+        """The Fits cell: the weights-only verdict, plus the best-fit marker."""
+        if not ready:
+            return Text("detecting...", style="dim")
+        t = Text(x.label, style=FITS_STYLE.get(x.verdict, ""))
+        if x.best:
+            t.append(f"  \u2605 {discover.BEST_MARK}", style="bold green")
+        return t
 
     def start_download(self, path: str) -> None:
         if self.downloading:
@@ -210,5 +251,13 @@ class HFView(BaseView):
             self.app.ui(setattr, bar, "display", False)
 
     def _post_download(self, path: Path, info) -> None:
-        """Rescan models so the new file shows up in Models."""
+        """Rescan so the new file shows up in Models, then ask what the new model is for.
+
+        Args:
+            path: The downloaded model (first shard).
+            info: Its parsed header, None when it could not be read.
+        """
+        if info is not None:
+            self.app.infos[str(path)] = info
         self.app.rescan()
+        self.app.offer_new_model(path)
