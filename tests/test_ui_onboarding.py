@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Button, Checkbox, Input, Label, OptionList, Static
 
-from fakes import FakeGateway, FakeRunner, ok, plain, wait_for
+from fakes import FakeGateway, FakeRunner, ok, plain, sparse_copy, wait_for
 from llamactl.config import Config
 from llamactl.screens.onboarding import OnboardingScreen
 from llamactl.screens.tune import TuneScreen
@@ -198,14 +198,12 @@ async def test_no_models_offers_find_a_model_which_lands_on_discover(
         assert await wait_for(pilot, lambda: current(app) == "discover")
         assert Config.load().onboarded and gw.called("start") == []
 
-
 async def test_adding_a_folder_rescans_in_step_three(ui_env: SimpleNamespace, tmp_path: Path) -> None:
-    import shutil
 
     cfg = fresh(ui_env)
     extra = tmp_path / "extra"
     extra.mkdir()
-    shutil.copy(ui_env.add_model("seed.gguf"), extra / "other.gguf")
+    sparse_copy(ui_env.add_model("seed.gguf"), extra / "other.gguf")
     (ui_env.model_dir / "seed.gguf").unlink()
     app = make_app(ui_env, which=lambda name: None)
     async with app.run_test(size=SIZE) as pilot:

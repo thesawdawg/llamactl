@@ -18,6 +18,26 @@ from llamactl.sessions import Session
 URL = "http://127.0.0.1:8080"
 
 
+def sparse_copy(src: Path, dst: Path) -> Path:
+    """Copy a (sparse) test GGUF without materialising its padding: header bytes, then the same size.
+
+    `shutil.copy` writes every zero block, which filled the temp volume over a few hundred tests.
+
+    Args:
+        src: A synthetic GGUF whose header is within its first 64 KiB.
+        dst: Where to put the copy.
+
+    Returns:
+        `dst`.
+    """
+    with src.open("rb") as fh:
+        head = fh.read(1 << 16)
+    dst.write_bytes(head)
+    with dst.open("r+b") as fh:
+        fh.truncate(src.stat().st_size)
+    return dst
+
+
 def make_info(path: str | Path = "/m/qwen3.gguf", size: int = int(4e9), pooling: int = -1,
               ctx_train: int = 32768) -> ModelInfo:
     """A small dense model's metadata (about 4 GB of weights)."""

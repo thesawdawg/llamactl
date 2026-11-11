@@ -476,7 +476,8 @@ As built (Phase 6; Phase 7 additions follow):
   server too), later ones do not start, and the trials that finished are recorded.
 - **Settings** saves in place into `cfg.gateway`, rewrites the presets and reloads a running
   gateway; host, port, API key and models-max are command line options of the router, so
-  changing them tells the user to restart it.
+  changing them tells the user to restart it. The model-folder editor is the shared `FolderList` widget; "Run setup again"
+  opens the Onboarding screen.
 
 **Discover** (Phase 7; `discover.py` is the pure part). The repo list sits above the file list so
 the file table has the full width. Each file is judged by its size alone, weights only

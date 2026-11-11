@@ -1,16 +1,14 @@
 """Pilot tests: Discover's fit-aware file list and the post-download intent picker (fake HF)."""
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
-from textual.widgets import DataTable, Input, Label, OptionList
+from textual.widgets import DataTable, Label
 
-from fakes import FakeGateway, FakeRunner, ok, plain, wait_for
+from fakes import FakeGateway, FakeRunner, ok, plain, sparse_copy, wait_for
 from llamactl import hf
 from llamactl.config import Config
-from llamactl.gateway import LOADED
 from llamactl.hardware import Host
 from llamactl.screens.after_download import AfterDownload
 from llamactl.screens.intent_picker import IntentPicker
@@ -139,7 +137,7 @@ def fake_download(monkeypatch, gguf_file: Path, name: str = "newone.gguf") -> li
         calls.append((repo, paths, dest))
         dest.mkdir(parents=True, exist_ok=True)
         out = dest / Path(paths[0]).name
-        shutil.copy(gguf_file, out)
+        sparse_copy(gguf_file, out)
         progress(10, 10, out.name)
         return [out]
 
@@ -221,7 +219,7 @@ async def test_done_keeps_the_preset_and_tune_opens_the_tune_screen(
         path = str(ui_env.model_dir / "newone.gguf")
         assert app.cfg.preset(path, "chat").source == "estimated" and gw.called("load") == []
         # a second download of another file: Tune
-        shutil.copy(ui_env.model_dir / "newone.gguf", ui_env.model_dir / "other.gguf")
+        sparse_copy(ui_env.model_dir / "newone.gguf", ui_env.model_dir / "other.gguf")
         app.offer_new_model(ui_env.model_dir / "other.gguf")
         assert await wait_for(pilot, lambda: isinstance(app.screen, IntentPicker))
         await pilot.press("enter")

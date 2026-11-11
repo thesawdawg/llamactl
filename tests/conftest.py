@@ -149,10 +149,9 @@ def ui_env(isolated: SimpleNamespace, tmp_path: Path, gguf_file: Path) -> Simple
 
     Returns:
         Namespace with cfg_dir, model_dir, host, bin_dir, cfg (an onboarded Config using both folders) and
-        `add_model(name) -> Path`, which copies the synthetic GGUF into the model folder.
+        `add_model(name) -> Path`, which copies the synthetic GGUF (sparsely) into the model folder.
     """
-    import shutil
-
+    from fakes import sparse_copy
     from llamactl.config import Config
 
     bin_dir = tmp_path / "bin"
@@ -162,8 +161,7 @@ def ui_env(isolated: SimpleNamespace, tmp_path: Path, gguf_file: Path) -> Simple
 
     def add_model(name: str = "alpha.gguf") -> Path:
         dest = isolated.model_dir / name
-        shutil.copy(gguf_file, dest)
-        return dest
+        return sparse_copy(gguf_file, dest)
 
     return SimpleNamespace(cfg_dir=isolated.cfg_dir, model_dir=isolated.model_dir,
                            host=isolated.host, bin_dir=bin_dir, cfg=cfg, add_model=add_model)
