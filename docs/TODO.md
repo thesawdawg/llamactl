@@ -74,4 +74,4 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] Onboarding: "Reachable from other machines" option
 - [x] CLI: `--lan` / `--host` on `up` and `serve`; `llamactl config`
 - [x] README, CHANGELOG (0.2.0) and AGENTS.md updated
-- [ ] Manual: gateway on `0.0.0.0` answers on the LAN address
+- [x] Manual: gateway on `0.0.0.0` answers on the LAN address
