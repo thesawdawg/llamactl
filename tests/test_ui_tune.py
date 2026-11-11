@@ -166,6 +166,56 @@ async def test_closing_while_running_cancels_and_still_records(ui_env: SimpleNam
         assert app.is_running
 
 
+async def test_tune_result_is_saved_on_the_ui_thread(ui_env: SimpleNamespace, monkeypatch) -> None:
+    """The worker only searches: the config and tuning.json are written on the UI thread."""
+    from llamactl import tuner
+
+    m = ui_env.add_model()
+    threads: list[tuple[str, int]] = []
+    real = tuner.save_result
+
+    def spy(*a, **kw):
+        threads.append(("save", threading.get_ident()))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(tuner, "save_result", spy)
+    runner = FakeRunner(ok(41.0))
+    orig = runner.measure
+    runner.measure = lambda *a, **kw: (threads.append(("measure", threading.get_ident())),
+                                       orig(*a, **kw))[1]
+    gw = FakeGateway(ui_env.cfg, running=True)
+    app = make_app(ui_env, gateway=gw, runner=runner)
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(pilot, app)
+        ui_thread = threading.get_ident()
+        scr = await open_tune(pilot, app)
+        assert await wait_for(pilot, lambda: scr.state == "done")
+        kinds = dict(threads)
+        assert kinds["save"] == ui_thread and kinds["measure"] != ui_thread
+        assert ui_env.cfg.preset(str(m), "chat").source == "tuned"
+        assert gw.called("reload") and scr.outcome.reloaded
+        assert "re-read" in plain(scr.query_one("#t_summary", Static))
+
+
+def test_run_tune_without_save_touches_nothing(ui_env: SimpleNamespace) -> None:
+    from llamactl import actions, intents
+    from llamactl.calibration import Calibration
+    from fakes import make_host, make_info
+
+    m = ui_env.add_model()
+    cfg, gw = ui_env.cfg, FakeGateway(ui_env.cfg, running=True)
+    cal = Calibration()
+    info = make_info(m)
+    out = actions.run_tune(cfg, info, make_host(), intents.by_key["chat"], FakeRunner(ok()), cal,
+                           gw, save=False)
+    assert out.result.ok and not out.reloaded
+    assert cfg.preset(str(m), "chat") is None and not cal.trials and gw.called("reload") == []
+    assert not (ui_env.cfg_dir / "config.json").exists()
+    actions.apply_tune(cfg, info, out.result, cal)         # the explicit apply step
+    assert cfg.preset(str(m), "chat").source == "tuned" and cal.trials
+    assert actions.reload_after_tune(gw, out.result).reloaded
+
+
 async def test_preflight_refusal_offers_unload_and_retry(ui_env: SimpleNamespace) -> None:
     m = ui_env.add_model()
     host = ui_env.host

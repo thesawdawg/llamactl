@@ -197,6 +197,10 @@ class LlamaCtl(App):
         base = self.screen_stack[0] if self.screen_stack else None
         return not (self._closing or self._closed) and base is not None and base.is_running
 
+    def alive(self) -> bool:
+        """True while the app and its base screen can still be touched (not shutting down)."""
+        return self._alive()
+
     @property
     def base(self) -> Widget:
         """The base screen holding the shell (``self.screen`` may be a modal on top of it)."""

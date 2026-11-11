@@ -409,15 +409,90 @@ class TuneOutcome:
     reload_error: str = ""
 
 
+def search_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: tuner.Runner,
+                calibration: Calibration, *, trials: int = 4, force: bool = False,
+                progress: Callable[[tuner.TrialEvent], None] | None = None,
+                cancel: Callable[[], bool] | None = None) -> tuner.TuneResult:
+    """Preflight and search: the part of a tune that needs no write access to the config.
+
+    It only reads ``cfg.default_profile`` and ``cfg.headroom_pct``, so it may run on a worker
+    thread while the UI thread edits other parts of the config.
+
+    Args:
+        cfg: Config supplying the base profile and headroom.
+        info: Model metadata.
+        host: Host snapshot with current free memory.
+        intent: What to tune for.
+        runner: Launches and measures candidates.
+        calibration: Corrects the estimates (read only here).
+        trials: Most launches to make.
+        force: Skip the preflight memory check.
+        progress: Called with every trial event.
+        cancel: Polled between trials and by the runner during one; True stops the search.
+
+    Returns:
+        The tuner's result (nothing is saved).
+
+    Raises:
+        ActionError: When the preflight refuses (and `force` is off).
+    """
+    plan = plan_for(cfg, info, host, intent, calibration)
+    if not force and (refusal := tuner.preflight(plan, host)):
+        raise ActionError(refusal)
+    return tuner.tune(intent, info, host, cfg.default_profile, runner,
+                      headroom_pct=cfg.headroom_pct, calibration=calibration,
+                      max_trials=trials, progress=progress, cancel=cancel)
+
+
+def apply_tune(cfg: Config, info: ModelInfo, result: tuner.TuneResult,
+               calibration: Calibration) -> None:
+    """Record a tune's trials and store its winner as the model's tuned preset; save both files.
+
+    This is the step that writes ``tuning.json``, mutates the config and saves it. A front end
+    with a UI thread runs it there, never on the worker that searched.
+
+    Args:
+        cfg: Config to update and save.
+        info: Model metadata.
+        result: What `search_tune` returned.
+        calibration: Store receiving the trials.
+
+    Raises:
+        OSError: When tuning.json or the config cannot be written.
+    """
+    if result.trials or result.ok:
+        tuner.save_result(cfg, info.path, result, calibration)
+
+
+def reload_after_tune(gw: Gateway, result: tuner.TuneResult) -> TuneOutcome:
+    """Tell a running gateway to re-read the presets after a successful tune.
+
+    Args:
+        gw: The gateway.
+        result: The tune's result.
+
+    Returns:
+        The outcome; ``reloaded`` or ``reload_error`` is set when a reload was attempted.
+    """
+    if not result.ok or not gw.running:
+        return TuneOutcome(result)
+    try:
+        gw.reload()
+    except GatewayError as e:
+        return TuneOutcome(result, False, str(e))
+    return TuneOutcome(result, True)
+
+
 def run_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: tuner.Runner,
              calibration: Calibration, gw: Gateway, *, trials: int = 4, force: bool = False,
              progress: Callable[[tuner.TrialEvent], None] | None = None,
-             cancel: Callable[[], bool] | None = None) -> TuneOutcome:
+             cancel: Callable[[], bool] | None = None, save: bool = True) -> TuneOutcome:
     """Tune a model for an intent end to end: preflight, search, save, reload the gateway.
 
     Trials are recorded in ``tuning.json`` even when the tune failed or was cancelled; a
     successful winner is stored as the model's tuned preset; a running gateway then re-reads
-    the presets.
+    the presets. With ``save=False`` only the search runs (`search_tune`): the caller applies
+    the result itself, on the right thread, with `apply_tune` and `reload_after_tune`.
 
     Args:
         cfg: Config to update and save.
@@ -430,30 +505,22 @@ def run_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: t
         trials: Most launches to make.
         force: Skip the preflight memory check.
         progress: Called with every trial event.
-        cancel: Polled between trials; True stops the search.
+        cancel: Polled between trials and by the runner during one; True stops the search.
+        save: Save the result and reload the gateway (the CLI); off for the TUI worker.
 
     Returns:
         The outcome.
 
     Raises:
         ActionError: When the preflight refuses (and `force` is off).
-        OSError: When tuning.json or the config cannot be written.
+        OSError: When tuning.json or the config cannot be written (only with `save`).
     """
-    plan = plan_for(cfg, info, host, intent, calibration)
-    if not force and (refusal := tuner.preflight(plan, host)):
-        raise ActionError(refusal)
-    result = tuner.tune(intent, info, host, cfg.default_profile, runner,
-                        headroom_pct=cfg.headroom_pct, calibration=calibration,
-                        max_trials=trials, progress=progress, cancel=cancel)
-    if result.trials or result.ok:
-        tuner.save_result(cfg, info.path, result, calibration)
-    if not result.ok or not gw.running:
+    result = search_tune(cfg, info, host, intent, runner, calibration, trials=trials,
+                         force=force, progress=progress, cancel=cancel)
+    if not save:
         return TuneOutcome(result)
-    try:
-        gw.reload()
-    except GatewayError as e:
-        return TuneOutcome(result, False, str(e))
-    return TuneOutcome(result, True)
+    apply_tune(cfg, info, result, calibration)
+    return reload_after_tune(gw, result)
 
 
 # --------------------------------------------------------------------------- hints

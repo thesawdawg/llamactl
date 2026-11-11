@@ -32,7 +32,7 @@ ERRORS = (GatewayError, ActionError, LookupError, ValueError, OSError)
 ELAPSED_EVERY = 1.0          # seconds between progress line refreshes while running
 OUTCOME_WIDTH = 60           # characters of an error shown in the outcome column
 
-CHECKING, REFUSED, RUNNING, DONE = "checking", "refused", "running", "done"
+CHECKING, REFUSED, RUNNING, SAVING, DONE = "checking", "refused", "running", "saving", "done"
 
 
 def split_summary(summary: str) -> tuple[str, str]:
@@ -116,9 +116,11 @@ def summary_text(plan: Plan, outcome: TuneOutcome, active: bool) -> Text:
 class TuneScreen(ModalScreen[str | None]):
     """Tune a model for an intent: pre-flight, live trial table, summary.
 
-    The search runs in a worker that outlives the screen: closing while it runs cancels it
-    (the trial in flight is stopped too) and the trials so far are still recorded and the app refreshed.
-    Dismisses with "used" (made active), "kept" or None.
+    The search runs in a worker that outlives the screen: closing while it runs cancels it (the
+    trial in flight is stopped too) and the trials that finished are still recorded and the app
+    refreshed. The worker only searches; the config and tuning.json are written on the UI
+    thread when it returns (`actions.apply_tune`), and the gateway reload that follows runs in a
+    second worker. Dismisses with "used" (made active), "kept" or None.
 
     Args:
         model: Model path.
@@ -289,21 +291,21 @@ class TuneScreen(ModalScreen[str | None]):
 
         def work() -> tuple[TuneOutcome | None, str]:
             try:
-                return actions.run_tune(
+                outcome = actions.run_tune(
                     a.cfg, self.info, host, self.intent, a.runner_factory(), a.calibration,
                     a.gateway, trials=self.trials, force=force,
-                    progress=lambda e: a.ui(self._event, e), cancel=cancel.is_set), ""
+                    progress=lambda e: a.ui(self._event, e), cancel=cancel.is_set, save=False)
             except ERRORS as e:
                 return None, str(e)
+            if not a.alive():          # quitting: nobody is editing the config any more, so keep
+                try:                   # the finished trials now; `done` will not run
+                    actions.apply_tune(a.cfg, self.info, outcome.result, a.calibration)
+                except OSError:
+                    pass
+            return outcome, ""
 
         def done(result: tuple[TuneOutcome | None, str]) -> None:
-            outcome, error = result
-            if outcome is not None:        # trials and the winner were saved: refresh every view
-                a.presets_changed(path, save=False, reload=False)
-            if error:
-                a.fail(f"Tune {a.alias_of(path)}: {error}")
-            if self.is_attached:
-                self._finished(outcome, error)
+            self._searched(*result)
 
         def always() -> None:
             a.cancel_flags.discard(cancel)
@@ -311,6 +313,49 @@ class TuneScreen(ModalScreen[str | None]):
                 self._finished(None, "the tune did not finish; see the message in the status bar")
 
         a.run_bg(work, label=f"Tuning {a.alias_of(path)}", group="tune", done=done, always=always)
+
+    def _searched(self, outcome: TuneOutcome | None, error: str) -> None:
+        """The search ended (UI thread): save its result, refresh the app, reload the gateway.
+
+        Args:
+            outcome: What the worker returned, None when it failed.
+            error: Why it failed, "".
+        """
+        a, path = self.app, self.model
+        if outcome is not None:
+            try:
+                actions.apply_tune(a.cfg, self.info, outcome.result, a.calibration)
+            except OSError as e:
+                error = f"cannot save the tune: {e}"
+            a.presets_changed(path, save=False, reload=False)     # trials and winner are in
+        if error:
+            a.fail(f"Tune {a.alias_of(path)}: {error}")
+        if outcome is not None and not error and outcome.result.ok and a.gateway.running:
+            return self._reload(outcome)
+        if self.is_attached:
+            self._finished(outcome, error)
+
+    def _reload(self, outcome: TuneOutcome) -> None:
+        """Have a running gateway re-read the presets in a worker, then show the summary."""
+        a = self.app
+        self.state = SAVING
+        self._buttons()
+
+        def work() -> TuneOutcome:
+            with a._gw_lock:
+                return actions.reload_after_tune(a.gateway, outcome.result)
+
+        def done(reloaded: TuneOutcome) -> None:
+            if self.is_attached:
+                self._finished(reloaded, "")
+
+        def always() -> None:
+            a.refresh_serving()
+            if self.is_attached and self.state == SAVING:         # the reload worker died
+                self._finished(outcome, "")
+
+        a.run_bg(work, label="Updating the gateway presets", group="reload", done=done,
+                 always=always)
 
     def _event(self, e: tuner.TrialEvent) -> None:
         """A trial started or finished: update its row and the progress line."""

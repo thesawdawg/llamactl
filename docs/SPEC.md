@@ -402,7 +402,8 @@ As built:
   `store_plan`, `pick_preset` (plan and store an `estimated` preset only when it is missing),
   `served_name` (`alias`, or `alias@preset` for a non-active preset), `ensure_gateway`,
   `serve_gateway`, `wait_loaded`, `wait_unloaded`, `wait_server_ready`, `run_tune` (preflight,
-  search, save, reload the gateway) and `curl_snippet`.
+  search, save, reload the gateway; built from `search_tune`, `apply_tune` and `reload_after_tune`,
+  and `save=False` runs only the search) and `curl_snippet`.
 - `hw`, `ls`, `plan` (without `--save`), `ps` and `logs` never write the config or a state file
   (`Services(read_only=True)`: no GGUF cache writes, `sessions.json` and `gateway.json` untouched).
   Commands that save the config perform the v2 -> v3 migration and its backup.
@@ -466,7 +467,10 @@ Phase 7):
 - **Next steps** are `suggest.next_steps` (pure): llama-server missing, no models, models without
   presets, estimated active presets (tune), stale tuned presets (re-tune), gateway stopped while
   presets exist (start). At most three per rule.
-- **TuneScreen** runs `actions.run_tune` in a worker that outlives the screen. Cancel and closing
+- **TuneScreen** runs `actions.run_tune(save=False)` (search only) in a worker that outlives the
+  screen; the result is applied on the UI thread (`actions.apply_tune`: trials, preset, saves) and the
+  gateway reload (`actions.reload_after_tune`) runs in a second worker under the gateway lock. When
+  the app is already quitting the worker applies the result itself. Cancel and closing
   set the cancel flag, which the tuner polls between trials and `ServerRunner.measure` polls
   while it waits for `/health` and before the benchmark: the trial in flight is stopped (its
   server too), later ones do not start, and the trials that finished are recorded.
