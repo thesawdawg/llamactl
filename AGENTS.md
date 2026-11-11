@@ -7,7 +7,7 @@ Python 3.14 venv at `.venv`.
 
 ```sh
 .venv/bin/python -m llamactl            # the TUI
-.venv/bin/python -m llamactl ls         # CLI: hw, ls, plan, tune, serve, up, down, ps, load, unload, stop, logs
+.venv/bin/python -m llamactl ls         # CLI: hw, ls, plan, tune, serve, up, down, config, ps, load, unload, stop, logs
 ```
 
 For manual runs, point the state directory at a scratch folder so the real one is never

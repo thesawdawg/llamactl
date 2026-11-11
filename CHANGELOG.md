@@ -38,6 +38,12 @@ Design: `docs/SPEC.md`.
   `pooling` and `threads_batch`; embedding models are recognised from the GGUF pooling type
   (`e42459d`, `24f7eba`).
 - `LLAMACTL_HOME` and `XDG_CONFIG_HOME` choose the state directory (`ef69d94`).
+- Network access: Settings has a "Listen on" choice (This machine, Local network, Custom
+  address) with a line of client URLs, a no-API-key warning and a Generate button; the setup has
+  a "Reachable from other machines" option; `up` and `serve` take `--lan` or `--host ADDR` for
+  one start; `llamactl config` shows and changes the gateway and planning settings and can
+  make an API key (`--new-api-key`). Servers listening on `0.0.0.0` are shown with every LAN
+  address instead of `0.0.0.0`, and WSL2 networking notes are printed for an exposed bind.
 
 ### Changed
 

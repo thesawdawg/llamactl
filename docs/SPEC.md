@@ -420,6 +420,38 @@ local network is a first-class path, not a hidden text field. Loopback stays the
     `--new-api-key` generates, saves and prints a key once.
   - Changing a restart field while the gateway runs says that `down` and `up` apply it.
 
+As built (Phase 9):
+
+- `network.bind_mode` is `local` only for exactly `127.0.0.1`; `localhost`, `::1`, `::` and any
+  interface address are `custom` (`is_exposed` still tells them apart). Wildcards are `0.0.0.0`,
+  `::`, `[::]` and the empty string.
+- The three machine lookups are module functions (`read_ip_output`, `route_address`,
+  `read_osrelease`, `read_wslinfo`); `lan_addresses` and `wsl_mode` also take them as
+  arguments, and only a call without arguments is cached (`reset_cache`). The test suite replaces
+  them for every test. In `wsl_mode`, a `wslinfo` answer other than `mirrored` or `nat` is
+  `unknown`, and without `wslinfo` the mode is `nat` only for a `172.16/12` address on `eth0`.
+- A wildcard bind is still probed over loopback, so `GatewayState.url`, `GatewayStatus.url` and
+  `Session.url` stay loopback URLs. The listen address is stored next to them
+  (`GatewayState.host`, `GatewayStatus.host`, `Session.host`; old files without it mean the
+  configured host) and `network.client_urls_for(url, host)` makes the client URLs.
+- `--lan` / `--host` set `Gateway.host_override` (`actions.ensure_gateway(host=)`) or pass
+  `host=` to `SessionStore.launch_server`; nothing is written to the config. The bind-conflict
+  check compares the address stored in `gateway.json` with the one asked for.
+- `config` keys are parsed and validated in `cfgedit.py` (pure); `config` without arguments is a
+  read-only command. JSON output has `gateway`, `default_intent`, `headroom_pct`, `urls`,
+  `exposed`, `warnings`, `notes`, and `new_api_key` after `--new-api-key`. The key is masked as
+  `********` everywhere else. `gateway.api_key=` (empty) clears the key; giving it together with
+  `--new-api-key` is a usage error.
+- The warning and the WSL notes go to stderr in the CLI (`warning:` / `note:`) and to a warning
+  notification in the TUI (when a start created the server), plus a permanent line in the Home
+  card and the Settings URL line.
+- Settings keeps the old Host input as the "Custom address" input beside the "Listen on" select;
+  the Generate button shows the key (it un-hides the field) and copies it. The PresetEditor's
+  Host field gets the same select above its input.
+- Onboarding's checkbox starts checked when the gateway is already `0.0.0.0` (re-running setup);
+  unchecking it then goes back to `127.0.0.1`, while a custom address is left alone. Finishing
+  with it checked shows the generated key once in the result pane.
+
 ## 8. CLI (`cli.py`)
 
 `llamactl` with no arguments opens the TUI. Subcommands (all accept `--json` where they print

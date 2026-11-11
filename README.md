@@ -59,8 +59,9 @@ uv sync --extra dev
    found, "Find a model" opens Discover.
 4. **Purpose.** The intent you will use most (it becomes the default) and, optionally, a first
    model.
-5. **Finish.** Optionally tune the model now and start the gateway. The endpoint URL, model
-   name and a `curl` command are shown at the end.
+5. **Finish.** Optionally tune the model now, start the gateway, and make it reachable from
+   other machines (off by default; see [Serving on your network](#serving-on-your-network)).
+   The endpoint URL, model name and a `curl` command are shown at the end.
 
 Every step can be skipped. "Run setup again" in Settings repeats it.
 
@@ -93,8 +94,9 @@ stem. Commands that print data accept `--json`. Exit codes: 0 success, 1 runtime
 | `llamactl ls` | models with the plan per intent and their presets |
 | `llamactl plan MODEL [--for INTENT] [--all] [--save [--force]]` | show the plan and reasons; changes nothing unless `--save` |
 | `llamactl tune MODEL [--for INTENT] [--trials N] [--force]` | measure candidates and save the best as the preset |
-| `llamactl serve MODEL [--for INTENT] [--standalone [--port P]] [--no-wait] [--no-activate]` | create a preset if missing, then serve it |
-| `llamactl up` / `llamactl down` | start / stop the gateway |
+| `llamactl serve MODEL [--for INTENT] [--standalone [--port P]] [--lan \| --host ADDR] [--no-wait] [--no-activate]` | create a preset if missing, then serve it |
+| `llamactl up [--lan \| --host ADDR]` / `llamactl down` | start / stop the gateway |
+| `llamactl config [KEY=VALUE ...] [--new-api-key]` | show or change the gateway and planning settings |
 | `llamactl ps` | gateway models and standalone servers with their state |
 | `llamactl load NAME` / `llamactl unload NAME` | load / unload a model in the gateway |
 | `llamactl stop [NAME \| --all]` | stop standalone servers (never the gateway) |
@@ -111,12 +113,15 @@ llamactl tune qwen3-8b --for agent    # launch, measure, save the best preset
 llamactl serve qwen3-8b --for agent   # start the gateway if needed, load the model
 llamactl serve qwen3-8b --for speed --no-activate   # also served as qwen3-8b@speed
 llamactl serve qwen3-8b --standalone --port 8090    # own server, not the gateway
+llamactl up --lan                     # gateway on the local network, this start only
+llamactl config gateway.host=lan --new-api-key      # make that permanent, with a key
 llamactl ps
 llamactl logs gateway -f
 llamactl down
 ```
 
-`hw`, `ls`, `plan` (without `--save`), `ps` and `logs` never write state.
+`hw`, `ls`, `plan` (without `--save`), `ps`, `logs` and `config` without arguments never write
+state.
 `tune` prints one line per trial to stderr; Ctrl-C stops the running trial and keeps the
 trials so far.
 
@@ -147,13 +152,60 @@ Leave out the `Authorization` header when no key is set. For an `embed` preset, 
 A standalone server (`serve --standalone`) has its own URL, shown by `llamactl ps`, and
 serves one model.
 
+## Serving on your network
+
+Everything listens on `127.0.0.1` (this machine only) until you change it. To serve chat
+frontends or agents on other machines, the gateway has to listen on the network:
+
+```bash
+llamactl config gateway.host=lan --new-api-key   # save "listen on every interface" and a key
+llamactl up                                      # (or: llamactl up --lan, for this start only)
+```
+
+`gateway.host` takes `local` (`127.0.0.1`), `lan` (`0.0.0.0`) or any other address. In the TUI
+it is the "Listen on" choice in Settings (This machine, Local network, Custom address); under
+it a line shows the URLs clients will use, a warning when there is no API key, and the Generate
+button makes and copies a key. The setup's last step has a "Reachable from other machines"
+checkbox that does the same. A standalone server's host has the same three choices in the
+preset editor.
+
+- **Client URLs.** A server listening on `0.0.0.0` is shown as one URL per address: loopback
+  and each of this machine's LAN addresses (container bridges such as `docker0` and link-local
+  `169.254.x.x` addresses are left out), for example `http://192.168.1.20:8080/v1`. Home,
+  Serving, `up`, `serve`, `ps` (`urls` in `--json`) and the `curl` snippet show them; the snippet
+  uses the first LAN URL. `0.0.0.0` is never shown as an address.
+- **API key.** With no key, anyone who can reach the port can use the server and the models on
+  it. Starting an exposed gateway or standalone server without a key prints a warning (and
+  shows one in the TUI) but still starts. `llamactl config --new-api-key` makes a key, saves it
+  and prints it once; `llamactl config` and the TUI never show it again. Clients send
+  `Authorization: Bearer KEY`.
+- **`--lan` and `--host ADDR`** on `up` and `serve` (mutually exclusive) apply to that start
+  only and are never saved. If the gateway is already running with another bind they fail and
+  tell you to run `llamactl down` first. `serve --standalone` takes the same flags for that
+  server.
+- **Changing the bind of a running gateway** needs `llamactl down` and `llamactl up`; saving
+  the new host does not move a process that is already listening.
+- **WSL2.** With the default NAT networking other machines cannot reach a server in WSL at all;
+  use `networkingMode=mirrored` in `.wslconfig` or forward the port on Windows with
+  `netsh interface portproxy`. With mirrored networking the Hyper-V firewall may still block
+  inbound connections until a rule allows the port (`New-NetFirewallHyperVRule`, run in
+  PowerShell as administrator). llamactl detects WSL and prints these notes next to an exposed
+  bind in Settings, `up` and `config`.
+- **Other firewalls.** llamactl does not touch the host firewall; open the port yourself if
+  one is running.
+
+`llamactl config` shows and changes `gateway.host`, `gateway.port`, `gateway.api_key`,
+`gateway.models_max`, `gateway.sleep_idle`, `gateway.autostart`, `default_intent` and
+`headroom_pct`. All `KEY=VALUE` pairs are checked before any is saved. Gateway settings except
+`autostart` reach a running gateway only after `down` and `up`.
+
 ## The TUI
 
 Five views in a sidebar. `1` to `5` switch views, `r` rescans models, `q` quits.
 
 | View | Shows | Keys |
 |------|-------|------|
-| 1 Home | devices, gateway state and endpoint, what is loaded, next steps | `u` start gateway, `d` stop it, `y` copy base URL, `c` copy `curl` |
+| 1 Home | devices, gateway state and endpoint URLs, what is loaded, next steps | `u` start gateway, `d` stop it, `y` copy base URL, `c` copy `curl` |
 | 2 Models | models with size, quant, best intent, active preset, measurements; per-intent detail | Enter serve, `s` standalone, `t` tune, `p` plan, `e` edit preset, `a` set active, Delete remove preset, `D` default profile |
 | 3 Serving | gateway models and standalone or attached servers, with a log tail | `l` load, `x` unload, `s` stop standalone, `u`/`d` gateway up/down, `a` attach a URL, `o` full log, `y` copy URL, `c` copy `curl` |
 | 4 Discover | Hugging Face search and download; GGUF files marked by whether the weights fit | `/` search, Enter search / list files / download, `k` set token, `x` cancel download |
@@ -176,7 +228,7 @@ directory to try llamactl without touching your real setup.
 |------|-------|
 | `config.json` | settings, default profile, per-model aliases and presets, gateway settings |
 | `gateway.ini` | router presets, generated from the config |
-| `gateway.json` | pid and URL of a running gateway |
+| `gateway.json` | pid, URL and listen address of a running gateway |
 | `sessions.json` | standalone and attached servers |
 | `tuning.json` | every measured trial, used to correct estimates |
 | `gguf_cache.json` | parsed GGUF headers |
