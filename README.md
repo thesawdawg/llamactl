@@ -1,106 +1,216 @@
 # llamactl
 
-A terminal UI for launching, monitoring and chatting with local llama.cpp
-servers. It scans your model directories, parses GGUF headers, estimates memory
-budgets, recommends launch profiles and manages running servers.
+A server manager for [llama.cpp](https://github.com/ggml-org/llama.cpp), with a terminal UI
+and a headless command line over the same core. You pick what a model is for, llamactl works
+out settings for your hardware, and the model is served from one OpenAI-compatible endpoint
+that chat frontends and agent harnesses connect to.
+
+llamactl does not include a chat client. It starts and manages servers; use any client that
+speaks the OpenAI API to talk to them.
+
+How it works:
+
+1. **Plan.** You choose an intent (chat, agent, context, speed, api, embed). The planner
+   estimates context size, KV cache type, GPU offload and threads from the model's GGUF header
+   and the devices llama.cpp reports (`llama-server --list-devices`, so any backend it
+   supports). Each setting comes with a one-line reason.
+2. **Tune (optional).** `tune` launches the model with candidate settings, measures memory and
+   tokens per second, keeps the best result and uses the measurements to correct later
+   estimates on this machine.
+3. **Serve.** Models are served by one `llama-server` in router mode (the gateway). Each model
+   loads on demand. Standalone servers on their own port are also available.
 
 ## Requirements
 
-- Python 3.11+
-- A llama.cpp build (llama-server / llama-cli on disk)
-- NVIDIA GPU optional (CPU-only hosts work; recommendations adapt)
+- Python 3.11 or newer (CI covers 3.11 to 3.14; development uses 3.14).
+- A llama.cpp build whose `llama-server` supports router mode (`--models-preset`,
+  `--models-max`) and `--list-devices`. llamactl is checked against 0.5.0-dev (commit
+  `5fc4f3c`). llamactl does not download or build llama.cpp.
+- Linux is the main target. macOS is best effort.
 
-## Install and run
+## Install
 
-Install the published package in an isolated environment with [uv](https://docs.astral.sh/uv/):
+The PyPI package is named `llama-tui`; the command and the Python module are `llamactl`.
 
 ```bash
 uv tool install llama-tui
 llamactl
 ```
 
-Or use pip in a virtual environment: `python -m pip install llama-tui`.
-llama.cpp binaries and model files are not bundled; configure their paths in Settings.
-The PyPI distribution is named `llama-tui`; the command and Python module remain
-`llamactl`. The published installation commands become available after the first
-PyPI release.
+Or with pip in a virtual environment: `python -m pip install llama-tui`.
 
-### Develop from source
+To run from a source checkout:
+
+```bash
+uv sync --extra dev
+.venv/bin/python -m llamactl            # the TUI
+.venv/bin/python -m llamactl ls         # any subcommand
+.venv/bin/pytest -q                     # tests
+```
+
+## First run
+
+`llamactl` with no arguments opens the TUI. On the first run a five-step setup opens:
+
+1. **llama.cpp.** It looks in the configured folder (default `~/llama.cpp/build/bin`), then
+   for `llama-server` on `PATH`, and shows the build. You can enter another folder.
+2. **Hardware.** Devices, RAM, CPU, and a sentence on the largest model file that fits.
+3. **Models.** The folders to scan for `.gguf` files (default `~/models`). With no models
+   found, "Find a model" opens Discover.
+4. **Purpose.** The intent you will use most (it becomes the default) and, optionally, a first
+   model.
+5. **Finish.** Optionally tune the model now and start the gateway. The endpoint URL, model
+   name and a `curl` command are shown at the end.
+
+Every step can be skipped. "Run setup again" in Settings repeats it.
+
+## Intents
+
+An intent states what the model is for. Context sizes are per slot.
+
+| Intent | For | Context (min / target / max) | Slots | Notes |
+|--------|-----|------------------------------|-------|-------|
+| `chat` | interactive chat frontends | 8k / 16k / 32k | 1 | q8_0 KV cache only if needed; stays on the GPU |
+| `agent` | coding agents and tool harnesses | 32k / 64k / 128k | 1 | prefers q8_0 KV cache; may spill to CPU; prompt cache reuse (256) |
+| `context` | the largest usable window | 32k / trained / trained | 1 | prefers q8_0 KV cache; may spill to CPU |
+| `speed` | highest tokens per second | 4k / 8k / 16k | 1 | f16 KV cache only; stays on the GPU |
+| `api` | several concurrent clients | 4k / 8k / 16k | 4 | q8_0 KV cache only if needed; stays on the GPU; metrics on |
+| `embed` | embedding models | trained | 4 | embeddings-only server; f16 KV cache only |
+
+`embed` applies only to models whose GGUF declares a pooling type; the other intents apply
+only to models that do not. A model can hold several presets (one per intent, plus edited
+ones); one is active.
+
+## Command line
+
+Models are named by alias, file stem or unique substring. The alias is the lower-cased file
+stem. Commands that print data accept `--json`. Exit codes: 0 success, 1 runtime failure,
+2 usage error or unknown/ambiguous model.
+
+| Command | Does |
+|---------|------|
+| `llamactl hw` | devices, RAM, CPU, calibration and the llama.cpp build |
+| `llamactl ls` | models with the plan per intent and their presets |
+| `llamactl plan MODEL [--for INTENT] [--all] [--save [--force]]` | show the plan and reasons; changes nothing unless `--save` |
+| `llamactl tune MODEL [--for INTENT] [--trials N] [--force]` | measure candidates and save the best as the preset |
+| `llamactl serve MODEL [--for INTENT] [--standalone [--port P]] [--no-wait] [--no-activate]` | create a preset if missing, then serve it |
+| `llamactl up` / `llamactl down` | start / stop the gateway |
+| `llamactl ps` | gateway models and standalone servers with their state |
+| `llamactl load NAME` / `llamactl unload NAME` | load / unload a model in the gateway |
+| `llamactl stop [NAME \| --all]` | stop standalone servers (never the gateway) |
+| `llamactl logs NAME [-f] [-n LINES]` | print or follow a log; `NAME` is `gateway` or a server |
+
+Examples:
+
+```bash
+llamactl hw                           # what llama.cpp can offload to
+llamactl ls                           # what fits, per intent
+llamactl plan qwen3-8b --for agent    # settings and the reason for each
+llamactl plan qwen3-8b --all          # compare every applicable intent
+llamactl tune qwen3-8b --for agent    # launch, measure, save the best preset
+llamactl serve qwen3-8b --for agent   # start the gateway if needed, load the model
+llamactl serve qwen3-8b --for speed --no-activate   # also served as qwen3-8b@speed
+llamactl serve qwen3-8b --standalone --port 8090    # own server, not the gateway
+llamactl ps
+llamactl logs gateway -f
+llamactl down
+```
+
+`hw`, `ls`, `plan` (without `--save`), `ps` and `logs` never write state.
+`tune` prints one line per trial to stderr; Ctrl-C stops the running trial and keeps the
+trials so far.
+
+## Connecting a client
+
+The gateway listens on `127.0.0.1:8080` by default. Change host, port and the API key in
+Settings.
+
+- **Base URL:** `http://127.0.0.1:8080/v1`
+- **Model name:** the alias (`qwen3-8b`) for a model's active preset, or `alias@intent`
+  (`qwen3-8b@agent`) for another preset. `llamactl ps` lists the names.
+- **API key:** none by default. If one is set in Settings, send `Authorization: Bearer KEY`.
+- A model that is not loaded is loaded when a request names it. With the default
+  `models_max` of 1, loading a second model unloads the first. Idle models go to sleep (and
+  free their memory) after 600 seconds; Settings changes this.
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -d '{"model": "qwen3-8b", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Leave out the `Authorization` header when no key is set. For an `embed` preset, call
+`/v1/embeddings` with `{"model": ..., "input": ...}`. Home and Serving show a ready-made
+`curl` command (`c` copies it).
+
+A standalone server (`serve --standalone`) has its own URL, shown by `llamactl ps`, and
+serves one model.
+
+## The TUI
+
+Five views in a sidebar. `1` to `5` switch views, `r` rescans models, `q` quits.
+
+| View | Shows | Keys |
+|------|-------|------|
+| 1 Home | devices, gateway state and endpoint, what is loaded, next steps | `u` start gateway, `d` stop it, `y` copy base URL, `c` copy `curl` |
+| 2 Models | models with size, quant, best intent, active preset, measurements; per-intent detail | Enter serve, `s` standalone, `t` tune, `p` plan, `e` edit preset, `a` set active, Delete remove preset, `D` default profile |
+| 3 Serving | gateway models and standalone or attached servers, with a log tail | `l` load, `x` unload, `s` stop standalone, `u`/`d` gateway up/down, `a` attach a URL, `o` full log, `y` copy URL, `c` copy `curl` |
+| 4 Discover | Hugging Face search and download; GGUF files marked by whether the weights fit | `/` search, Enter search / list files / download, `k` set token, `x` cancel download |
+| 5 Settings | llama.cpp folder, model folders, default intent, gateway, headroom, Hugging Face token | Ctrl+S save |
+
+In the preset editor: Ctrl+S saves, Esc cancels, F1 explains the field, F2 applies the plan,
+Ctrl+R resets the field.
+
+Enter on a model with one preset serves it; with none or several it opens an intent picker.
+A picked intent that is not the model's active preset is served as `alias@intent`.
+After a download, the intent picker opens for the new model.
+
+## Where state lives
+
+All state is in one directory, chosen in this order: `$LLAMACTL_HOME`, then
+`$XDG_CONFIG_HOME/llamactl`, then `~/.config/llamactl`. Set `LLAMACTL_HOME` to a scratch
+directory to try llamactl without touching your real setup.
+
+| File | Holds |
+|------|-------|
+| `config.json` | settings, default profile, per-model aliases and presets, gateway settings |
+| `gateway.ini` | router presets, generated from the config |
+| `gateway.json` | pid and URL of a running gateway |
+| `sessions.json` | standalone and attached servers |
+| `tuning.json` | every measured trial, used to correct estimates |
+| `gguf_cache.json` | parsed GGUF headers |
+| `hf_token` | Hugging Face access token (the `HF_TOKEN` environment variable also works) |
+| `logs/` | server logs |
+
+The gateway and standalone servers keep running when the TUI closes.
+
+## Upgrading from 0.1.x
+
+The first run of 0.2 reads a 0.1.x `config.json` (config version 2) and saves it as version 3:
+
+- Each model's saved profile becomes a preset named `custom`, marked as edited and active.
+- The old file is copied to `config.v2.bak.json` once, before the first save.
+- Folders and settings carry over. `seen.json` is no longer used.
+- Commands that only read (`hw`, `ls`, `plan`, `ps`, `logs`) do not migrate or write.
+
+Use `plan`, `tune` or the Models view to add intent presets next to `custom`.
+
+## Removed in 0.2
+
+- The built-in chat screen. Connect a frontend to the gateway instead.
+- The `llama-cli` launch mode. Only `llama-server` is run.
+- Launch modes, and the per-model recommendation prompts. The planner replaces them: it
+  starts from an intent and shows its reasons.
+
+## Development
 
 ```bash
 uv sync --extra dev --locked
-uv run --locked python -m llamactl
-uv run --locked pytest -q
+.venv/bin/pytest -q
 uv build
 ```
 
-Version: **0.1.3** (development release). See [CHANGELOG.md](CHANGELOG.md)
-and [release instructions](docs/RELEASING.md) for Semantic Versioning and PyPI setup.
-
-## Keyboard cheat-sheet
-
-Global: `1-4` switch view, `r` rescan models, `q` quit. Enter on the sidebar
-also activates a view.
-
-### Models
-
-| Key | Action |
-|-----|--------|
-| Enter / l | Launch llama-server |
-| c | Chat in llama-cli |
-| e | Edit profile |
-| d | Edit default profile |
-| F2 / R | Recommended profile |
-| Delete | Delete the model's profile |
-
-### Sessions
-
-| Key | Action |
-|-----|--------|
-| t | Chat (llama-cli --url) |
-| s | Stop / forget |
-| a | Attach a running server by URL |
-| o | Open the full log |
-| y | Copy URL |
-
-### Hugging Face
-
-| Key | Action |
-|-----|--------|
-| / | Focus search |
-| Enter | Search / list files / download |
-| k | Set access token |
-| x | Cancel download |
-
-### Profile editor
-
-`ctrl+s` save, `Esc` cancel, `F1` help for the focused field,
-`F2` apply recommended, `ctrl+r` reset field, `+`/`-` step values.
-
-## How recommendations work
-
-llamactl parses the GGUF header (architecture, layers, head dims, trained ctx,
-MoE expert count, weights size) and builds a budget:
-
-```
-budget = weights + KV + compute + overhead
-KV     = kv_per_token(ctx_type) * ctx_size      # shared across all slots
-```
-
-It keeps `headroom_pct`% of total VRAM free (min 512 MiB), picks the largest
-ctx tier that fits, upgrades to q8_0 KV cache when it unlocks a bigger ctx,
-offloads MoE experts or dense layers as needed, and reports a verdict:
-GPU / GPU+CPU / CPU / NO. See docs/SPEC.md section 7 for the full algorithm.
-
-## Files
-
-All state lives in `~/.config/llamactl/`:
-
-- `config.json` - settings, default profile, per-model profiles
-- `sessions.json` - managed and attached sessions
-- `gguf_cache.json` - parsed GGUF headers keyed by path+mtime
-- `seen.json` - models already offered a recommendation
-- `hf_token` - Hugging Face access token
-- `logs/` - per-session llama-server logs
-
-Design spec: [docs/SPEC.md](docs/SPEC.md) (v2, in progress; see [docs/TODO.md](docs/TODO.md))
+The tests never start llama.cpp and never touch your real state directory. Design:
+[docs/SPEC.md](docs/SPEC.md). Changes: [CHANGELOG.md](CHANGELOG.md). Release steps:
+[docs/RELEASING.md](docs/RELEASING.md).
