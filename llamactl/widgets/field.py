@@ -135,7 +135,8 @@ class SettingField(Widget):
         if isinstance(self.input, Switch):
             return self.input.value
         if isinstance(self.input, Select):
-            return self.input.value
+            v = self.input.value
+            return self._value if v is Select.NULL else v     # not mounted yet: the initial value
         return schema.validate(self.setting, self.input.value)
 
     @property
