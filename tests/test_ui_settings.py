@@ -43,7 +43,7 @@ async def test_save_writes_gateway_settings_default_intent_and_reloads(
         sv.query_one("#gw_autostart", Switch).value = True
         sv.query_one("#default_intent", Select).value = "agent"
         assert sv.query_one("#gw_api_key", Input).password
-        await pilot.pause(0.3)
+        assert await wait_for(pilot, sv._fields_valid)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: Config.load().gateway.port == 9090)
         saved = Config.load()
@@ -63,7 +63,7 @@ async def test_changes_that_need_no_restart_say_plain_saved(ui_env: SimpleNamesp
     async with app.run_test(size=SIZE) as pilot:
         sv = await open_settings(pilot, app)
         setv(sv, "gw_sleep_idle", "120")
-        await pilot.pause(0.3)
+        assert await wait_for(pilot, sv._fields_valid)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: plain(sv.query_one("#set_msg", Static)) == "Settings saved.")
         assert ui_env.cfg.gateway.sleep_idle == 120
@@ -75,7 +75,7 @@ async def test_stopped_gateway_needs_no_restart_message(ui_env: SimpleNamespace)
     async with app.run_test(size=SIZE) as pilot:
         sv = await open_settings(pilot, app)
         setv(sv, "gw_port", "9191")
-        await pilot.pause(0.3)
+        assert await wait_for(pilot, sv._fields_valid)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: plain(sv.query_one("#set_msg", Static)) == "Settings saved.")
 
@@ -89,13 +89,12 @@ async def test_invalid_values_block_the_save(ui_env: SimpleNamespace) -> None:
                          ("gw_host", "  "), ("headroom_pct", "abc")):
             old = sv.query_one(f"#{wid}", Input).value
             setv(sv, wid, bad)
-            await pilot.pause(0.2)
-            assert not sv.query_one(f"#{wid}", Input).is_valid, wid
+            assert await wait_for(pilot, lambda: not sv.query_one(f"#{wid}", Input).is_valid), wid
             await pilot.press("ctrl+s")
-            await pilot.pause(0.1)
-            assert "Fix the invalid fields" in plain(sv.query_one("#set_msg", Static))
+            assert await wait_for(pilot, lambda: "Fix the invalid fields" in plain(
+                sv.query_one("#set_msg", Static)))
             setv(sv, wid, old)
-            await pilot.pause(0.2)
+            assert await wait_for(pilot, sv._fields_valid)
         assert ui_env.cfg.gateway.port == 8080 and not (ui_env.cfg_dir / "config.json").exists()
 
 
@@ -108,10 +107,9 @@ async def test_model_dirs_are_added_removed_and_rescanned(ui_env: SimpleNamespac
         add = sv.query_one("#add_dir", Input)
         add.value = str(extra)
         add.focus()
-        await pilot.pause(0.2)
+        assert await wait_for(pilot, lambda: add.is_valid)
         await pilot.press("enter")
-        await pilot.pause(0.1)
-        assert len(sv.query_one("#dir_list", ListView).children) == 2
+        assert await wait_for(pilot, lambda: len(sv.query_one("#dir_list", ListView).children) == 2)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: str(extra) in Config.load().model_dirs)
         assert app.cfg.model_dirs == [str(ui_env.model_dir), str(extra)]
@@ -120,7 +118,7 @@ async def test_model_dirs_are_added_removed_and_rescanned(ui_env: SimpleNamespac
         sv.query_one("#dir_list", ListView).index = 0
         sv.query_one("#dir_list", ListView).focus()
         await pilot.press("delete")
-        await pilot.pause(0.1)
+        assert await wait_for(pilot, lambda: len(sv.query_one("#dir_list", ListView).children) == 1)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: Config.load().model_dirs == [str(extra)])
         assert await wait_for(pilot, lambda: not app.scanning and app.models == [])
@@ -152,8 +150,8 @@ async def test_autostart_without_llama_server_says_so(ui_env: SimpleNamespace) -
     gw = FakeGateway(ui_env.cfg)
     app = make_app(ui_env, gateway=gw)
     async with app.run_test(size=SIZE) as pilot:
-        await pilot.pause(0.3)
-        assert "autostart: llama-server not found" in app._last_failure     # also a toast
+        assert await wait_for(pilot, lambda: "autostart: llama-server not found" in app._last_failure)
+        await pilot.pause(0.05)
         assert gw.called("start") == []
 
 
@@ -164,7 +162,7 @@ async def test_a_failing_reload_after_save_is_a_message(ui_env: SimpleNamespace)
     async with app.run_test(size=SIZE) as pilot:
         sv = await open_settings(pilot, app)
         setv(sv, "gw_sleep_idle", "30")
-        await pilot.pause(0.3)
+        assert await wait_for(pilot, sv._fields_valid)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: "not reachable" in plain(app._status))
         assert Config.load().gateway.sleep_idle == 30 and app.is_running

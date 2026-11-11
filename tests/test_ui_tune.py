@@ -50,7 +50,7 @@ async def test_tune_shows_trials_saves_the_winner_and_use_activates(
         await ready(pilot, app)
         mv = app.views["models"]
         mv.intent_table.move_cursor(row=mv.intent_table.get_row_index("speed"))
-        await pilot.pause(0.2)
+        assert await wait_for(pilot, lambda: mv.selected_intent() == "speed")
         scr = await open_tune(pilot, app)
         t = scr.query_one("#t_trials", DataTable)
         assert await wait_for(pilot, lambda: scr.state == "done")
@@ -84,7 +84,7 @@ async def test_keep_as_is_leaves_the_active_preset(ui_env: SimpleNamespace) -> N
         await ready(pilot, app)
         mv = app.views["models"]
         mv.intent_table.move_cursor(row=mv.intent_table.get_row_index("api"))
-        await pilot.pause(0.2)
+        assert await wait_for(pilot, lambda: mv.selected_intent() == "api")
         scr = await open_tune(pilot, app)
         assert await wait_for(pilot, lambda: scr.state == "done")
         scr.query_one("#keep", Button).press()
@@ -137,8 +137,7 @@ async def test_cancel_between_trials_for_a_runner_that_ignores_it(ui_env: Simple
         scr = await open_tune(pilot, app)
         assert await wait_for(pilot, lambda: len(runner.calls) == 2)
         scr.query_one("#cancel", Button).press()
-        await pilot.pause(0.2)
-        assert "cancelling" in plain(scr.query_one("#t_progress", Label))
+        assert await wait_for(pilot, lambda: "cancelling" in plain(scr.query_one("#t_progress", Label)))
         assert scr._cancel.is_set() and not shown(app, "cancel")
         gate.set()
         assert await wait_for(pilot, lambda: scr.state == "done")

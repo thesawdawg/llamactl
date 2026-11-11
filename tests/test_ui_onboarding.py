@@ -336,6 +336,7 @@ async def test_run_setup_again_from_settings_and_cancel_changes_nothing(
         await pilot.pause(0.1)
         app.views["settings"].query_one("#run_setup", Button).press()
         scr = await open_setup(pilot, app)
+        assert await wait_for(pilot, lambda: scr.flow is not None)          # mounted
         assert str(scr.query_one("#ob_skip", Button).label) == "Cancel"
         assert scr.query_one("#ob_bin", Input).value == str(ui_env.bin_dir)    # prefilled
         await press(pilot, app, "ob_skip")

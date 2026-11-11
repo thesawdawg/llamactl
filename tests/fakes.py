@@ -276,13 +276,24 @@ def runner_factory(runner: FakeRunner) -> Callable[[], FakeRunner]:
     return lambda: runner
 
 
-async def wait_for(pilot, cond: Callable[[], bool], tries: int = 200) -> bool:
-    """Poll `cond` while the app's workers settle; True as soon as it holds."""
-    for _ in range(tries):
-        await pilot.pause(0.05)
+async def wait_for(pilot, cond: Callable[[], bool], timeout: float = 10.0,
+                   step: float = 0.01) -> bool:
+    """Poll `cond` while the app's workers settle; True as soon as it holds, False at `timeout`.
+
+    The condition is only looked at after the app had a moment to settle. When the active screen
+    changed while waiting, the new screen also gets a moment to finish composing (a test that
+    ends mid-mount trips over half-built widgets).
+    """
+    deadline = time.monotonic() + timeout
+    screen = pilot.app.screen
+    while True:
+        await pilot.pause(step)
         if cond():
+            if pilot.app.screen is not screen:
+                await pilot.pause()
             return True
-    return False
+        if time.monotonic() >= deadline:
+            return False
 
 
 def plain(widget) -> str:

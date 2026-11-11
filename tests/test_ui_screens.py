@@ -84,7 +84,7 @@ async def test_plan_screen_shows_the_reasons_table_and_verdict() -> None:
     scr = _plan_screen(cfg)
     app = Harness(scr)
     async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.pause(0.2)
+        await pilot.pause()
         t = scr.query_one("#plan_table", DataTable)
         assert t.row_count == len(scr.plan.reasons) > 0
         assert [str(c.label) for c in t.columns.values()] == ["Setting", "Base", "Planned", "Why"]
@@ -96,7 +96,7 @@ async def test_plan_screen_save_stores_an_estimated_preset() -> None:
     scr = _plan_screen(cfg, "agent")
     app = Harness(scr)
     async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.pause(0.2)
+        await pilot.pause()
         await pilot.press("s")
         await pilot.pause()
         assert app.result == ["saved"]
@@ -112,7 +112,7 @@ async def test_plan_screen_refuses_to_overwrite_a_tuned_preset_without_confirmat
     scr = _plan_screen(cfg)
     app = Harness(scr)
     async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.pause(0.2)
+        await pilot.pause()
         await pilot.press("s")
         assert await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert cfg.preset(MODEL, "chat") is tuned and app.result == []      # nothing replaced yet
@@ -132,13 +132,13 @@ async def test_plan_screen_buttons_dismiss_with_their_action() -> None:
     for key, want in (("e", "edit"), ("t", "tune"), ("v", "serve"), ("escape", None)):
         app = Harness(_plan_screen(Config()))
         async with app.run_test(size=(140, 50)) as pilot:
-            await pilot.pause(0.2)
+            await pilot.pause()
             await pilot.press(key)
             await pilot.pause()
             assert app.result == [want]
     app = Harness(_plan_screen(Config()))
     async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.pause(0.2)
+        await pilot.pause()
         app.screen.query_one("#tune", Button).press()
         await pilot.pause()
         assert app.result == ["tune"]
@@ -151,6 +151,6 @@ async def test_plan_screen_with_nothing_to_change() -> None:
     scr2 = _plan_screen(cfg)
     app = Harness(scr2)
     async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.pause(0.2)
+        await pilot.pause()
         assert not scr2.query_one("#plan_table", DataTable).display
         assert scr2.query_one("#plan_none").display

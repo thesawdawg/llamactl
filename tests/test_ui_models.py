@@ -34,7 +34,7 @@ async def ready(pilot, app, n: int = 1) -> None:
     assert await wait_for(pilot, lambda: len(app.infos) == n and not app.scanning
                           and len(mv.plans) == n and mv.selected_intent() != "")
     await pilot.press("2")
-    await pilot.pause(0.2)
+    assert await wait_for(pilot, lambda: mv.intent_table.row_count > 0)
 
 
 async def test_table_shows_best_for_and_new(ui_env: SimpleNamespace) -> None:
@@ -196,8 +196,8 @@ async def test_missing_binary_blocks_serving_with_a_message(ui_env: SimpleNamesp
         await ready(pilot, app)
         app.views["models"].model_table.focus()
         await pilot.press("enter")
-        await pilot.pause(0.2)
-        assert "llama-server not found" in plain(app._status) and gw.calls.count(("start",)) == 0
+        assert await wait_for(pilot, lambda: "llama-server not found" in plain(app._status))
+        assert gw.calls.count(("start",)) == 0
 
 
 async def test_plan_screen_save_makes_a_preset_and_reloads_the_gateway(
@@ -230,7 +230,7 @@ async def test_edit_saves_the_preset_as_edited_and_keeps_the_measurement(
         ed = app.screen
         f = ed.fields["ctx_size"]
         f.input.value = "2048"
-        await pilot.pause(0.4)
+        assert await wait_for(pilot, lambda: ed._draft.ctx_size == 2048)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: ui_env.cfg.preset(str(m)).source == "edited")
         p = ui_env.cfg.preset(str(m), "chat")
@@ -249,7 +249,7 @@ async def test_edit_without_changes_leaves_the_preset_alone(ui_env: SimpleNamesp
         await pilot.press("e")
         assert await wait_for(pilot, lambda: isinstance(app.screen, PresetEditor))
         await pilot.press("ctrl+s")
-        await pilot.pause(0.2)
+        assert await wait_for(pilot, lambda: not isinstance(app.screen, PresetEditor))
         assert ui_env.cfg.preset(str(m)).source == "tuned"
 
 
@@ -261,8 +261,7 @@ async def test_edit_of_a_missing_preset_starts_from_the_plan(ui_env: SimpleNames
         app.views["models"].model_table.focus()
         await pilot.press("e")
         assert await wait_for(pilot, lambda: isinstance(app.screen, PresetEditor))
-        await pilot.pause(0.3)
-        assert app.screen._draft.ctx_size > 0           # the plan was applied
+        assert await wait_for(pilot, lambda: app.screen._draft.ctx_size > 0)   # the plan was applied
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: ui_env.cfg.preset(str(m), "chat") is not None)
         assert ui_env.cfg.preset(str(m), "chat").source == "edited"
@@ -279,7 +278,7 @@ async def test_set_active_and_delete_preset(ui_env: SimpleNamespace) -> None:
         mv = app.views["models"]
         mv.model_table.focus()
         mv.intent_table.move_cursor(row=mv.intent_table.get_row_index("speed"))
-        await pilot.pause(0.2)
+        assert await wait_for(pilot, lambda: mv.selected_intent() == "speed")
         await pilot.press("a")
         assert await wait_for(pilot, lambda: ui_env.cfg.models[str(m)].active == "speed")
         assert await wait_for(pilot, lambda: gw.called("reload"))
@@ -306,7 +305,7 @@ async def test_actions_on_an_intent_without_a_preset_explain(ui_env: SimpleNames
         mv = app.views["models"]
         mv.model_table.focus()
         mv.intent_table.move_cursor(row=mv.intent_table.get_row_index("api"))
-        await pilot.pause(0.2)
+        assert await wait_for(pilot, lambda: mv.selected_intent() == "api")
         await pilot.press("a")
         assert "No 'api' preset" in plain(app._status)
         await pilot.press("delete")
@@ -322,7 +321,7 @@ async def test_default_profile_editor_replans(ui_env: SimpleNamespace) -> None:
         await pilot.press("D")
         assert await wait_for(pilot, lambda: isinstance(app.screen, PresetEditor))
         app.screen.fields["threads"].input.value = "3"
-        await pilot.pause(0.4)
+        assert await wait_for(pilot, lambda: app.screen._draft.threads == 3)
         await pilot.press("ctrl+s")
         assert await wait_for(pilot, lambda: ui_env.cfg.default_profile.threads == 3)
         assert Config.load().default_profile.threads == 3

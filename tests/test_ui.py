@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from textual.app import App
 from textual.widgets import Button, DataTable, Input, Label
 
+from fakes import wait_for as _wait
 from llamactl import actions, hf, intents, planner
 from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
@@ -60,7 +61,7 @@ async def test_invalid_input_disables_save() -> None:
         f = app.editor.fields["ctx_size"]
         f.input.focus()
         await pilot.press(*"abc")
-        await pilot.pause(0.4)
+        assert await _wait(pilot, lambda: app.editor.query_one("#save", Button).disabled)
         assert not f.valid and f.has_class("invalid")
         assert app.editor.query_one("#save", Button).disabled
         # error message shows in the impact line
@@ -75,7 +76,7 @@ async def test_ctx_updates_impact_and_budget() -> None:
         f.input.focus()
         f.input.value = ""
         await pilot.press(*"65536")
-        await pilot.pause(0.4)
+        assert await _wait(pilot, lambda: "KV" in str(f.query_one(".impact", Label).render()))
         assert "KV" in str(f.query_one(".impact", Label).render())
         verdict = str(app.editor.query_one(".verdict", Label).render())
         assert "Verdict: " in verdict
@@ -88,7 +89,7 @@ async def test_apply_plan_and_save() -> None:
         await pilot.pause()
         app.editor.fields["cont_batching"].input.focus()  # 'R' must not go into an Input
         await pilot.press("R")
-        await pilot.pause(0.4)
+        assert await _wait(pilot, lambda: app.editor._draft.ctx_size == 16384)
         rec = planner.plan(intents.by_key["chat"], info, host, Profile())
         prof = app.editor._draft
         assert prof.ctx_size == rec.profile.ctx_size == 16384
@@ -106,7 +107,7 @@ async def test_apply_plan_uses_the_editors_intent() -> None:
     app = _App(PresetEditor(Config(), Profile(), host, info, "test", intent=intents.by_key["agent"],
                             apply_plan=True))
     async with app.run_test() as pilot:
-        await pilot.pause(0.4)
+        assert await _wait(pilot, lambda: app.editor._draft.cache_reuse == 256)
         want = actions.plan_for(Config(), info, host, intents.by_key["agent"])
         assert app.editor._draft.ctx_size == want.profile.ctx_size
         assert app.editor._draft.cache_reuse == 256
@@ -126,18 +127,9 @@ async def test_default_profile_no_model() -> None:
         assert ed.fields["pooling"].value == "" and ed.fields["fit"].value == "on"
         ed.fields["cont_batching"].input.focus()
         await pilot.press("R")
-        await pilot.pause(0.4)
+        assert await _wait(pilot, lambda: "No model" in str(ed.query_one("#ed_status", Label).render()))
         assert ed._draft == Profile()  # R is a no-op without a model
         assert "No model" in str(ed.query_one("#ed_status", Label).render())
-
-
-async def _wait(pilot, cond, tries: int = 40) -> bool:
-    """Poll `cond` while the app's workers settle."""
-    for _ in range(tries):
-        await pilot.pause(0.1)
-        if cond():
-            return True
-    return False
 
 
 async def test_confirm_screen() -> None:
@@ -187,18 +179,16 @@ async def test_settings_view(isolated: SimpleNamespace, tmp_path: Path,
     app = onboarded_app()
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.press("5")
-        await pilot.pause(0.2)
         sv = app.views["settings"]
         bin_in = sv.query_one("#bin_dir", Input)
         bin_in.value = "/no/such/dir"
-        await pilot.pause(0.2)
-        assert not bin_in.is_valid
+        assert await _wait(pilot, lambda: not bin_in.is_valid)
         bin_in.value = str(bin_dir)
         add = sv.query_one("#add_dir", Input)
         add.value = str(new_dir)
         add.focus()
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        assert await _wait(pilot, lambda: add.value == "" and bin_in.is_valid)
         sv.action_save()
         await pilot.pause()
         loaded = Config.load()
@@ -217,7 +207,6 @@ async def test_hf_view_tables(isolated: SimpleNamespace, monkeypatch) -> None:
     app = onboarded_app()
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.press("4")
-        await pilot.pause(0.2)
         hv = app.views["discover"]
         hv.query_one("#hf_q", Input).value = "qwen"
         hv.query_one("#hf_q", Input).post_message(Input.Submitted(hv.query_one("#hf_q", Input), "qwen"))
@@ -242,7 +231,7 @@ async def test_pollers_finishing_during_shutdown_do_not_fail(isolated: SimpleNam
     for _ in range(8):
         app = onboarded_app()
         async with app.run_test(size=(140, 45)) as pilot:
-            await pilot.pause(0.15)
+            await pilot.pause(0.06)
 
 
 async def test_ui_helper_is_safe_when_the_target_is_gone(isolated: SimpleNamespace) -> None:

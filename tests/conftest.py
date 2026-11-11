@@ -82,6 +82,25 @@ def session_state_dir() -> Iterator[Path]:
     shutil.rmtree(SESSION_HOME, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def quick_pilot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorter waits where the tests would only sit through real time.
+
+    The view debounce timers are short, and Pilot's "wait until the process is idle" slices
+    (every `press` and `pause` runs several) are 5 ms instead of 20 ms; conditions are still
+    awaited with `fakes.wait_for`, never assumed.
+    """
+    import textual._wait as tw
+
+    monkeypatch.setattr(tw, "SLEEP_GRANULARITY", 1 / 200)
+    monkeypatch.setattr(tw, "SLEEP_IDLE", 1 / 200 / 20)
+    from llamactl.screens import preset_editor
+    from llamactl.views import models
+
+    monkeypatch.setattr(models, "DEBOUNCE", 0.01)
+    monkeypatch.setattr(preset_editor, "DEBOUNCE", 0.02)
+
+
 @pytest.fixture
 def gguf_file(tmp_path: Path) -> Path:
     """A synthetic 8B-ish GGUF file in tmp_path (>= library.MIN_MODEL_BYTES is faked by size)."""

@@ -24,8 +24,10 @@ VIEW_KEYS = {"1": "home", "2": "models", "3": "serving", "4": "discover", "5": "
 def make_app(env: SimpleNamespace, *, running: bool = False, store: FakeStore | None = None,
              gateway: FakeGateway | None = None, runner: FakeRunner | None = None,
              **kw) -> LlamaCtl:
-    """An app over fakes; the config is the environment's."""
+    """An app over fakes (including the health probe: no test reaches for the network); the
+    config is the environment's."""
     gw = gateway or FakeGateway(env.cfg, running=running)
+    kw.setdefault("health", lambda url: "ready")
     return LlamaCtl(cfg=env.cfg, gateway=gw, store=store or FakeStore(),
                     runner_factory=runner_factory(runner or FakeRunner()),
                     build=lambda: "b1", **kw)
@@ -221,6 +223,7 @@ async def test_home_lists_what_is_loaded_and_builds_a_snippet(ui_env: SimpleName
         assert "alpha" in plain(home.query_one("#gw_snippet", Static))
         assert "/v1/chat/completions" in plain(home.query_one("#gw_snippet", Static))
         assert "attached" in [str(c) for c in loaded.get_row_at(1)]
+        assert await wait_for(pilot, lambda: app.focused is not None)       # keys need a focus
         await pilot.press("y")
         assert app.clipboard == f"{gw.listen_url}/v1"
         await pilot.press("c")
