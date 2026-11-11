@@ -20,11 +20,12 @@ from ..screens.log import LogScreen
 from ..screens.prompt import PromptScreen
 from ..serving import GW_STOPPED, ServingSnapshot, uptime
 from ..sessions import Session, probe
+from ..usage import Usage, format_cpu, format_mem
 from .base import BaseView
 from .home import MODEL_STYLE
 
-COLUMNS = (("Name", "name"), ("State", "state"), ("Kind", "kind"), ("URL", "url"),
-           ("Uptime", "uptime"))
+COLUMNS = (("Name", "name"), ("State", "state"), ("Kind", "kind"), ("CPU", "cpu"),
+           ("RAM", "ram"), ("VRAM", "vram"), ("URL", "url"), ("Uptime", "uptime"))
 KIND_GATEWAY, KIND_STANDALONE, KIND_ATTACHED = "gateway", "standalone", "attached"
 TAIL_LINES = 80
 DETAIL_INTERVAL = 1.0           # seconds between log tail checks while the view is shown
@@ -37,6 +38,13 @@ def model_state_text(m: GatewayModel) -> Text:
     """State cell of a gateway model: the state, and the exit code of a failed one."""
     label = m.state if m.state != FAILED or m.exit_code is None else f"failed (exit {m.exit_code})"
     return Text(label, style=MODEL_STYLE.get(m.state, ""))
+
+
+def _usage_cells(u: Usage | None) -> tuple[str, str, str]:
+    """CPU/RAM/VRAM cells of one row; ``-`` each when no usage was sampled."""
+    if u is None:
+        return "-", "-", "-"
+    return format_cpu(u.cpu_pct), format_mem(u.rss), format_mem(u.vram, u.vram_source)
 
 
 class ServingView(BaseView):
@@ -116,16 +124,18 @@ class ServingView(BaseView):
             snap: Gateway and sessions now.
 
         Returns:
-            Key -> cells (name, state, kind, url, uptime).
+            Key -> cells (name, state, kind, cpu, ram, vram, url, uptime).
         """
         out: dict[str, tuple] = {}
         for m in snap.models or ():
             out[f"gw:{m.name}"] = (m.name, model_state_text(m), KIND_GATEWAY,
+                                   *_usage_cells(snap.usage.get(f"gw:{m.name}")),
                                    self.app.gateway_url(), "-")
         for s in snap.sessions:
             state = snap.health.get(s.id, "down")
             out[f"s:{s.id}"] = (s.name, Text(state, style=MODEL_STYLE.get(state, "")),
                                 KIND_ATTACHED if s.external else KIND_STANDALONE,
+                                *_usage_cells(snap.usage.get(f"s:{s.id}")),
                                 network.primary_url(s.urls) if not s.external else s.url,
                                 uptime(s.started, snap.at))
         return out

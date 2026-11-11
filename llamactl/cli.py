@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Callable, Sequence, TextIO
 
 from . import (actions, cfgedit, gateway as gateway_mod, hardware, intents, library, network,
-               render, report, tuner)
+               render, report, tuner, usage as usage_mod)
+from .usage import UsageProbe
 from .actions import ActionError
 from .calibration import TUNED, Calibration
 from .config import CONFIG_FILE, PRESET_SEP, Config
@@ -73,6 +74,7 @@ class Services:
         runner_factory: Returns the `Runner` a tune measures with.
         build: Returns the llama-server version string.
         health: Returns "ready", "loading" or "down" for a server URL.
+        probe: Process usage probe (for ``ps``).
         sleep: Sleep function.
         clock: Monotonic clock in seconds.
         now: Wall clock in Unix seconds.
@@ -87,6 +89,7 @@ class Services:
                  runner_factory: Callable[[], Runner] | None = None,
                  build: Callable[[], str] | None = None,
                  health: Callable[[str], str] = http_health,
+                 probe: UsageProbe | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], float] = time.time) -> None:
@@ -104,7 +107,7 @@ class Services:
         self._build_fn = build or (lambda: ServerRunner(cfg).build())
         self._runner_factory = runner_factory or (lambda: ServerRunner(cfg))
         self._cache, self._calibration = cache, calibration
-        self._gateway, self._store = gateway, store
+        self._gateway, self._store, self._probe = gateway, store, probe
         self._host: Host | None = None
         self._models: list[Path] | None = None
         self._build: str | None = None
@@ -138,6 +141,13 @@ class Services:
         if self._store is None:
             self._store = SessionStore(persist=not self.read_only)
         return self._store
+
+    @property
+    def probe(self) -> UsageProbe:
+        """The process usage probe ``ps`` samples through."""
+        if self._probe is None:
+            self._probe = UsageProbe()
+        return self._probe
 
     def runner(self) -> Runner:
         """A new tune runner."""
@@ -619,10 +629,26 @@ def cmd_ps(args: argparse.Namespace, sv: Services) -> int:
     state = gw.state
     sessions = list(sv.store.sessions)
     states = {s.id: sv.health(s.url) for s in sessions}
+    used: dict[str, usage_mod.Usage] = {}
+    if status.running or sessions:
+        probe, estimate = sv.probe, _usage_estimator(sv)
+        usage_mod.served_usage(probe, status, models, sessions, estimate)   # prime CPU baselines
+        sv.sleep(usage_mod.CPU_SAMPLE)
+        used = usage_mod.served_usage(probe, status, models, sessions, estimate)
     data = report.ps_data(status, models, error, sessions, states, sv.now(),
-                          state.started if state else 0.0)
+                          state.started if state else 0.0, usage=used)
     sv.emit(args.json, data, render.render_ps)
     return EXIT_OK
+
+
+def _usage_estimator(sv: Services) -> Callable[[str], tuple[int | None, str]]:
+    """`usage.estimator` bound to the service's config, host, calibration and GGUF cache."""
+    def info_for(path: str) -> ModelInfo | None:
+        try:
+            return sv.info(Path(path))
+        except (GGUFError, OSError):
+            return None
+    return usage_mod.estimator(sv.cfg, sv.host(), sv.calibration, info_for)
 
 
 def _require_gateway(sv: Services) -> list[str]:

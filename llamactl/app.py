@@ -28,7 +28,7 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Header, Label, ListItem, ListView
 from textual.worker import Worker, get_current_worker
 
-from . import actions, hardware, library, network, onboarding, planner, tuner
+from . import actions, hardware, library, network, onboarding, planner, tuner, usage as usage_mod
 from .actions import ActionError
 from .calibration import Calibration
 from .config import Config
@@ -102,6 +102,7 @@ class LlamaCtl(App):
         runner_factory: Returns the `Runner` a tune measures with.
         build: Returns the llama-server version string (called off the UI thread).
         health: Returns "ready", "loading" or "down" for a server URL.
+        probe: Process usage probe; consecutive serving polls give the CPU deltas.
         which: ``shutil.which`` compatible lookup the first-run setup uses to find llama-server.
     """
 
@@ -135,10 +136,12 @@ class LlamaCtl(App):
                  info_cache: ModelInfoCache | None = None,
                  runner_factory: Callable[[], Runner] | None = None,
                  build: Callable[[], str] | None = None, health: Health = http_health,
+                 probe: usage_mod.UsageProbe | None = None,
                  which: Callable[[str], str | None] = shutil.which) -> None:
         super().__init__()
         self.cfg = cfg or Config.load()
         self.calibration = calibration or Calibration.load()
+        self.probe = probe or usage_mod.UsageProbe()
         self.store = store or SessionStore()
         self.gateway = gateway or Gateway(self.cfg)
         self.info_cache = info_cache or ModelInfoCache()
@@ -507,7 +510,11 @@ class LlamaCtl(App):
     def refresh_serving(self) -> None:
         """Gather the gateway and session state now (worker); posts one `ServingChanged`."""
         def work() -> None:
-            snap = gather(self.gateway, self.store, self.health)
+            estimate = usage_mod.estimator(self.cfg, self.host, self.calibration,
+                                           self.infos.get)
+            snap = gather(self.gateway, self.store, self.health,
+                          usage=lambda st, models, sessions: usage_mod.served_usage(
+                              self.probe, st, models, sessions, estimate))
             self.post_message(ServingChanged(snap))
 
         self.run_bg(work, label="Checking the gateway", group="serving", exclusive=True,

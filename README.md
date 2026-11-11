@@ -97,7 +97,7 @@ stem. Commands that print data accept `--json`. Exit codes: 0 success, 1 runtime
 | `llamactl serve MODEL [--for INTENT] [--standalone [--port P]] [--lan \| --host ADDR] [--no-wait] [--no-activate]` | create a preset if missing, then serve it |
 | `llamactl up [--lan \| --host ADDR]` / `llamactl down` | start / stop the gateway |
 | `llamactl config [KEY=VALUE ...] [--new-api-key]` | show or change the gateway and planning settings |
-| `llamactl ps` | gateway models and standalone servers with their state |
+| `llamactl ps` | gateway models and standalone servers with state, CPU, RAM and VRAM |
 | `llamactl load NAME` / `llamactl unload NAME` | load / unload a model in the gateway |
 | `llamactl stop [NAME \| --all]` | stop standalone servers (never the gateway) |
 | `llamactl logs NAME [-f] [-n LINES]` | print or follow a log; `NAME` is `gateway` or a server |
@@ -121,7 +121,8 @@ llamactl down
 ```
 
 `hw`, `ls`, `plan` (without `--save`), `ps`, `logs` and `config` without arguments never write
-state.
+state. `ps` samples CPU over half a second and shows each server's RAM and VRAM; a `~` marks
+memory the GPU driver does not report per process (a tuned measurement or an estimate instead).
 `tune` prints one line per trial to stderr; Ctrl-C stops the running trial and keeps the
 trials so far.
 

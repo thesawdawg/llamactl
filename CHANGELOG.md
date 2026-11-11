@@ -8,6 +8,8 @@ there are no earlier tagged releases. Commit entries retain their original subje
 
 - Responsive TUI layout: button bars wrap instead of clipping, screens scroll and stack on
   narrow terminals, and controls stay reachable down to small sizes.
+- Per-model resource usage (`ps` and the Serving view): CPU, RAM and VRAM per gateway model
+  and server, with `~` marking VRAM not measured per process.
 
 ## [0.2.0] - Unreleased
 

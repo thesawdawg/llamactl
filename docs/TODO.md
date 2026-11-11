@@ -75,3 +75,10 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] CLI: `--lan` / `--host` on `up` and `serve`; `llamactl config`
 - [x] README, CHANGELOG (0.2.0) and AGENTS.md updated
 - [x] Manual: gateway on `0.0.0.0` answers on the LAN address
+
+## Phase 10 - Resource usage
+
+- [x] `usage.py`: /proc and `ps` process probing, `nvidia-smi` per-process memory, VRAM
+  fallback order process -> tuned -> estimate, `~` markers, sleeping models never estimated
+- [x] `ps` (text and `--json`) shows CPU/RAM/VRAM per gateway model and server
+- [x] Serving view CPU/RAM/VRAM columns, CPU deltas between polls

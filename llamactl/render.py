@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from typing import Sequence, TextIO
 
+from .usage import SRC_ESTIMATE, SRC_PROCESS, SRC_TUNED, format_cpu, format_mem
+
 GB = 1e9
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
@@ -295,6 +297,21 @@ def render_tune(d: dict, style: Style) -> str:
     return "\n".join(lines)
 
 
+def _usages(d: dict) -> list[dict]:
+    """Every non-null usage dict in `ps_data` output."""
+    rows = [m.get("usage") for m in d["gateway"].get("models") or ()]
+    rows += [s.get("usage") for s in d["sessions"]]
+    return [u for u in rows if u]
+
+
+def _usage_cells(u: dict | None) -> list[str]:
+    """CPU/RAM/VRAM cells of one `usage` dict; ``-`` each when there is none."""
+    if not u:
+        return ["-", "-", "-"]
+    return [format_cpu(u["cpu_pct"]), format_mem(u["rss"]),
+            format_mem(u["vram"], u["vram_source"])]
+
+
 def render_ps(d: dict, style: Style) -> str:
     """Text for ``llamactl ps``."""
     g = d["gateway"]
@@ -307,8 +324,9 @@ def render_ps(d: dict, style: Style) -> str:
         if g["models"] is None:
             lines.append(f"  models unavailable: {g['error']}")
         elif g["models"]:
-            lines.append(table(["MODEL", "STATE"],
-                               [[m["name"], (m["state"], _STATE_COLOUR.get(m["state"], ""))]
+            lines.append(table(["MODEL", "STATE", "CPU", "RAM", "VRAM"],
+                               [[m["name"], (m["state"], _STATE_COLOUR.get(m["state"], "")),
+                                 *_usage_cells(m.get("usage"))]
                                 for m in g["models"]], style, indent="  "))
         else:
             lines.append("  no models configured")
@@ -317,12 +335,20 @@ def render_ps(d: dict, style: Style) -> str:
     lines += ["", heading("Servers", style)]
     if d["sessions"]:
         lines.append(table(
-            ["NAME", "URL", "STATE", "UP", "KIND"],
+            ["NAME", "URL", "STATE", "UP", "KIND", "CPU", "RAM", "VRAM"],
             [[s["name"], ", ".join(s["urls"]), (s["state"], _STATE_COLOUR.get(s["state"], "")),
-              duration(s["uptime_s"]), "attached" if s["external"] else "standalone"]
+              duration(s["uptime_s"]), "attached" if s["external"] else "standalone",
+              *_usage_cells(s.get("usage"))]
              for s in d["sessions"]], style, indent="  "))
     else:
         lines.append("  no standalone or attached servers")
+    sources = {u["vram_source"] for u in _usages(d) if u["vram_source"]}
+    if sources - {SRC_PROCESS}:
+        note = ("~ estimated (the GPU driver does not report per-process memory)"
+                if sources == {SRC_ESTIMATE} else
+                "~ from a tuned measurement or estimate (the GPU driver does not report "
+                "per-process memory)")
+        lines.append(style.paint(f"  {note}", "dim"))
     return "\n".join(lines)
 
 

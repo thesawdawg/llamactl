@@ -255,7 +255,8 @@ async def test_serving_view_shows_gateway_models_and_sessions(ui_env: SimpleName
         assert rows["gw:alpha"][:3] == ["alpha", "loaded", "gateway"]
         assert rows["gw:alpha@agent"][1] == "failed (exit 1)"
         assert rows["s:beta-9001"][:3] == ["beta", "crashed", "standalone"]   # pid 0 is not alive
-        assert rows["s:beta-9001"][4] == "1m"
+        assert rows["s:beta-9001"][3:6] == ["-", "-", "-"]                   # no usage sampled
+        assert rows["s:beta-9001"][7] == "1m"
 
 
 async def test_serving_state_changes_update_rows_in_place(ui_env: SimpleNamespace) -> None:

@@ -43,6 +43,25 @@ class FakeClock:
         self.sleeps += 1
 
 
+class FakeProbe:
+    """UsageProbe double: scripted children and GPU memory, no /proc or nvidia-smi."""
+
+    def __init__(self) -> None:
+        self.kids: dict[int, list[str]] = {}
+        self.vram: dict[int, int] = {}
+        self.calls = 0
+
+    def children(self, pid: int) -> dict[int, list[str]]:
+        return dict(self.kids)
+
+    def sample(self, pids: object) -> dict[int, tuple[int, float | None]]:
+        self.calls += 1
+        return {p: (768 << 20, 33.3) for p in pids}  # type: ignore[union-attr]
+
+    def gpu_memory(self) -> dict[int, int]:
+        return dict(self.vram)
+
+
 class FakeGateway:
     """Gateway double: renders the real preset INI, models move loading -> `outcome`."""
 
@@ -247,14 +266,15 @@ def world(isolated: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyP
     w = SimpleNamespace(cfg=cfg, gw=gw, store=store, clock=clock, alive=alive, qwen=qwen,
                         llama=llama, bin_dir=bin_dir, cfg_dir=isolated.cfg_dir,
                         model_dir=isolated.model_dir, host=isolated.host, runner=FakeRunner(good()),
-                        health="ready", build=BUILD)
+                        health="ready", build=BUILD, probe=FakeProbe())
 
     def services(**kw: Any) -> cli.Services:
         opts: dict[str, Any] = dict(
             colour=False, detect=lambda: w.host, refresh=lambda h: w.host,
             cache=None, calibration=Calibration(), gateway=w.gw, store=w.store,
             runner_factory=lambda: w.runner, build=lambda: w.build,
-            health=lambda url: w.health, sleep=clock.sleep, clock=clock, now=lambda: 1060.0)
+            health=lambda url: w.health, probe=w.probe,
+            sleep=clock.sleep, clock=clock, now=lambda: 1060.0)
         opts.update(kw)
         return cli.Services(w.cfg, **opts)
 
@@ -834,8 +854,8 @@ def test_ps_lists_gateway_models_and_sessions(world, capsys) -> None:
     assert "attached" in r.out
     d = json.loads(world.run(capsys, "ps", "--json").out)
     assert d["gateway"]["models"] == [
-        {"name": "qwen3-8b-q4_k_m", "state": "loaded", "exit_code": None},
-        {"name": "qwen3-8b-q4_k_m@agent", "state": "unloaded", "exit_code": None}]
+        {"name": "qwen3-8b-q4_k_m", "state": "loaded", "exit_code": None, "usage": None},
+        {"name": "qwen3-8b-q4_k_m@agent", "state": "unloaded", "exit_code": None, "usage": None}]
     assert [s["state"] for s in d["sessions"]] == ["ready", "ready"]
     assert d["sessions"][0]["uptime_s"] == 7560 and d["sessions"][1]["uptime_s"] is None
 
@@ -849,6 +869,33 @@ def test_ps_survives_a_gateway_that_cannot_list_models(world, capsys, monkeypatc
     monkeypatch.setattr(world.gw, "models", boom)
     r = world.run(capsys, "ps")
     assert r.code == 0 and "models unavailable: the gateway at x is not reachable" in r.out
+
+
+def test_ps_shows_per_model_usage_and_skips_it_when_idle(world, capsys) -> None:
+    r = world.run(capsys, "ps")                      # idle: no sampling, no sleeping
+    assert r.code == 0 and world.clock.sleeps == 0 and world.probe.calls == 0
+    world.cfg.set_preset(str(world.qwen), Preset("chat", Profile(), "estimated"))
+    world.gw.is_running = True
+    world.gw.write_presets()
+    world.gw.states["qwen3-8b-q4_k_m"] = LOADED
+    world.probe.kids = {31337: ["llama-server", "--port", "45349",
+                                "--alias", "qwen3-8b-q4_k_m"]}
+    world.probe.vram = {31337: 6 << 30}
+    world.store.sessions = [
+        Session("m-9000", "m", "http://127.0.0.1:9000", pid=4243, log="x",
+                started=1000.0 - 7500)]
+    r = world.run(capsys, "ps")
+    assert r.code == 0 and world.clock.sleeps == 1 and world.probe.calls == 2
+    assert re.search(r"MODEL\s+STATE\s+CPU\s+RAM\s+VRAM", r.out)
+    assert re.search(r"qwen3-8b-q4_k_m\s+loaded\s+33%\s+805 MB\s+6\.4 GB", r.out)
+    assert re.search(r"m\s+http://127\.0\.0\.1:9000\s+ready\s+2h06m\s+standalone\s+"
+                     r"33%\s+805 MB\s+-", r.out)
+    d = json.loads(world.run(capsys, "ps", "--json").out)
+    assert d["gateway"]["models"][0]["usage"] == {
+        "pid": 31337, "cpu_pct": 33.3, "rss": 768 << 20, "vram": 6 << 30,
+        "vram_source": "process"}
+    assert d["sessions"][0]["usage"] == {
+        "pid": 4243, "cpu_pct": 33.3, "rss": 768 << 20, "vram": None, "vram_source": ""}
 
 
 # --------------------------------------------------------------------------- load / unload

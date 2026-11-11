@@ -14,6 +14,7 @@ import httpx
 
 from .gateway import LOADED, LOADING, SLEEPING, Gateway, GatewayError, GatewayModel, GatewayStatus
 from .sessions import Session, SessionStore
+from .usage import Usage
 
 HEALTH_PROBE_TIMEOUT = 1.0
 STATE_READY, STATE_LOADING, STATE_DOWN, STATE_CRASHED = "ready", "loading", "down", "crashed"
@@ -57,6 +58,8 @@ class ServingSnapshot:
         started: Unix time the gateway started, 0 when unknown or stopped.
         log: Path of the gateway log, "" when stopped.
         at: Unix time of the snapshot.
+        usage: Per-process usage by row key ("gw:<model>", "s:<session id>"); not part of
+            `same_as`.
     """
 
     status: GatewayStatus
@@ -67,6 +70,7 @@ class ServingSnapshot:
     started: float = 0.0
     log: str = ""
     at: float = 0.0
+    usage: dict[str, Usage] = field(default_factory=dict)
 
     @property
     def idle(self) -> bool:
@@ -94,7 +98,10 @@ def _session_state(s: Session, health: Health) -> str:
 
 
 def gather(gw: Gateway, store: SessionStore, health: Health = http_health,
-           now: Callable[[], float] = time.time) -> ServingSnapshot:
+           now: Callable[[], float] = time.time,
+           usage: Callable[[GatewayStatus, tuple[GatewayModel, ...] | None,
+                            tuple[Session, ...]], dict[str, Usage]] | None = None,
+           ) -> ServingSnapshot:
     """Collect the gateway status, its models and every session's health.
 
     Blocking: call it from a worker thread. Nothing is probed over HTTP while nothing runs.
@@ -104,6 +111,7 @@ def gather(gw: Gateway, store: SessionStore, health: Health = http_health,
         store: Standalone and attached sessions.
         health: Returns "ready", "loading" or "down" for a base URL.
         now: Wall clock.
+        usage: Optional per-process usage collector, called only while something runs.
 
     Returns:
         The snapshot; a gateway that cannot be asked for its models is reported in `error`.
@@ -123,8 +131,11 @@ def gather(gw: Gateway, store: SessionStore, health: Health = http_health,
         with ThreadPoolExecutor(max_workers=min(MAX_PROBES, len(sessions))) as ex:
             states = dict(zip((s.id for s in sessions),
                               ex.map(lambda s: _session_state(s, health), sessions)))
+    used = usage(status, models, sessions) if usage is not None and (
+        status.running or sessions) else {}
     return ServingSnapshot(status, models, error, sessions, states,
-                           state.started if state else 0.0, state.log if state else "", now())
+                           state.started if state else 0.0, state.log if state else "", now(),
+                           used)
 
 
 def gateway_state(snap: ServingSnapshot | None, busy: str = "", now: float | None = None) -> str:

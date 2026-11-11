@@ -207,6 +207,30 @@ def nvidia_smi_devices(runner: Runner = subprocess.run) -> list[Device]:
         "--format=csv,noheader,nounits"], SMI_TIMEOUT))
 
 
+def nvidia_smi_process_memory(runner: Runner = subprocess.run) -> dict[int, int]:
+    """Per-process device memory from ``nvidia-smi --query-compute-apps``.
+
+    Args:
+        runner: subprocess.run compatible callable.
+
+    Returns:
+        pid -> bytes of device memory; rows the driver cannot report ("[N/A]") or that do
+        not parse are skipped, {} when nvidia-smi is missing or fails.
+    """
+    out: dict[int, int] = {}
+    for line in _run(runner, ["nvidia-smi",
+                              "--query-compute-apps=pid,used_memory",
+                              "--format=csv,noheader,nounits"], SMI_TIMEOUT).splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            out[int(parts[0])] = int(parts[1]) * MiB
+        except ValueError:
+            continue
+    return out
+
+
 def _server_bin(bin_dir: str | os.PathLike | None) -> str:
     """Path of llama-server inside `bin_dir`, or the bare name for a PATH lookup."""
     return str(Path(bin_dir) / "llama-server") if bin_dir else "llama-server"

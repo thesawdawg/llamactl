@@ -23,6 +23,7 @@ from .measure import Measurement
 from .planner import Plan
 from .sessions import BASE_PORT, Session
 from .tuner import TrialEvent, TuneResult
+from .usage import Usage
 
 
 def hw_data(host: Host, calibration: Calibration, bin_dir: str, found: bool, build: str) -> dict:
@@ -264,7 +265,7 @@ def event_line(e: TrialEvent) -> str:
 
 def ps_data(status: GatewayStatus, models: list[GatewayModel] | None, error: str,
             sessions: list[Session], states: dict[str, str], now: float,
-            started: float = 0.0) -> dict:
+            started: float = 0.0, usage: dict[str, Usage] | None = None) -> dict:
     """Gateway and standalone/attached servers.
 
     Args:
@@ -275,11 +276,21 @@ def ps_data(status: GatewayStatus, models: list[GatewayModel] | None, error: str
         states: Health state by session id ("ready", "loading", "down").
         now: Current Unix time.
         started: Gateway start time (Unix), 0 when unknown.
+        usage: Per-process usage by row key ("gw:<model>", "s:<session id>"), or None.
 
     Returns:
         Dict with "gateway" and "sessions"; each has ``url`` (what llamactl connects to) and
-        ``urls`` (what a client should use: LAN URLs too for a wildcard bind).
+        ``urls`` (what a client should use: LAN URLs too for a wildcard bind). Each model and
+        session gets ``usage`` (pid, cpu_pct, rss, vram, vram_source) or None.
     """
+    used = usage or {}
+
+    def u_dict(key: str) -> dict | None:
+        u = used.get(key)
+        return None if u is None else {
+            "pid": u.pid, "cpu_pct": u.cpu_pct, "rss": u.rss,
+            "vram": u.vram, "vram_source": u.vram_source}
+
     return {
         "gateway": {"running": status.running, "url": status.url,
                     "urls": network.client_urls_for(status.url, status.host),
@@ -287,12 +298,14 @@ def ps_data(status: GatewayStatus, models: list[GatewayModel] | None, error: str
                     "pid": status.pid, "uptime_s": int(now - started) if started else None,
                     "error": error,
                     "models": None if models is None else [
-                        {"name": m.name, "state": m.state, "exit_code": m.exit_code}
+                        {"name": m.name, "state": m.state, "exit_code": m.exit_code,
+                         "usage": u_dict(f"gw:{m.name}")}
                         for m in models]},
         "sessions": [{"id": s.id, "name": s.name, "url": s.url,
                       "urls": [s.url] if s.external else s.urls, "pid": s.pid,
                       "external": s.external, "log": s.log,
                       "state": states.get(s.id, "down"),
-                      "uptime_s": int(now - s.started) if s.started else None}
+                      "uptime_s": int(now - s.started) if s.started else None,
+                      "usage": u_dict(f"s:{s.id}")}
                      for s in sessions],
     }
