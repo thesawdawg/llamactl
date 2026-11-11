@@ -257,3 +257,33 @@ def test_session_default_state_dir_is_a_temp_dir_not_the_real_one() -> None:
                       (gateway, "PRESETS_FILE"), (sessions, "STATE_FILE"), (hf, "TOKEN_FILE")):
         assert getattr(mod, name).parent == config.CONFIG_DIR, f"{mod.__name__}.{name}"
     assert config.LOG_DIR.parent == config.CONFIG_DIR
+
+
+# ---------------------------------------------------------------------------- onboarded
+
+def test_v2_config_with_presets_counts_as_onboarded_without_a_save(cfg_dir: Path) -> None:
+    text = _v2(cfg_dir)
+    cfg = Config.load()
+    assert cfg.onboarded
+    assert (cfg_dir / "config.json").read_text() == text and not (cfg_dir / config.BACKUP_NAME).exists()
+
+
+def test_v2_config_with_custom_dirs_only_counts_as_onboarded(cfg_dir: Path) -> None:
+    (cfg_dir / "config.json").write_text(json.dumps({"version": 2, "model_dirs": ["/elsewhere"]}))
+    assert Config.load().onboarded
+    (cfg_dir / "config.json").write_text(json.dumps({"version": 2, "bin_dir": "/opt/llama/bin"}))
+    assert Config.load().onboarded
+
+
+def test_v2_config_with_only_defaults_is_not_onboarded(cfg_dir: Path) -> None:
+    (cfg_dir / "config.json").write_text(json.dumps({"version": 2, "headroom_pct": 12}))
+    assert not Config.load().onboarded
+
+
+def test_v3_config_keeps_its_own_flag(cfg_dir: Path) -> None:
+    (cfg_dir / "config.json").write_text(json.dumps(
+        {"version": 3, "model_dirs": ["/elsewhere"], "onboarded": False}))
+    assert not Config.load().onboarded
+    (cfg_dir / "config.json").write_text(json.dumps({"version": 3, "onboarded": True}))
+    assert Config.load().onboarded
+    assert not Config().onboarded and not Config.from_dict({}).onboarded

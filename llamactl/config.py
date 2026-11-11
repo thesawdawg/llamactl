@@ -333,7 +333,9 @@ class Config:
         """Build a config from parsed JSON of any version, migrating v2 on the way.
 
         A v2 (or unversioned) file carries ``profiles[path]``; each becomes the model's
-        "custom" preset (source "edited") and the active one. Unknown keys are ignored.
+        "custom" preset (source "edited") and the active one. Such a file counts as onboarded
+        (in memory only) when it has model presets or a non-default ``bin_dir`` /
+        ``model_dirs``. Unknown keys are ignored.
 
         Args:
             raw: Parsed config.json.
@@ -364,6 +366,11 @@ class Config:
         for path, ent in cfg.models.items():
             if not ent.alias:
                 ent.alias = derive_alias(path, {e.alias for e in cfg.models.values()})
+        if not (isinstance(version, int) and version >= 3) and not cfg.onboarded:
+            # A v2 user already set llamactl up: do not walk them through first-run setup.
+            # Only in memory; the file is rewritten (as v3) when something else saves it.
+            cfg.onboarded = bool(cfg.models) or cfg.bin_dir != str(DEFAULT_BIN_DIR) or \
+                cfg.model_dirs != list(DEFAULT_MODEL_DIRS)
         return cfg
 
     @classmethod
