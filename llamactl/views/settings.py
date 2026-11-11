@@ -95,6 +95,7 @@ class SettingsView(BaseView):
             with Horizontal(id="set_buttons"):
                 yield Button("Save (Ctrl+S)", id="save", variant="primary")
                 yield Button("Edit default profile", id="edit_default")
+                yield Button("Run setup again", id="run_setup")
             yield Static("", id="set_msg")
 
     def on_mount(self) -> None:
@@ -130,6 +131,11 @@ class SettingsView(BaseView):
 
         self.app.push_screen(PromptScreen("Hugging Face access token", TOKEN_HINT,
                                           hf.load_token() or "", password=True), done)
+
+    @on(Button.Pressed, "#run_setup")
+    def _run_setup(self) -> None:
+        """Open the guided first-run setup again."""
+        self.app.show_onboarding()
 
     @on(Button.Pressed, "#edit_default")
     def _edit_default(self) -> None:

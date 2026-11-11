@@ -436,8 +436,7 @@ Screens: `IntentPicker` (cards with verdict/ctx/why per intent), `PlanScreen` (w
 RecommendationScreen: verdict, budget, Setting/Base/Planned/Why table; save as preset, edit, tune, serve), `TuneScreen` (live trial table with
 progress, cancel), `PresetEditor` (was ProfileEditor, unchanged mechanics), `Onboarding`.
 
-As built (Phase 6; Discover's fit-aware lists, the post-download picker and Onboarding are
-Phase 7):
+As built (Phase 6; Phase 7 additions follow):
 
 - **Services and threading.** `LlamaCtl` owns `cfg`, `host`, `models` + `infos` (GGUF headers),
   `calibration`, `gateway`, `store`, the llama-server `build` string and the last
@@ -478,10 +477,34 @@ Phase 7):
   gateway; host, port, API key and models-max are command line options of the router, so
   changing them tells the user to restart it.
 
-Onboarding runs when `onboarded` is false: (1) locate llama.cpp (`bin_dir`, then `PATH`) and show
-its version; (2) show detected hardware; (3) confirm model directories and scan; (4) no models:
-go to Discover; otherwise pick a model and an intent; (5) plan, optional tune; (6) start the
-gateway and show the endpoint. Every step can be skipped.
+**Onboarding** (Phase 7; `onboarding.py` is the pure step logic, `screens/onboarding.py` the shell).
+It opens over the shell when `onboarded` is false and again from Settings ("Run setup again", where
+Skip reads "Cancel" and saves nothing). A v2 config that has model presets, or a `bin_dir` /
+`model_dirs` other than the defaults, counts as onboarded (set in memory when it is loaded; nothing
+is saved). Five steps with Back / Next / Skip setup (also `ctrl+b`, `ctrl+n`, Esc) and a
+"Step n of 5: Title" line; every step can be passed over with Next. The flow edits a `Draft`; the
+config is only touched by `onboarding.finish` (on the UI thread) or `skip`. Detection, scanning and
+planning run in workers through `run_bg`.
+
+1. **llama.cpp**: looks in `cfg.bin_dir`, then `llama-server` on `PATH` (`shutil.which`, injectable);
+   shows the path and the build string (`LlamaCtl.build_for`, which reuses `ServerRunner.build`) and
+   an input to set another folder, validated live (folder exists and holds `llama-server`), with a
+   one-line hint on how to get llama.cpp. Nothing is downloaded or built.
+2. **Hardware**: devices, RAM, CPU and one sentence from the pure `hardware_sentence`: the largest
+   model file that runs fully on the GPU at the default intent's context (a typical 8B model's f16
+   KV cache is assumed, so it is a guide; "trained" contexts count as 32k), or the RAM equivalent
+   without a GPU.
+3. **Models**: the Settings `FolderList` editor, a scan in a worker, then "N models, X GB in total".
+   With none, "Find a model" applies the draft, finishes and lands on Discover.
+4. **Purpose**: intent cards without per-model numbers (the highlighted one becomes the default
+   intent) and an optional first model, each listed with its verdict for that intent.
+5. **Finish**: summary, "Tune now" (opens the TuneScreen after closing; default off) and "Start the
+   gateway" (default on; nothing permanent, `autostart` is untouched); both need a chosen model and a
+   working llama.cpp folder. Finishing sets the folder, model folders and default intent, creates the
+   `estimated` preset of the default intent for the chosen model (`actions.pick_preset`; an existing
+   preset is never replaced and an existing active preset stays active), sets `onboarded` and saves.
+   The pane then shows the endpoint URL, the served name, the `curl` snippet and how the gateway
+   start went. "Skip setup" marks the config onboarded and applies nothing.
 
 ## 10. Testing
 

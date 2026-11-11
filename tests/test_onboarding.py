@@ -216,3 +216,18 @@ def test_skip_marks_onboarded_once_and_applies_nothing(isolated: SimpleNamespace
     assert ob.skip(cfg) and cfg.onboarded and Config.load().onboarded
     assert Config.load().bin_dir == "/old"
     assert ob.skip(cfg) is False
+
+
+def test_hardware_and_summary_lines() -> None:
+    lines = ob.hardware_lines(make_host(16e9))
+    assert lines[0].startswith("CUDA0") and "16.0 GB (16.0 GB free)" in lines[0]
+    assert lines[1].startswith("RAM") and "24.0 GB" in lines[1]
+    assert lines[2] == "CPU      Test CPU, 16 threads, 8 cores"
+    assert ob.hardware_lines(Host()) == ["detecting..."]
+    assert "no GPU found" in ob.hardware_lines(Host(ram_total=int(8e9), ram_free=int(4e9)))[0]
+    d = ob.Draft("/b", ["/m"], "agent", "/m/a.gguf")
+    out = ob.summary_lines(d, True, "alpha")
+    assert out[0] == "llama.cpp      /b" and out[2] == "Default intent Agent"
+    assert out[3] == "First model    alpha"
+    bad = ob.summary_lines(ob.Draft("", [], "chat"), False, "")
+    assert "not set" in bad[0] and "fix it in Settings" in bad[0] and "pick one later" in bad[3]

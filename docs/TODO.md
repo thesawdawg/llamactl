@@ -57,7 +57,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 7 - Onboarding and Discover
 
-- [ ] Onboarding flow
+- [x] Onboarding flow
 - [ ] Discover: fit-aware file lists, post-download intent picker
 
 ## Phase 8 - Release prep

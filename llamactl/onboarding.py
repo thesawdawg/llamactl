@@ -25,9 +25,9 @@ from .intents import INTENTS, Intent, resolve
 from .library import aliases_for
 
 BINARY = "llama-server"
-SRC_CONFIG, SRC_PATH, SRC_NONE = "config", "PATH", "none"
-LLAMA_HINT = ("Get llama.cpp from github.com/ggml-org/llama.cpp (prebuilt releases, or build it with "
-              "cmake), then enter the folder that holds llama-server.")
+SRC_CONFIG, SRC_PATH, SRC_TYPED, SRC_NONE = "config", "PATH", "typed", "none"
+LLAMA_HINT = ("Get llama.cpp at github.com/ggml-org/llama.cpp (prebuilt releases or a cmake build), "
+              "then enter the folder that holds llama-server.")
 TYPICAL_KV_PER_TOKEN = 128 * 1024        # f16 K+V of a typical 8B model: 32 layers x 8 kv heads x 128 x 2 x 2 bytes
 TRAINED_CTX_ASSUMED = 32768              # context assumed for an intent that aims for the trained one
 
@@ -37,6 +37,7 @@ STEPS = (STEP_LLAMA, STEP_HARDWARE, STEP_MODELS, STEP_PURPOSE, STEP_FINISH)
 TITLES = {STEP_LLAMA: "llama.cpp", STEP_HARDWARE: "Hardware", STEP_MODELS: "Models",
           STEP_PURPOSE: "Purpose", STEP_FINISH: "Finish"}
 
+INTENT_LABELS = {i.key: i.label for i in INTENTS}
 Which = Callable[[str], "str | None"]
 BuildOf = Callable[[str], str]
 
@@ -49,7 +50,8 @@ class LlamaLocation:
 
     Attributes:
         bin_dir: Folder holding it, "" when not found.
-        source: ``SRC_CONFIG`` (the configured folder), ``SRC_PATH`` or ``SRC_NONE``.
+        source: ``SRC_CONFIG`` (the configured folder), ``SRC_PATH``, ``SRC_TYPED`` (a folder
+            the user entered) or ``SRC_NONE``.
     """
 
     bin_dir: str = ""
@@ -116,7 +118,8 @@ def llama_text(loc: LlamaLocation, build: str) -> str:
     """
     if not loc.found:
         return f"llama-server was not found in the configured folder or on PATH.\n{LLAMA_HINT}"
-    where = "the configured folder" if loc.source == SRC_CONFIG else "PATH"
+    where = {SRC_CONFIG: "the configured folder", SRC_TYPED: "the folder you entered"}.get(
+        loc.source, "PATH")
     return f"Found {loc.binary} (from {where}).\nBuild: {build or 'reading the version...'}"
 
 
@@ -190,6 +193,27 @@ def hardware_sentence(host: Host, intent: Intent, headroom_pct: float = 10) -> s
             f"; larger ones spill into your {ram} and run slower.")
     return (f"With {what} ({mem}), a model file up to about {_gb(room)} GB runs fully on the GPU "
             f"at {ctx}{tail}")
+
+
+def hardware_lines(host: Host) -> list[str]:
+    """The detected devices, RAM and CPU, one plain line each.
+
+    Args:
+        host: Host snapshot.
+
+    Returns:
+        Lines such as ``CUDA0   NVIDIA GeForce RTX 4060 Ti  16.0 GB (15.2 GB free)``.
+    """
+    if not host.gpus and not host.ram_total:
+        return ["detecting..."]
+    lines = [f"{d.id:<9}{d.name}  {_gb(d.total)} GB ({_gb(d.free)} GB free)" for d in host.gpus]
+    if not host.gpus:
+        lines.append("no GPU found: models run on the CPU")
+    lines.append(f"{'RAM':<9}{_gb(host.ram_total)} GB ({_gb(host.ram_free)} GB free)"
+                 + (", shared with the GPU" if host.unified else ""))
+    lines.append(f"{'CPU':<9}{host.cpu_name or '?'}, {host.cpu_threads} threads, "
+                 f"{host.cpu_cores} cores")
+    return lines
 
 
 # --------------------------------------------------------------------------- step 3: models
@@ -398,6 +422,26 @@ class Flow:
         return not check_bin_dir(self.draft.bin_dir)
 
 
+# What the flow hands back when it closes.
+ACT_DONE, ACT_TUNE, ACT_DISCOVER, ACT_SKIPPED = "done", "tune", "discover", "skipped"
+
+
+@dataclass(frozen=True)
+class Dismissal:
+    """How the flow ended.
+
+    Attributes:
+        action: ``ACT_DONE``, ``ACT_TUNE`` (open the tune screen for `model`), ``ACT_DISCOVER``
+            (no models: go find one) or ``ACT_SKIPPED``.
+        model: Model path the action is about, "".
+        intent: Intent key of its preset, "".
+    """
+
+    action: str = ACT_DONE
+    model: str = ""
+    intent: str = ""
+
+
 @dataclass(frozen=True)
 class FinishResult:
     """What finishing did, for the last screen.
@@ -479,6 +523,27 @@ def finish(cfg: Config, draft: Draft, infos: dict[str, ModelInfo], host: Host,
             bin_changed=bin_changed, dirs_changed=dirs_changed)
     cfg.save()
     return out
+
+
+def summary_lines(draft: Draft, llama_ok: bool, model_alias: str) -> list[str]:
+    """What finishing will apply, for the last step.
+
+    Args:
+        draft: The choices.
+        llama_ok: The drafted llama.cpp folder holds llama-server.
+        model_alias: Alias of the chosen model, "" for none.
+
+    Returns:
+        One line per setting.
+    """
+    n = len(draft.model_dirs)
+    return [
+        f"llama.cpp      {draft.bin_dir.strip() or 'not set'}"
+        + ("" if llama_ok else "  (llama-server not found: fix it in Settings later)"),
+        f"Model folders  {n} folder{'s' * (n != 1)}",
+        f"Default intent {INTENT_LABELS.get(draft.default_intent, draft.default_intent)}",
+        f"First model    {model_alias or 'none: pick one later in Models'}",
+    ]
 
 
 def skip(cfg: Config) -> bool:

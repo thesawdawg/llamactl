@@ -129,7 +129,7 @@ def ui_env(isolated: SimpleNamespace, tmp_path: Path, gguf_file: Path) -> Simple
     """`isolated` plus a llama.cpp folder with a (fake) llama-server and a model factory.
 
     Returns:
-        Namespace with cfg_dir, model_dir, host, bin_dir, cfg (a Config using both folders) and
+        Namespace with cfg_dir, model_dir, host, bin_dir, cfg (an onboarded Config using both folders) and
         `add_model(name) -> Path`, which copies the synthetic GGUF into the model folder.
     """
     import shutil
@@ -139,7 +139,7 @@ def ui_env(isolated: SimpleNamespace, tmp_path: Path, gguf_file: Path) -> Simple
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "llama-server").touch()
-    cfg = Config(bin_dir=str(bin_dir), model_dirs=[str(isolated.model_dir)])
+    cfg = Config(bin_dir=str(bin_dir), model_dirs=[str(isolated.model_dir)], onboarded=True)
 
     def add_model(name: str = "alpha.gguf") -> Path:
         dest = isolated.model_dir / name

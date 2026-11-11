@@ -30,6 +30,13 @@ def _host() -> Host:
                 cpu_threads=16, cpu_cores=8)
 
 
+def onboarded_app() -> LlamaCtl:
+    """The real app over the isolated (empty) state, as if the first-run setup had been done."""
+    cfg = Config.load()
+    cfg.onboarded = True
+    return LlamaCtl(cfg=cfg)
+
+
 class _App(App[None]):
     """Minimal app that pushes a PresetEditor and records its result."""
 
@@ -177,7 +184,7 @@ async def test_settings_view(isolated: SimpleNamespace, tmp_path: Path,
     new_dir = tmp_path / "extra"
     new_dir.mkdir()
     monkeypatch.setattr(hf, "TOKEN_FILE", isolated.cfg_dir / "hf_token")
-    app = LlamaCtl()
+    app = onboarded_app()
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.press("5")
         await pilot.pause(0.2)
@@ -207,7 +214,7 @@ async def test_hf_view_tables(isolated: SimpleNamespace, monkeypatch) -> None:
          "architecture": "qwen3", "context_length": 32768}}])
     monkeypatch.setattr(hf, "list_gguf", lambda r, t: [
         {"path": "m-Q8_0.gguf", "quant": "Q8_0", "size": int(8e9), "parts": 1}])
-    app = LlamaCtl()
+    app = onboarded_app()
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.press("4")
         await pilot.pause(0.2)
@@ -233,14 +240,14 @@ async def test_pollers_finishing_during_shutdown_do_not_fail(isolated: SimpleNam
     (isolated.cfg_dir / "config.json").write_text(
         json.dumps({"version": 3, "gauge_interval": 0.01}))
     for _ in range(8):
-        app = LlamaCtl()
+        app = onboarded_app()
         async with app.run_test(size=(140, 45)) as pilot:
             await pilot.pause(0.15)
 
 
 async def test_ui_helper_is_safe_when_the_target_is_gone(isolated: SimpleNamespace) -> None:
     """`LlamaCtl.ui` drops calls to removed widgets and to a closed app instead of raising."""
-    app = LlamaCtl()
+    app = onboarded_app()
     calls: list[str] = []
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.pause(0.1)

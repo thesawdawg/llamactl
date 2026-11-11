@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import struct
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -192,6 +193,7 @@ class ModelInfoCache:
         except (OSError, ValueError):
             data = {}
         self._data: dict = data if isinstance(data, dict) else {}
+        self._lock = threading.Lock()          # the app scan and the setup scan may both `put`
 
     def get(self, path: Path) -> ModelInfo | None:
         """Cached info for `path`, or None when missing, stale or written before pooling_type.
@@ -216,9 +218,10 @@ class ModelInfoCache:
         Args:
             info: Parsed model info.
         """
-        self._data[str(info.path)] = {**asdict(info), "path": str(info.path),
-                                      "mtime": info.path.stat().st_mtime}
-        if not self.writable:
-            return
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_file.write_text(json.dumps(self._data, indent=2))
+        with self._lock:
+            self._data[str(info.path)] = {**asdict(info), "path": str(info.path),
+                                          "mtime": info.path.stat().st_mtime}
+            if not self.writable:
+                return
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_file.write_text(json.dumps(self._data, indent=2))

@@ -11,6 +11,7 @@ the app or the target widget is already gone.
 """
 from __future__ import annotations
 
+import shutil
 import threading
 import time
 from functools import partial
@@ -27,12 +28,13 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Header, Label, ListItem, ListView
 from textual.worker import Worker, get_current_worker
 
-from . import actions, hardware, library, tuner
+from . import actions, hardware, library, onboarding, tuner
 from .actions import ActionError
 from .calibration import Calibration
 from .config import Config
 from .gateway import Gateway, GatewayError
 from .gguf import GGUFError, ModelInfo, ModelInfoCache, read_model_info
+from .onboarding import Dismissal, FinishResult
 from .serving import (GW_STARTING, GW_STOPPING, Health, ServingSnapshot, gateway_state, gather,
                       http_health)
 from .sessions import SessionStore
@@ -99,6 +101,7 @@ class LlamaCtl(App):
         runner_factory: Returns the `Runner` a tune measures with.
         build: Returns the llama-server version string (called off the UI thread).
         health: Returns "ready", "loading" or "down" for a server URL.
+        which: ``shutil.which`` compatible lookup the first-run setup uses to find llama-server.
     """
 
     TITLE = "llamactl"
@@ -126,7 +129,8 @@ class LlamaCtl(App):
                  store: SessionStore | None = None, gateway: Gateway | None = None,
                  info_cache: ModelInfoCache | None = None,
                  runner_factory: Callable[[], Runner] | None = None,
-                 build: Callable[[], str] | None = None, health: Health = http_health) -> None:
+                 build: Callable[[], str] | None = None, health: Health = http_health,
+                 which: Callable[[str], str | None] = shutil.which) -> None:
         super().__init__()
         self.cfg = cfg or Config.load()
         self.calibration = calibration or Calibration.load()
@@ -137,6 +141,7 @@ class LlamaCtl(App):
             lambda: ServerRunner(self.cfg))
         self._build_fn = build or (lambda: ServerRunner(self.cfg).build())
         self.health = health
+        self.which = which
         self.host = hardware.Host()
         self.models: list[Path] = []
         self.infos: dict[str, ModelInfo] = {}
@@ -191,6 +196,8 @@ class LlamaCtl(App):
                 self.start_gateway()
             else:
                 self.fail(f"autostart: llama-server not found in {self.cfg.bin_dir}")
+        if not self.cfg.onboarded:
+            self.show_onboarding()
 
     def _alive(self) -> bool:
         """True while the app and its base screen can still be touched."""
@@ -286,7 +293,8 @@ class LlamaCtl(App):
 
     def run_bg(self, fn: Callable[[], Any], *, label: str, group: str = "bg",
                exclusive: bool = False, done: Callable[[Any], None] | None = None,
-               always: Callable[[], None] | None = None, quiet: bool = False) -> Worker:
+               always: Callable[[], None] | None = None, quiet: bool = False,
+               failed: Callable[[Exception], None] | None = None) -> Worker:
         """Run `fn` in a thread worker and bring its outcome back to the UI thread.
 
         A failure never escapes as a traceback: it becomes a status-bar message and, unless
@@ -301,20 +309,24 @@ class LlamaCtl(App):
             done: Called on the UI thread with the return value when `fn` succeeded.
             always: Called on the UI thread when `fn` finished, however it ended.
             quiet: Report failures in the status bar only (for polls).
+            failed: Called on the UI thread with the exception when `fn` raised (in addition to
+                the message).
 
         Returns:
             The worker.
         """
         def guarded() -> None:
             worker = get_current_worker()
-            failed = False
+            broke = False
             result: Any = None
             try:
                 result = fn()
             except Exception as e:  # noqa: BLE001 - the single place failures become messages
-                failed = True
+                broke = True
                 self.ui(self._bg_failed, label, e, quiet)
-            if not failed and done is not None and not worker.is_cancelled:
+                if failed is not None:
+                    self.ui(failed, e)
+            if not broke and done is not None and not worker.is_cancelled:
                 self.ui(done, result)
             if always is not None:
                 self.ui(always)
@@ -393,18 +405,29 @@ class LlamaCtl(App):
             models = library.discover_models(dirs)
             self.ui(self._models_found, gen, models)
             for p in models:
-                info = self.info_cache.get(p)
-                if info is None:
-                    try:
-                        info = read_model_info(p)
-                        self.info_cache.put(info)
-                    except (GGUFError, OSError):
-                        info = None
-                self.ui(self._info_read, gen, p, info)
+                self.ui(self._info_read, gen, p, self.read_header(p))
             self.ui(self._scan_done, gen)
 
         self.run_bg(work, label="Scanning models", group="scan", exclusive=True,
                     always=partial(self._scan_ended, gen))
+
+    def read_header(self, path: Path) -> ModelInfo | None:
+        """The GGUF header of a model, from the cache or the file (blocking: call in a worker).
+
+        Args:
+            path: Model file.
+
+        Returns:
+            The metadata, or None when the file cannot be read.
+        """
+        info = self.info_cache.get(path)
+        if info is None:
+            try:
+                info = read_model_info(path)
+                self.info_cache.put(info)
+            except (GGUFError, OSError):
+                return None
+        return info
 
     def _models_found(self, gen: int, models: list[Path]) -> None:
         """The folders were scanned: tell the views (ignored when a newer scan started)."""
@@ -446,6 +469,19 @@ class LlamaCtl(App):
 
         self.run_bg(work, label="Reading the llama.cpp version", group="build", exclusive=True,
                     done=self._build_known, quiet=True)
+
+    def build_for(self, bin_dir: str) -> str:
+        """The llama-server version of a llama.cpp folder (blocking: call in a worker).
+
+        Args:
+            bin_dir: Folder holding llama-server; the configured one uses the injected reader.
+
+        Returns:
+            The version string, "" when it cannot be determined.
+        """
+        if bin_dir == self.cfg.bin_dir:
+            return self._build_fn() if binary_found(self.cfg) else ""
+        return ServerRunner(Config(bin_dir=bin_dir)).build()
 
     def _build_known(self, build: str) -> None:
         """The llama-server version is known: views re-judge stale presets."""
@@ -506,11 +542,18 @@ class LlamaCtl(App):
 
     # ------------------------------------------------------------------ gateway flows
 
-    def start_gateway(self) -> None:
-        """Start the gateway in a worker and wait until it answers ``/health``."""
+    def start_gateway(self, finished: Callable[[str], None] | None = None) -> None:
+        """Start the gateway in a worker and wait until it answers ``/health``.
+
+        Args:
+            finished: Called on the UI thread when the attempt ended, with "" when the gateway
+                runs and the reason when it could not be started.
+        """
         if self.gw_busy:
             return
         if not binary_found(self.cfg):
+            if finished is not None:
+                finished(f"llama-server not found in {self.cfg.bin_dir}")
             return self.fail(f"llama-server not found in {self.cfg.bin_dir}; set the llama.cpp "
                              "folder in Settings")
         self._set_busy(GW_STARTING)
@@ -526,9 +569,12 @@ class LlamaCtl(App):
             self.say(f"Gateway running at {url}" if started else f"Gateway already running at {url}")
             if self.gateway.problems:
                 self.say("Gateway running; " + "; ".join(self.gateway.problems))
+            if finished is not None:
+                finished("")
 
         self.run_bg(work, label="Starting the gateway", group="gateway", done=done,
-                    always=self._gateway_op_ended)
+                    always=self._gateway_op_ended,
+                    failed=(lambda e: finished(str(e))) if finished is not None else None)
 
     def stop_gateway(self) -> None:
         """Stop the gateway (and the models it runs) in a worker."""
@@ -758,6 +804,36 @@ class LlamaCtl(App):
         except LookupError as e:
             return self.fail(str(e))
         self.push_screen(TuneScreen(path, info, intent))
+
+    def show_onboarding(self) -> None:
+        """Open the guided setup (first run, or "Run setup again" in Settings)."""
+        from .screens.onboarding import OnboardingScreen
+
+        self.push_screen(OnboardingScreen(self.which), self._onboarding_done)
+
+    def _onboarding_done(self, how: Dismissal | None) -> None:
+        """The setup closed: land where it said (Discover, the tune screen) or stay put."""
+        if how is None:
+            return
+        if how.action == onboarding.ACT_DISCOVER:
+            self.switch_view("discover")
+        elif how.action == onboarding.ACT_TUNE and how.model:
+            self.open_tune(how.model, how.intent)
+
+    def setup_applied(self, res: FinishResult) -> None:
+        """The setup applied its draft to the config (already saved): refresh what depends on it.
+
+        Args:
+            res: What `onboarding.finish` did.
+        """
+        if res.bin_changed:
+            self.detect_build()
+            self.poll_host()
+        if res.dirs_changed:
+            self.rescan()
+        self.config_changed()
+        if res.model:
+            self.presets_changed(res.model, save=False)
 
     def run_suggestion(self, s: Suggestion) -> None:
         """Do what a "next step" on the Home view asks for.
