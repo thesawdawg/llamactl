@@ -9,11 +9,12 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.validation import Function, Integer, Number
-from textual.widgets import Button, Input, Label, ListItem, ListView, Select, Static, Switch
+from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 from .. import hf
 from ..intents import INTENTS
 from ..screens.prompt import PromptScreen
+from ..widgets.folders import FolderList
 from .base import BaseView
 from .hf import TOKEN_HINT
 
@@ -26,10 +27,7 @@ RESTART_FIELDS = (("host", "host"), ("port", "port"), ("api_key", "API key"),
 class SettingsView(BaseView):
     """Form for the app's settings; saving applies them and reloads a running gateway."""
 
-    BINDINGS = [
-        Binding("ctrl+s", "save", "Save"),
-        Binding("delete", "remove_dir", "Remove dir"),
-    ]
+    BINDINGS = [Binding("ctrl+s", "save", "Save")]
     DEFAULT_CSS = """
     SettingsView { height: 1fr; }
     #set_scroll { padding: 0 1; }
@@ -39,7 +37,6 @@ class SettingsView(BaseView):
     #set_scroll .row Input { width: 50; }
     #set_scroll .row Select { width: 50; }
     #set_scroll .hint { color: $text-muted; text-style: italic; padding: 0 1; }
-    #dir_list { height: auto; max-height: 6; border: round $primary-darken-2; }
     #set_buttons { height: auto; margin-top: 1; }
     #set_buttons Button { margin-right: 1; }
     #set_msg { height: auto; margin-top: 1; }
@@ -64,10 +61,7 @@ class SettingsView(BaseView):
                 Function(self._bin_ok, "needs llama-server inside")]), "folder holding llama-server")
             yield Label("Model folders (scanned recursively for .gguf; Delete removes the "
                         "highlighted one)", classes="section")
-            yield ListView(*[ListItem(Label(d)) for d in cfg.model_dirs], id="dir_list")
-            yield row("Add folder", Input(placeholder="path, then Enter", id="add_dir",
-                                          compact=True, validators=[
-                Function(self._dir_ok, "not a directory")]))
+            yield FolderList(cfg.model_dirs)
             yield Label("Serving", classes="section")
             yield row("Default intent", Select(
                 [(i.label, i.key) for i in INTENTS], allow_blank=False, id="default_intent",
@@ -116,11 +110,6 @@ class SettingsView(BaseView):
         """True when the dir contains a llama-server executable."""
         return (Path(value).expanduser() / "llama-server").exists()
 
-    @staticmethod
-    def _dir_ok(value: str) -> bool:
-        """True for an existing directory (empty input is ignored, not saved)."""
-        return not value.strip() or Path(value).expanduser().is_dir()
-
     def _token_state(self) -> None:
         """Label the token button with whether a token exists."""
         self.query_one("#set_token", Button).label = (
@@ -130,21 +119,6 @@ class SettingsView(BaseView):
         """Show a message under the form and in the status bar."""
         self.query_one("#set_msg", Static).update(text)
         self.say(text)
-
-    @on(Input.Submitted, "#add_dir")
-    def _add_dir(self, event: Input.Submitted) -> None:
-        """Enter in the add-folder box: append a valid folder to the list."""
-        inp = event.input
-        if not inp.is_valid or not inp.value.strip():
-            return self.say("Not a directory.")
-        self.query_one("#dir_list", ListView).append(ListItem(Label(inp.value.strip())))
-        inp.value = ""
-
-    def action_remove_dir(self) -> None:
-        """Remove the highlighted model folder from the list (applied on save)."""
-        lv = self.query_one("#dir_list", ListView)
-        if lv.highlighted_child is not None:
-            lv.highlighted_child.remove()
 
     @on(Button.Pressed, "#set_token")
     def _set_token(self) -> None:
@@ -166,11 +140,6 @@ class SettingsView(BaseView):
         """True when every text field validates."""
         return all(self.query_one(f"#{i}", Input).is_valid for i in TEXT_INPUTS)
 
-    def _dirs(self) -> list[str]:
-        """The model folders currently listed."""
-        return [item.children[0].content  # type: ignore[attr-defined]
-                for item in self.query_one("#dir_list", ListView).children]
-
     def action_save(self) -> None:
         """Validate, apply, write the config, then rescan and reload the gateway presets."""
         if not self._fields_valid():
@@ -180,7 +149,7 @@ class SettingsView(BaseView):
         before = (cfg.bin_dir, list(cfg.model_dirs), cfg.headroom_pct, g.host, g.port, g.api_key,
                   g.models_max)
         cfg.bin_dir = self.query_one("#bin_dir", Input).value.strip()
-        cfg.model_dirs = self._dirs()
+        cfg.model_dirs = self.query_one(FolderList).dirs()
         cfg.gauge_interval = float(self.query_one("#gauge_interval", Input).value)
         cfg.headroom_pct = int(self.query_one("#headroom_pct", Input).value)
         cfg.default_intent = str(self.query_one("#default_intent", Select).value)
