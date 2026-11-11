@@ -27,7 +27,8 @@ from .gateway import terminate_group
 from .gguf import ModelInfo
 from .hardware import Device, Host
 from .intents import KV_NEVER, Intent
-from .measure import ERR_ARGS, ERR_BENCH, ERR_LOAD, ERR_OOM, ERR_TIMEOUT, Measurement
+from .measure import (ERR_ARGS, ERR_BENCH, ERR_CANCELLED, ERR_LOAD, ERR_OOM, ERR_TIMEOUT,
+                      Measurement)
 from .planner import F16, GB, Q8, VERDICT_CPU, VERDICT_GPU, VERDICT_NO, VERDICT_SPILL, Plan
 from .sessions import next_free_port, pid_alive
 
@@ -142,12 +143,15 @@ class TuneResult:
 class Runner(Protocol):
     """The only part of tuning that touches processes and HTTP."""
 
-    def measure(self, model: Path, profile: Profile) -> Measurement:
+    def measure(self, model: Path, profile: Profile,
+                cancel: Callable[[], bool] | None = None) -> Measurement:
         """Launch the model with a profile, benchmark it and stop it again.
 
         Args:
             model: GGUF file.
             profile: Settings to launch with.
+            cancel: Polled while waiting; when it returns True the launch is stopped and a
+                measurement whose error starts with ``cancelled`` is returned.
 
         Returns:
             The measurement; a failed load is ``ok=False`` with an ``error``, not an exception.
@@ -378,7 +382,9 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
     """Find the best measured profile for an intent by launching real candidates.
 
     Starts from `planner.plan` and follows `next_candidate` until it has nothing left to try,
-    `max_trials` launches happened, or `cancel` returns True (checked before each trial). A
+    `max_trials` launches happened, or `cancel` returns True (checked before each trial and
+    handed to the runner, which stops a trial in flight; that trial is reported through
+    `progress` but is not recorded and does not count as a failure to step down from). A
     Ctrl-C (``KeyboardInterrupt`` out of the runner) ends the search the same way: the
     interrupted trial is dropped and the trials before it are kept. A plan that cannot fit this
     machine at all is not launched.
@@ -393,7 +399,7 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
         calibration: Measured data correcting the planner's estimates, or None.
         max_trials: Most launches to make.
         progress: Called with a `TrialEvent` before and after every trial.
-        cancel: Polled between trials; True stops the search.
+        cancel: Polled between trials and by the runner during one; True stops the search.
 
     Returns:
         The result; ``trials`` holds every launch, ``best`` the winner (None if nothing loaded).
@@ -416,9 +422,14 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
         if progress:
             progress(TrialEvent(index, max_trials, "start", cand.summary))
         try:
-            m = runner.measure(info.path, cand.profile)
+            m = runner.measure(info.path, cand.profile, cancel)
         except KeyboardInterrupt:      # Ctrl-C: the runner has stopped its server; keep what we have
             cancelled = True
+            break
+        if m.cancelled:                # stopped in flight: not a load failure, not a trial
+            cancelled = True
+            if progress:
+                progress(TrialEvent(index, max_trials, "done", cand.summary, m))
             break
         history.append((cand, m))
         trials.append(Trial(
@@ -664,12 +675,17 @@ class ServerRunner:
 
     # -- measuring -------------------------------------------------------------------
 
-    def measure(self, model: Path, profile: Profile) -> Measurement:
+    def measure(self, model: Path, profile: Profile,
+                cancel: Callable[[], bool] | None = None) -> Measurement:
         """Launch, benchmark and stop; see the class description.
 
         Args:
             model: GGUF file.
             profile: Settings to launch with.
+            cancel: Checked before the launch, on every health poll and before the benchmark
+                request; when it returns True the server is stopped and a failed measurement
+                whose error starts with ``cancelled`` is returned (the single benchmark
+                request, once sent, is waited for).
 
         Returns:
             The measurement. Every failure to start, load or answer is ``ok=False`` with an
@@ -678,6 +694,8 @@ class ServerRunner:
             around the call raises, after the process has been stopped.
         """
         build = self.build()
+        if cancel is not None and cancel():
+            return Measurement(error=f"{ERR_CANCELLED}: before the launch", at=_now(), build=build)
         try:
             port = next_free_port(set(), LOOPBACK)
         except RuntimeError as e:
@@ -696,17 +714,20 @@ class ServerRunner:
                                build=build)
         try:
             m = self._measure_running(proc.pid, prof, port, model, log, start, vram_before,
-                                      ram_before, build)
+                                      ram_before, build, cancel)
         finally:
             self._stop(proc.pid)
-        if m.ok:
+        if m.ok or m.cancelled:
             log.unlink(missing_ok=True)
         return m
 
     def _measure_running(self, pid: int, prof: Profile, port: int, model: Path, log: Path,
-                         start: float, vram_before: int, ram_before: int,
-                         build: str) -> Measurement:
-        """Everything after the process started: wait, snapshot, benchmark."""
+                         start: float, vram_before: int, ram_before: int, build: str,
+                         cancel: Callable[[], bool] | None = None) -> Measurement:
+        """Everything after the process started: wait, snapshot, benchmark.
+
+        `cancel` is checked on every health poll and once more before the benchmark request.
+        """
         def failed(error: str, load_s: float = 0.0) -> Measurement:
             return Measurement(error=f"{error} (log: {log})", load_s=load_s, at=_now(), build=build)
 
@@ -716,6 +737,9 @@ class ServerRunner:
             size = 0
         with self._http(base_url=f"http://{LOOPBACK}:{port}", timeout=REQUEST_TIMEOUT) as client:
             while True:
+                if cancel is not None and cancel():
+                    return failed(f"{ERR_CANCELLED}: stopped while the model was loading",
+                                  self._clock() - start)
                 if not pid_alive(pid):
                     return failed(classify_failure(self._tail(log)), self._clock() - start)
                 try:
@@ -728,6 +752,8 @@ class ServerRunner:
                                   f"{self._clock() - start:.0f} s", self._clock() - start)
                 self._sleep(POLL_INTERVAL)
             load_s = self._clock() - start
+            if cancel is not None and cancel():
+                return failed(f"{ERR_CANCELLED}: stopped before the benchmark", load_s)
             vram_load, ram_load = self._snapshot()
             try:
                 prompt_tps, gen_tps = (self._embed(client) if prof.embedding

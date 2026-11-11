@@ -66,6 +66,8 @@ def trial_cells(index: int, summary: str, m: Measurement | None) -> tuple:
     change, ctx = split_summary(summary)
     if m is None:
         return (str(index), change, ctx, "...", "", "", "", Text("running", style="yellow"))
+    if m.cancelled:
+        return (str(index), change, ctx, "-", "-", "-", "-", Text("cancelled", style="yellow"))
     if not m.ok:
         return (str(index), change, ctx, f"{m.load_s:.0f}" if m.load_s else "-", "-", "-", "-",
                 Text(m.error.split(" (log:")[0][:OUTCOME_WIDTH], style="red"))
@@ -115,7 +117,7 @@ class TuneScreen(ModalScreen[str | None]):
     """Tune a model for an intent: pre-flight, live trial table, summary.
 
     The search runs in a worker that outlives the screen: closing while it runs cancels it
-    (after the current trial) and the trials so far are still recorded and the app refreshed.
+    (the trial in flight is stopped too) and the trials so far are still recorded and the app refreshed.
     Dismisses with "used" (made active), "kept" or None.
 
     Args:
@@ -328,7 +330,7 @@ class TuneScreen(ModalScreen[str | None]):
         """Refresh the progress line (elapsed time, cancelling note)."""
         if self.state != RUNNING:
             return
-        what = "cancelling after this trial; " if self._cancel.is_set() else ""
+        what = "cancelling, stopping the server; " if self._cancel.is_set() else ""
         self.query_one("#t_progress", Label).update(
             f"{what}{self._last or 'starting'}  ({time.monotonic() - self._t0:.0f} s)")
 
@@ -357,7 +359,7 @@ class TuneScreen(ModalScreen[str | None]):
 
     @on(Button.Pressed, "#cancel")
     def _cancel_pressed(self) -> None:
-        """Cancel tune: stop the search after the current trial."""
+        """Cancel tune: stop the trial in flight and the search."""
         self._cancel.set()
         self._tick()
         self._buttons()

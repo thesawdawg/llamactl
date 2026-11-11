@@ -105,9 +105,9 @@ async def test_tuning_the_active_preset_needs_no_use_button(ui_env: SimpleNamesp
         assert not shown(app, "use") and shown(app, "keep")
 
 
-async def test_cancel_mid_run_keeps_the_trials_so_far(ui_env: SimpleNamespace) -> None:
+async def test_cancel_interrupts_the_trial_in_flight(ui_env: SimpleNamespace) -> None:
     m = ui_env.add_model()
-    gate = threading.Event()
+    gate = threading.Event()                                # never set: only cancel ends trial 2
     runner = FakeRunner(oom(), oom(), ok(33.0), gates={1: gate})
     app = make_app(ui_env, runner=runner)
     async with app.run_test(size=SIZE) as pilot:
@@ -117,23 +117,40 @@ async def test_cancel_mid_run_keeps_the_trials_so_far(ui_env: SimpleNamespace) -
         assert await wait_for(pilot, lambda: t.row_count == 2 and str(t.get_cell("2", "out")) == "running")
         assert shown(app, "cancel") and not shown(app, "close")
         scr.query_one("#cancel", Button).press()
+        assert await wait_for(pilot, lambda: scr.state == "done")
+        assert runner.cancelled_calls == [1] and len(runner.calls) == 2   # no third trial
+        assert str(t.get_cell("2", "out")) == "cancelled"
+        assert scr.outcome.result.cancelled and not scr.outcome.result.ok
+        assert "nothing loaded after 1 trial" in plain(scr.query_one("#t_summary", Static))
+        assert ui_env.cfg.preset(str(m), "chat") is None
+        assert len(app.calibration.trials) == 1             # the cancelled trial is not recorded
+        assert shown(app, "close") and not shown(app, "keep")
+
+
+async def test_cancel_between_trials_for_a_runner_that_ignores_it(ui_env: SimpleNamespace) -> None:
+    gate = threading.Event()
+    runner = FakeRunner(oom(), oom(), ok(33.0), gates={1: gate}, honour_cancel=False)
+    ui_env.add_model()
+    app = make_app(ui_env, runner=runner)
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(pilot, app)
+        scr = await open_tune(pilot, app)
+        assert await wait_for(pilot, lambda: len(runner.calls) == 2)
+        scr.query_one("#cancel", Button).press()
         await pilot.pause(0.2)
         assert "cancelling" in plain(scr.query_one("#t_progress", Label))
         assert scr._cancel.is_set() and not shown(app, "cancel")
         gate.set()
         assert await wait_for(pilot, lambda: scr.state == "done")
         assert len(runner.calls) == 2                       # the third trial never started
-        assert scr.outcome.result.cancelled and not scr.outcome.result.ok
         assert "nothing loaded after 2 trials" in plain(scr.query_one("#t_summary", Static))
-        assert ui_env.cfg.preset(str(m), "chat") is None
-        assert len(app.calibration.trials) == 2             # the finished trials are recorded
-        assert shown(app, "close") and not shown(app, "keep")
+        assert len(app.calibration.trials) == 2             # finished trials are recorded
 
 
 async def test_closing_while_running_cancels_and_still_records(ui_env: SimpleNamespace) -> None:
     m = ui_env.add_model()
     gate = threading.Event()
-    runner = FakeRunner(oom(), oom(), ok(33.0), gates={1: gate})
+    runner = FakeRunner(oom(), oom(), ok(33.0), gates={1: gate}, honour_cancel=False)
     app = make_app(ui_env, runner=runner)
     async with app.run_test(size=SIZE) as pilot:
         await ready(pilot, app)
@@ -225,7 +242,7 @@ async def test_tune_from_the_home_suggestion(ui_env: SimpleNamespace) -> None:
 
 async def test_a_runner_bug_is_a_message_not_a_crash(ui_env: SimpleNamespace) -> None:
     class Broken:
-        def measure(self, model, profile):
+        def measure(self, model, profile, cancel=None):
             raise OSError("cannot launch llama-server: no such file")
 
     ui_env.add_model()

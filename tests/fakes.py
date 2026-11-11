@@ -229,6 +229,12 @@ def oom() -> Measurement:
                        build="b1")
 
 
+def cancelled() -> Measurement:
+    """What the real runner returns for a trial stopped on request."""
+    return Measurement(error="cancelled: stopped while the model was loading",
+                       at="2026-11-09T12:00:00+00:00", build="b1")
+
+
 class FakeRunner:
     """A tune `Runner` returning scripted measurements, one per call (the last repeats).
 
@@ -236,22 +242,32 @@ class FakeRunner:
         results: Measurements in order.
         gates: Optional events by 0-based call index; the call blocks until its event is set,
             so a test can cancel while a trial is "running".
+        honour_cancel: A gated call returns a "cancelled" measurement as soon as the `cancel`
+            callable says so (like `ServerRunner`); off, it waits for its gate regardless.
     """
 
-    def __init__(self, *results: Measurement, gates: dict[int, threading.Event] | None = None) -> None:
+    def __init__(self, *results: Measurement, gates: dict[int, threading.Event] | None = None,
+                 honour_cancel: bool = True) -> None:
         self.results = list(results) or [ok()]
         self.gates = gates or {}
+        self.honour_cancel = honour_cancel
+        self.cancelled_calls: list[int] = []
         self.calls: list[tuple[Path, Profile]] = []
         self.started = threading.Event()
 
-    def measure(self, model: Path, profile: Profile) -> Measurement:
-        """Return the next scripted measurement."""
+    def measure(self, model: Path, profile: Profile, cancel=None) -> Measurement:
+        """Return the next scripted measurement (or "cancelled" when asked to stop meanwhile)."""
         i = len(self.calls)
         self.calls.append((model, profile))
         self.started.set()
         gate = self.gates.get(i)
         if gate is not None:
-            gate.wait(10)
+            for _ in range(500):                       # at most 10 s
+                if gate.wait(0.02):
+                    break
+                if self.honour_cancel and cancel is not None and cancel():
+                    self.cancelled_calls.append(i)
+                    return cancelled()
         return self.results[min(i, len(self.results) - 1)]
 
 

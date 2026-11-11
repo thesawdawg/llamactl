@@ -50,7 +50,7 @@ class Scripted:
     def __init__(self, answer: Callable[[Profile], Measurement]) -> None:
         self.answer, self.profiles = answer, []
 
-    def measure(self, model: Path, profile: Profile) -> Measurement:
+    def measure(self, model: Path, profile: Profile, cancel=None) -> Measurement:
         self.profiles.append(profile)
         return self.answer(profile)
 
@@ -463,3 +463,29 @@ def test_preflight_by_verdict(dense27b: ModelInfo) -> None:
     assert "free RAM" in preflight(cplan, cpu)
     no = _plan(_info(80e9, 80, 8, 131072), _host(6, ram_gb=16))
     assert no.verdict == "NO" and "more than this machine has" in preflight(no, _host(6, ram_gb=16))
+
+
+def test_a_trial_cancelled_in_flight_is_neither_recorded_nor_stepped_down_from(
+        dense27b: ModelInfo) -> None:
+    from llamactl.measure import ERR_CANCELLED
+
+    runner = Scripted(lambda p: Measurement(error=f"{ERR_CANCELLED}: stopped while loading"))
+    events: list = []
+    r = _run("chat", dense27b, _host(16), runner, progress=events.append, cancel=lambda: False,
+             max_trials=10)
+    assert len(runner.profiles) == 1                    # no step-down trial followed
+    assert r.cancelled and not r.ok and r.trials == []
+    assert [e.phase for e in events] == ["start", "done"] and events[1].measurement.cancelled
+
+
+def test_cancel_callable_is_handed_to_the_runner(dense8b: ModelInfo) -> None:
+    seen: list = []
+
+    class Spy(Scripted):
+        def measure(self, model, profile, cancel=None):
+            seen.append(cancel)
+            return super().measure(model, profile, cancel)
+
+    cancel = lambda: False  # noqa: E731
+    _run("chat", dense8b, _host(), Spy(lambda p: ok()), cancel=cancel)
+    assert seen and all(c is cancel for c in seen)

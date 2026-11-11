@@ -259,7 +259,7 @@ llamactl owns the trade-offs that depend on intent (context, slots, KV precision
 @dataclass(frozen=True)          # llamactl/measure.py (no imports from config/calibration)
 class Measurement:
     ok: bool; error: str             # "<kind>: detail (log: path)"; kinds: out of memory, timeout,
-                                     # unknown argument, load failed, benchmark failed
+                                     # unknown argument, load failed, benchmark failed, cancelled
     load_s: float
     vram_used: int; ram_used: int    # bytes, delta against the pre-launch snapshot
     prompt_tps: float; gen_tps: float  # from the /completion `timings` object
@@ -275,7 +275,8 @@ an unknown argument or architecture will not improve with a smaller context.
 
 ```python
 class Runner(Protocol):                       # the only part that touches processes / HTTP
-    def measure(self, model: Path, profile: Profile) -> Measurement: ...
+    def measure(self, model: Path, profile: Profile,
+                cancel: Callable[[], bool] | None = None) -> Measurement: ...
 
 def tune(intent, info, host, base, runner, *, headroom_pct=10, calibration=None, max_trials=4,
          progress: Callable[[TrialEvent], None] | None = None,
@@ -293,6 +294,10 @@ def preflight(plan, host) -> str | None       # refusal text when free memory is
   `/v1/embeddings` instead and report `usage.prompt_tokens` over wall time as `prompt_tps`.
   `preflight` refuses to start when free memory is below 90% of the plan's budget; offering to
   unload gateway models is the caller's job.
+- `cancel` is checked before the launch, on every health poll and before the benchmark request;
+  when it fires the server is stopped and the result is a failed `Measurement` whose error starts
+  with `cancelled` (`Measurement.cancelled`). The search treats it as cancellation: it is neither a
+  load failure to step down from nor a recorded trial (it is still reported to `progress`).
 - Search starts from `plan()` and is bounded by `max_trials`; a plan with verdict `NO` is not tried:
   - load failed (memory or timeout): step down - next lower ctx tier (not below `ctx_min`); then
     q8_0 KV if the intent allows; then let llama.cpp place the layers (`gpu_layers` auto, `fit` on);
@@ -462,8 +467,9 @@ Phase 7):
   presets, estimated active presets (tune), stale tuned presets (re-tune), gateway stopped while
   presets exist (start). At most three per rule.
 - **TuneScreen** runs `actions.run_tune` in a worker that outlives the screen. Cancel and closing
-  set the cancel flag, which the tuner polls between trials: the trial in flight finishes (its
-  server is stopped by the runner), later ones do not start, and the trials so far are recorded.
+  set the cancel flag, which the tuner polls between trials and `ServerRunner.measure` polls
+  while it waits for `/health` and before the benchmark: the trial in flight is stopped (its
+  server too), later ones do not start, and the trials that finished are recorded.
 - **Settings** saves in place into `cfg.gateway`, rewrites the presets and reloads a running
   gateway; host, port, API key and models-max are command line options of the router, so
   changing them tells the user to restart it.

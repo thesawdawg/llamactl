@@ -173,7 +173,7 @@ class FakeRunner:
     def __init__(self, *answers: Measurement | BaseException) -> None:
         self.answers, self.profiles = list(answers), []
 
-    def measure(self, model: Path, profile: Profile) -> Measurement:
+    def measure(self, model: Path, profile: Profile, cancel=None) -> Measurement:
         self.profiles.append(profile)
         a = self.answers[min(len(self.profiles), len(self.answers)) - 1]
         if isinstance(a, BaseException):

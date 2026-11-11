@@ -456,3 +456,49 @@ def test_classify_prefers_memory_over_generic_failure_and_truncates() -> None:
     log = "srv: failed to load model\n" + "x" * 500 + " out of memory\nfailed again"
     out = classify_failure(log)
     assert out.startswith(ERR_OOM) and len(out) < 260
+
+
+# --------------------------------------------------------------------------- cancel
+
+def test_cancel_before_launch_starts_nothing(world: World, model: Path) -> None:
+    m = make(world).measure(model, Profile(), cancel=lambda: True)
+    assert m.cancelled and not m.ok and not m.resource_failure
+    assert world.popens == [] and world.signals == []
+
+
+def test_cancel_while_waiting_for_health_stops_the_server(world: World, model: Path) -> None:
+    world.ready_after = 100.0                              # never ready on its own
+    polls = {"n": 0}
+
+    def cancel() -> bool:
+        polls["n"] += 1
+        return polls["n"] > 3
+
+    m = make(world).measure(model, Profile(), cancel=cancel)
+    assert m.cancelled and m.error.startswith("cancelled: stopped while the model was loading")
+    assert (PID, signal.SIGTERM) in world.signals and PID not in world.alive
+    assert [r for r in world.requests if r["method"] == "POST"] == []
+    log = Path(world.popens[0][1]["stdout"].name)
+    assert not log.exists()                                # nothing worth keeping
+
+
+def test_cancel_after_load_skips_the_benchmark(world: World, model: Path) -> None:
+    completion_ok(world)
+    state = {"ready": False}
+    orig = world.request
+
+    def request(method: str, path: str, **kw: Any) -> Any:
+        r = orig(method, path, **kw)
+        state["ready"] = state["ready"] or (path == "/health" and r.status_code == 200)
+        return r
+
+    world.request = request                                # type: ignore[method-assign]
+    m = make(world).measure(model, Profile(), cancel=lambda: state["ready"])
+    assert m.cancelled and "before the benchmark" in m.error
+    assert [r for r in world.requests if r["method"] == "POST"] == []
+    assert PID not in world.alive
+
+
+def test_a_cancel_that_never_fires_changes_nothing(world: World, model: Path) -> None:
+    completion_ok(world)
+    assert make(world).measure(model, Profile(), cancel=lambda: False).ok

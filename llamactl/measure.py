@@ -14,6 +14,7 @@ ERR_TIMEOUT = "timeout"
 ERR_ARGS = "unknown argument"
 ERR_LOAD = "load failed"
 ERR_BENCH = "benchmark failed"
+ERR_CANCELLED = "cancelled"     # the caller asked to stop; not a failure of the settings
 
 
 def _number(value: Any, kind: type, default: Any) -> Any:
@@ -94,3 +95,8 @@ class Measurement:
     def resource_failure(self) -> bool:
         """True when the launch failed for lack of memory or time, so a smaller one may work."""
         return not self.ok and self.error.startswith((ERR_OOM, ERR_TIMEOUT))
+
+    @property
+    def cancelled(self) -> bool:
+        """True when the launch was stopped on request: it says nothing about the settings."""
+        return not self.ok and self.error.startswith(ERR_CANCELLED)
