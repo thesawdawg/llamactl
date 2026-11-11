@@ -1,6 +1,7 @@
 """Unit tests for port probing and the async launch + loading banner."""
 from __future__ import annotations
 
+import json
 import socket
 from types import SimpleNamespace
 
@@ -105,6 +106,37 @@ def test_launch_model_without_presets_uses_default_profile(two_presets) -> None:
     assert _ctx(_FakePopen.calls[-1]) == "2048" and s.name == "other"
     with pytest.raises(LookupError, match="no preset 'agent'"):
         SessionStore().launch_server(cfg, "/models/other.gguf", "agent")
+
+
+def test_launch_host_override_for_one_server(two_presets) -> None:
+    cfg, model = two_presets
+    s = SessionStore().launch_server(cfg, model, host="0.0.0.0")
+    argv = _FakePopen.calls[-1]
+    assert argv[argv.index("--host") + 1] == "0.0.0.0"
+    assert s.url == "http://127.0.0.1:8123" and s.host == "0.0.0.0"          # never 0.0.0.0 in the URL
+    assert s.urls == ["http://127.0.0.1:8123", "http://192.168.50.7:8123"]
+    assert cfg.profile_for(model).host == "127.0.0.1"                         # not saved
+    t = SessionStore().launch_server(cfg, model, "agent")
+    assert t.host == "127.0.0.1" and t.urls == ["http://127.0.0.1:8123"]
+
+
+def test_a_preset_bound_to_a_wildcard_is_probed_over_loopback(two_presets) -> None:
+    from llamactl.config import Preset, Profile
+    cfg, model = two_presets
+    cfg.set_preset(model, Preset("wide", Profile(host="0.0.0.0"), "edited"), activate=False)
+    s = SessionStore().launch_server(cfg, model, "wide")
+    assert s.url == "http://127.0.0.1:8123" and "192.168.50.7" in s.urls[1]
+    t = SessionStore().launch_server(cfg, model, host="192.168.50.7")
+    assert t.url == "http://192.168.50.7:8123" and t.urls == [t.url]
+
+
+def test_sessions_saved_before_hosts_were_recorded_still_load(isolated: SimpleNamespace) -> None:
+    sessions.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    sessions.STATE_FILE.write_text(json.dumps([{
+        "id": "x-1", "name": "x", "url": "http://127.0.0.1:1", "pid": 0, "log": "",
+        "external": True, "started": 1.0}]))
+    s = SessionStore().sessions[0]
+    assert s.host == "" and s.urls == ["http://127.0.0.1:1"]
 
 
 def test_launch_port_override_and_busy_port(two_presets) -> None:

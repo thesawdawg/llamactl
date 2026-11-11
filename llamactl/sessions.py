@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from . import network
 from .command import build_command
 from .config import CONFIG_DIR, LOG_DIR, PRESET_SEP, Config, Profile
 
@@ -46,7 +47,19 @@ def pid_alive(pid: int) -> bool:
 
 @dataclass
 class Session:
-    """A llama-server we manage (has pid + log) or merely attach to (external)."""
+    """A llama-server we manage (has pid + log) or merely attach to (external).
+
+    Attributes:
+        id: Unique id (``name-port``).
+        name: Display name (model stem, plus ``@preset`` when not the active one).
+        url: Base URL llamactl connects to (loopback for a wildcard bind; never ``0.0.0.0``).
+        pid: Process id, 0 for an attached server.
+        log: Log file path, "" for an attached server.
+        external: Attached, not started by llamactl.
+        started: Unix time of the start.
+        host: The listen address a managed server was started with; "" for an attached one or
+            a session saved before this was recorded.
+    """
 
     id: str
     name: str
@@ -55,6 +68,12 @@ class Session:
     log: str = ""
     external: bool = False
     started: float = 0.0
+    host: str = ""
+
+    @property
+    def urls(self) -> list[str]:
+        """The base URLs to give a client (the LAN ones too for a wildcard bind)."""
+        return network.client_urls_for(self.url, self.host)
 
     @property
     def alive(self) -> bool:
@@ -127,7 +146,7 @@ class SessionStore:
         return {int(s.url.rsplit(":", 1)[1]) for s in self.sessions if s.url.rsplit(":", 1)[1].isdigit()}
 
     def launch_server(self, cfg: Config, model: str, preset_name: str | None = None,
-                      port: int | None = None) -> Session:
+                      port: int | None = None, host: str | None = None) -> Session:
         """Start a detached llama-server; it survives TUI exit.
 
         Args:
@@ -138,6 +157,8 @@ class SessionStore:
                 (``stem@preset``) when it is not the active one.
             port: Listen port overriding the preset's; None keeps the preset's, else the first
                 free port from `BASE_PORT`.
+            host: Listen address for this server only (not saved) instead of the preset's;
+                None keeps the preset's.
 
         Returns:
             The new session (also stored and saved).
@@ -148,6 +169,8 @@ class SessionStore:
             OSError: When the process or its log cannot be started.
         """
         prof = self._profile(cfg, model, preset_name)
+        if host is not None:
+            prof = prof.merged(host=host)
         if port is not None:
             if port in self._ports() or not port_free(port, prof.host):
                 raise RuntimeError(f"port {port} on {prof.host} is already in use")
@@ -165,7 +188,8 @@ class SessionStore:
                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        s = Session(sid, name, f"http://{prof.host}:{port}", proc.pid, str(log), started=time.time())
+        s = Session(sid, name, f"http://{network.probe_host(prof.host)}:{port}", proc.pid, str(log),
+                    started=time.time(), host=prof.host)
         self.sessions.append(s)
         self.save()
         return s

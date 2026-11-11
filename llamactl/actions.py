@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import intents, planner, tuner
+from . import intents, network, planner, tuner
 from .calibration import Calibration
 from .config import ESTIMATED, PRESET_SEP, Config, Preset
 from .gateway import (LOADED, LOADING, SLEEPING, Gateway, GatewayError, GatewayModel,
@@ -218,9 +218,46 @@ def _wait_until(done: Callable[[], bool], timeout: float, *, interval: float, cl
     return True
 
 
+def gateway_urls(gw: Gateway, host: str | None = None) -> list[str]:
+    """The base URLs a client can use for the gateway, running or about to start.
+
+    Args:
+        gw: The gateway.
+        host: Listen address it would start with, when that is not the configured one.
+
+    Returns:
+        `network.client_urls_for` the running gateway's address, else `host` or the
+        configured one: loopback first, then one URL per LAN address for a wildcard bind.
+    """
+    st = gw.state
+    if st is not None:
+        return network.client_urls_for(st.url, st.host or gw.cfg.gateway.host)
+    return network.client_urls_for(gw.listen_url, host or gw.cfg.gateway.host)
+
+
+def bind_conflict(gw: Gateway, host: str) -> str:
+    """Why a running gateway cannot be asked to listen on another address.
+
+    Args:
+        gw: The gateway.
+        host: The listen address wanted.
+
+    Returns:
+        A message with the fix, or "" when the gateway is not running or listens there already.
+    """
+    st = gw.state
+    if st is None:
+        return ""
+    have = st.host or gw.cfg.gateway.host
+    if network.normalise(have) == network.normalise(host):
+        return ""
+    return (f"the gateway is already running and listens on {have}, not {host}; "
+            "run `llamactl down` first, then start it again")
+
+
 def ensure_gateway(gw: Gateway, *, timeout: float = GATEWAY_START_TIMEOUT,
                    clock: Clock = time.monotonic, sleep: Sleep = time.sleep,
-                   tick: Tick | None = None) -> tuple[GatewayState, bool]:
+                   tick: Tick | None = None, host: str | None = None) -> tuple[GatewayState, bool]:
     """Make sure the gateway runs and answers ``/health``, starting it when needed.
 
     Args:
@@ -229,13 +266,19 @@ def ensure_gateway(gw: Gateway, *, timeout: float = GATEWAY_START_TIMEOUT,
         clock: Monotonic clock.
         sleep: Sleep function.
         tick: Progress callback, called once per pause.
+        host: Listen address for this start only (never saved); None uses the configured one.
 
     Returns:
         (state, started): `started` is False when it was already running.
 
     Raises:
-        GatewayError: When it cannot be started, exits, or stays unhealthy past `timeout`.
+        GatewayError: When it cannot be started, exits, or stays unhealthy past `timeout`, or
+            when it already runs on a different address than `host`.
     """
+    if host is not None:
+        if problem := bind_conflict(gw, host):
+            raise GatewayError(problem)
+        gw.host_override = host
     started = gw.state is None
     st = gw.start()
 
@@ -252,7 +295,7 @@ def ensure_gateway(gw: Gateway, *, timeout: float = GATEWAY_START_TIMEOUT,
 
 def serve_gateway(cfg: Config, gw: Gateway, model: str, preset_name: str, *,
                   clock: Clock = time.monotonic, sleep: Sleep = time.sleep,
-                  tick: Tick | None = None) -> str:
+                  tick: Tick | None = None, host: str | None = None) -> str:
     """Get a preset loading in the gateway: write the presets, start it if needed, reload, load.
 
     Returns as soon as the router accepted the load request; use `wait_loaded` to wait for it.
@@ -266,16 +309,18 @@ def serve_gateway(cfg: Config, gw: Gateway, model: str, preset_name: str, *,
         clock: Monotonic clock.
         sleep: Sleep function.
         tick: Progress callback while the gateway starts.
+        host: Listen address for this start only (see `ensure_gateway`).
 
     Returns:
         The model id to request (``alias`` or ``alias@preset``).
 
     Raises:
-        GatewayError: When the gateway cannot start, does not know the preset (the message
-            lists presets that could not be written), or refuses the load.
+        GatewayError: When the gateway cannot start, runs on another address than `host`, does
+            not know the preset (the message lists presets that could not be written), or
+            refuses the load.
     """
     name = served_name(cfg, model, preset_name)
-    ensure_gateway(gw, clock=clock, sleep=sleep, tick=tick)
+    ensure_gateway(gw, clock=clock, sleep=sleep, tick=tick, host=host)
     models = gw.reload()
     target = next((m for m in models if m.name == name), None)
     if target is None:

@@ -137,7 +137,7 @@ def check_host(host: str) -> str:
     if h.lower() in (LOCAL, LAN):
         return host_for(h.lower())
     if not h or re.search(r"\s", h):
-        raise ValueError("a host name or address (or 'local' / 'lan')")
+        raise ValueError("expected a host name or address (or 'local' / 'lan')")
     return h
 
 

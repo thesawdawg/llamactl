@@ -61,10 +61,13 @@ class FakeGateway:
         self.exit_code = 1
         self.unload_polls = 0            # listings that still show the model after an unload
         self._unloading: dict[str, int] = {}
+        self.host_override: str | None = None
+        self.bound_host = ""             # the listen address of the running router
 
     @property
     def state(self) -> GatewayState | None:
-        return GatewayState(4242, self.listen_url, str(self.log), 1000.0) if self.is_running else None
+        return GatewayState(4242, self.listen_url, str(self.log), 1000.0, self.bound_host) \
+            if self.is_running else None
 
     @property
     def running(self) -> bool:
@@ -82,6 +85,7 @@ class FakeGateway:
         if self.start_error:
             raise GatewayError(self.start_error)
         self.calls.append("start")
+        self.bound_host = self.cfg.gateway.host if self.host_override is None else self.host_override
         self.write_presets()
         self.log.parent.mkdir(parents=True, exist_ok=True)
         if not self.log.exists():
@@ -96,7 +100,7 @@ class FakeGateway:
 
     def status(self) -> GatewayStatus:
         return GatewayStatus(self.is_running, self.listen_url, self.is_running and self.healthy,
-                             4242 if self.is_running else 0)
+                             4242 if self.is_running else 0, self.bound_host)
 
     def names(self) -> list[str]:
         text = gateway.PRESETS_FILE.read_text() if gateway.PRESETS_FILE.exists() else ""
@@ -146,17 +150,20 @@ class FakeStore:
         self.sessions: list[Session] = []
         self.launched: list[tuple] = []
         self.stopped: list[str] = []
+        self.hosts: list[str | None] = []
         self.log_dir = log_dir
 
     def launch_server(self, cfg: Config, model: str, preset_name: str | None = None,
-                      port: int | None = None) -> Session:
+                      port: int | None = None, host: str | None = None) -> Session:
         port = port or 8081
         self.launched.append((model, preset_name, port))
+        self.hosts.append(host)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log = self.log_dir / f"{Path(model).stem}-{port}.log"
         log.write_text("server log\n")
         s = Session(f"{Path(model).stem}-{port}", Path(model).stem, f"http://127.0.0.1:{port}",
-                    pid=5000 + port, log=str(log), started=900.0)
+                    pid=5000 + port, log=str(log), started=900.0,
+                    host=host if host is not None else cfg.profile_for(model).host)
         self.sessions.append(s)
         if not self.dies:
             self.alive.add(s.pid)
@@ -301,8 +308,8 @@ def test_importing_the_cli_does_not_import_textual() -> None:
 
 
 def test_help_for_every_command(capsys: pytest.CaptureFixture[str]) -> None:
-    for n in ("hw", "ls", "plan", "tune", "serve", "up", "down", "ps", "load", "unload", "stop",
-              "logs"):
+    for n in ("hw", "ls", "plan", "tune", "serve", "up", "down", "config", "ps", "load", "unload",
+              "stop", "logs"):
         assert cli.main([n, "--help"]) == 0
         assert capsys.readouterr().out.startswith(f"usage: llamactl {n}")
 
@@ -1021,7 +1028,7 @@ def test_read_only_commands_write_nothing(world, capsys, isolated, monkeypatch) 
     before = _snapshot(cfg_dir)
     for argv in (["hw"], ["hw", "--json"], ["ls"], ["ls", "--json"], ["plan", "qwen3"],
                  ["plan", "qwen3", "--all"], ["plan", "llama", "--for", "agent", "--json"],
-                 ["ps"], ["ps", "--json"], ["logs", "gateway"]):
+                 ["ps"], ["ps", "--json"], ["logs", "gateway"], ["config"], ["config", "--json"]):
         assert cli.main(argv) == 0, argv
         capsys.readouterr()
     assert _snapshot(cfg_dir) == before
@@ -1030,3 +1037,269 @@ def test_read_only_commands_write_nothing(world, capsys, isolated, monkeypatch) 
     assert (cfg_dir / "config.v2.bak.json").exists()
 
 
+
+
+# --------------------------------------------------------------------------- network access
+
+LAN_IP = "192.168.50.7"        # the address the autouse `fake_network` fixture reports (eth1)
+
+
+def test_up_lan_binds_every_interface_for_this_start_only(world, capsys) -> None:
+    r = world.run(capsys, "up", "--lan")
+    assert r.code == 0 and world.gw.bound_host == "0.0.0.0"
+    assert f"gateway running at http://127.0.0.1:8080, http://{LAN_IP}:8080 (pid 4242)" in r.out
+    assert "0.0.0.0:" not in r.out
+    assert "warning: listening on 0.0.0.0 without an API key" in r.err
+    assert world.cfg.gateway.host == "127.0.0.1" and not (world.cfg_dir / "config.json").exists()
+
+
+def test_up_lan_with_a_key_does_not_warn(world, capsys) -> None:
+    world.cfg.gateway.api_key = "k"
+    r = world.run(capsys, "up", "--lan")
+    assert r.code == 0 and "warning" not in r.err
+
+
+def test_up_host_binds_one_address(world, capsys) -> None:
+    r = world.run(capsys, "up", "--host", LAN_IP)
+    assert r.code == 0 and world.gw.bound_host == LAN_IP
+    assert f"gateway running at http://{LAN_IP}:8080 (pid" in r.out and "127.0.0.1" not in r.out
+    assert "without an API key" in r.err
+
+
+def test_up_host_loopback_name_is_private_and_quiet(world, capsys) -> None:
+    r = world.run(capsys, "up", "--host", "local")
+    assert r.code == 0 and world.gw.bound_host == "127.0.0.1" and r.err == ""
+    assert "gateway running at http://127.0.0.1:8080 (pid" in r.out
+
+
+def test_lan_and_host_are_mutually_exclusive(world, capsys) -> None:
+    for cmd in (["up"], ["serve", "qwen3"]):
+        r = world.run(capsys, *cmd, "--lan", "--host", "10.0.0.5")
+        assert r.code == 2 and "not allowed with" in r.err
+    assert world.gw.calls == []
+
+
+def test_a_bad_host_is_a_usage_error(world, capsys) -> None:
+    r = world.run(capsys, "up", "--host", "two words")
+    assert r.code == 2 and "--host: expected a host name or address" in r.err and world.gw.calls == []
+
+
+def test_up_fails_when_the_running_gateway_has_another_bind(world, capsys) -> None:
+    assert world.run(capsys, "up").code == 0                   # loopback
+    r = world.run(capsys, "up", "--lan")
+    assert r.code == 1 and "listens on 127.0.0.1, not 0.0.0.0" in r.err
+    assert "llamactl down" in r.err and world.gw.calls == ["start"]
+    assert world.run(capsys, "down").code == 0
+    assert world.run(capsys, "up", "--lan").code == 0 and world.gw.bound_host == "0.0.0.0"
+    # the same bind again, and a plain `up`, are both fine
+    r = world.run(capsys, "up", "--lan")
+    assert r.code == 0 and "already running at http://127.0.0.1:8080, http://192.168.50.7:8080" in r.out
+    assert world.run(capsys, "up").code == 0
+
+
+def test_serve_lan_starts_the_gateway_on_every_interface(world, capsys) -> None:
+    r = world.run(capsys, "serve", "qwen3", "--lan")
+    assert r.code == 0 and world.gw.bound_host == "0.0.0.0"
+    assert re.search(r"base URL\s+http://127.0.0.1:8080/v1", r.out)
+    assert re.search(rf"on network\s+http://{LAN_IP}:8080/v1", r.out)
+    assert f"curl http://{LAN_IP}:8080/v1/chat/completions" in r.out        # the curl uses the LAN URL
+    assert "warning: listening on 0.0.0.0 without an API key" in r.err
+    assert world.cfg.gateway.host == "127.0.0.1"
+
+
+def test_serve_lan_fails_against_a_loopback_gateway(world, capsys) -> None:
+    assert world.run(capsys, "up").code == 0
+    r = world.run(capsys, "serve", "qwen3", "--lan")
+    assert r.code == 1 and "llamactl down" in r.err
+    assert "load" not in [c[0] for c in world.gw.calls if isinstance(c, tuple)]
+
+
+def test_serve_without_flags_shows_one_url(world, capsys) -> None:
+    r = world.run(capsys, "serve", "qwen3")
+    assert "on network" not in r.out and r.err.count("warning") == 0
+
+
+def test_serve_standalone_lan(world, capsys) -> None:
+    r = world.run(capsys, "serve", "qwen3", "--standalone", "--lan", "--port", "9100")
+    assert r.code == 0 and world.store.hosts == ["0.0.0.0"]
+    assert "0.0.0.0:" not in r.out
+    assert re.search(r"base URL\s+http://127.0.0.1:9100/v1", r.out)
+    assert re.search(rf"on network\s+http://{LAN_IP}:9100/v1", r.out)
+    assert f"curl http://{LAN_IP}:9100/v1/chat/completions" in r.out
+    assert "warning: listening on 0.0.0.0 without an API key" in r.err
+
+
+def test_serve_standalone_without_flags_keeps_the_preset_host(world, capsys) -> None:
+    r = world.run(capsys, "serve", "qwen3", "--standalone")
+    assert world.store.hosts == [None] and "on network" not in r.out and "warning" not in r.err
+
+
+def test_serve_standalone_warns_for_an_exposed_preset_without_a_key(world, capsys) -> None:
+    world.cfg.set_preset(str(world.qwen), Preset("chat", Profile(host="0.0.0.0"), "estimated"))
+    r = world.run(capsys, "serve", "qwen3", "--standalone")
+    assert "warning: listening on 0.0.0.0 without an API key" in r.err
+    world.cfg.set_preset(str(world.qwen), Preset("chat", Profile(host="0.0.0.0", api_key="k"),
+                                                 "estimated"))
+    assert "warning" not in world.run(capsys, "serve", "qwen3", "--standalone").err
+
+
+def test_ps_lists_client_urls(world, capsys) -> None:
+    world.run(capsys, "up", "--lan")
+    world.store.sessions = [Session("m-9000", "m", "http://127.0.0.1:9000", pid=1, log="x",
+                                    started=1000.0, host="0.0.0.0"),
+                            Session("ext-h:1", "ext", "http://h:1", external=True)]
+    r = world.run(capsys, "ps")
+    assert f"running at http://127.0.0.1:8080, http://{LAN_IP}:8080 (pid" in r.out
+    assert f"http://127.0.0.1:9000, http://{LAN_IP}:9000" in r.out and "0.0.0.0" not in r.out
+    d = json.loads(world.run(capsys, "ps", "--json").out)
+    assert d["gateway"]["urls"] == ["http://127.0.0.1:8080", f"http://{LAN_IP}:8080"]
+    assert d["gateway"]["url"] == "http://127.0.0.1:8080"
+    assert d["sessions"][0]["urls"] == ["http://127.0.0.1:9000", f"http://{LAN_IP}:9000"]
+    assert d["sessions"][1]["urls"] == ["http://h:1"]
+
+
+def test_ps_for_a_loopback_gateway_has_one_url(world, capsys) -> None:
+    world.run(capsys, "up")
+    assert json.loads(world.run(capsys, "ps", "--json").out)["gateway"]["urls"] == [
+        "http://127.0.0.1:8080"]
+
+
+# --------------------------------------------------------------------------- config
+
+def test_config_shows_the_settings_with_the_key_masked(world, capsys) -> None:
+    world.cfg.gateway.api_key = "super-secret-key"
+    r = world.run(capsys, "config")
+    assert r.code == 0 and "super-secret-key" not in r.out and r.err == ""
+    assert re.search(r"gateway.host\s+127.0.0.1  \(local\)", r.out)
+    assert re.search(r"gateway.api_key\s+\*{8} \(set\)", r.out)
+    for want in ("gateway.port", "8080", "gateway.models_max", "gateway.sleep_idle 600",
+                 "gateway.autostart false", "default_intent", "chat", "headroom_pct", "10",
+                 "Clients connect to", "http://127.0.0.1:8080/v1"):
+        assert want in re.sub(r" +", " ", r.out), want
+    assert "note:" not in r.out and "!" not in r.out
+
+
+def test_config_json_masks_the_key_too(world, capsys) -> None:
+    world.cfg.gateway.api_key = "super-secret-key"
+    d = json.loads(world.run(capsys, "config", "--json").out)
+    assert "super-secret-key" not in json.dumps(d)
+    assert d["gateway"] == {"host": "127.0.0.1", "mode": "local", "port": 8080,
+                            "api_key": "********", "models_max": 1, "sleep_idle": 600,
+                            "autostart": False}
+    assert d["urls"] == ["http://127.0.0.1:8080"] and d["exposed"] is False
+    assert d["warnings"] == [] and d["notes"] == [] and d["default_intent"] == "chat"
+
+
+def test_config_without_a_key_says_none(world, capsys) -> None:
+    assert re.search(r"gateway.api_key\s+none", world.run(capsys, "config").out)
+    assert json.loads(world.run(capsys, "config", "--json").out)["gateway"]["api_key"] == ""
+
+
+def test_config_set_validates_and_saves(world, capsys) -> None:
+    r = world.run(capsys, "config", "gateway.port=9090", "gateway.sleep_idle=0",
+                  "gateway.autostart=yes", "default_intent=agent", "headroom_pct=15",
+                  "gateway.models_max=2", "gateway.api_key=abc123")
+    assert r.code == 0 and "saved gateway.port, gateway.sleep_idle" in r.err
+    g = saved_config(world)["gateway"]
+    assert (g["port"], g["sleep_idle"], g["autostart"], g["models_max"], g["api_key"]) == (
+        9090, 0, True, 2, "abc123")
+    assert saved_config(world)["default_intent"] == "agent" and saved_config(world)["headroom_pct"] == 15
+    assert "abc123" not in r.out and "http://127.0.0.1:9090/v1" in r.out
+    r = world.run(capsys, "config", "gateway.port=9090")
+    assert r.code == 0 and "nothing changed" in r.err
+
+
+def test_config_gateway_host_accepts_lan_local_and_an_address(world, capsys) -> None:
+    r = world.run(capsys, "config", "gateway.host=lan")
+    assert r.code == 0 and saved_config(world)["gateway"]["host"] == "0.0.0.0"
+    assert re.search(r"gateway.host\s+0.0.0.0  \(lan\)", r.out)
+    assert f"http://{LAN_IP}:8080/v1" in r.out and "0.0.0.0:" not in r.out
+    assert "! listening on 0.0.0.0 without an API key" in r.out
+    assert world.run(capsys, "config", "gateway.host=local").code == 0
+    assert saved_config(world)["gateway"]["host"] == "127.0.0.1"
+    r = world.run(capsys, "config", f"gateway.host={LAN_IP}")
+    assert saved_config(world)["gateway"]["host"] == LAN_IP and "(custom)" in r.out
+    d = json.loads(world.run(capsys, "config", "gateway.host=lan", "--json").out)
+    assert d["exposed"] is True and d["warnings"] and d["urls"][1] == f"http://{LAN_IP}:8080"
+
+
+def test_config_shows_the_wsl_notes_for_an_exposed_bind(world, capsys, monkeypatch) -> None:
+    from llamactl import network
+
+    monkeypatch.setattr(network, "read_osrelease", lambda: "5.15-microsoft-standard-WSL2")
+    monkeypatch.setattr(network, "read_wslinfo", lambda: "mirrored")
+    network.reset_cache()
+    world.cfg.gateway.host = "0.0.0.0"
+    assert "Hyper-V firewall" in world.run(capsys, "config").out
+    r = world.run(capsys, "up")
+    assert "note: WSL uses mirrored networking" in r.err
+
+
+@pytest.mark.parametrize("pair, message", [
+    ("gateway.nope=1", "unknown setting 'gateway.nope'"),
+    ("port=1", "unknown setting 'port'"),
+    ("gateway.port=0", "gateway.port: expected a whole number from 1 to 65535"),
+    ("gateway.port=abc", "gateway.port: expected a whole number"),
+    ("gateway.port=70000", "from 1 to 65535"),
+    ("gateway.models_max=0", "gateway.models_max: expected a whole number, 1 or more"),
+    ("gateway.sleep_idle=-1", "gateway.sleep_idle"),
+    ("gateway.autostart=maybe", "expected true or false"),
+    ("gateway.host=", "gateway.host: expected a host name or address"),
+    ("gateway.host=a b", "gateway.host"),
+    ("default_intent=bogus", "default_intent: expected one of chat"),
+    ("headroom_pct=60", "headroom_pct: expected a whole number from 0 to 50"),
+    ("gateway.port", "'gateway.port' is not KEY=VALUE"),
+])
+def test_config_rejects_bad_keys_and_values_and_saves_nothing(world, capsys, pair, message) -> None:
+    r = world.run(capsys, "config", "gateway.models_max=3", pair)
+    assert r.code == 2 and message in r.err and r.out == ""
+    assert not (world.cfg_dir / "config.json").exists() and world.cfg.gateway.models_max == 1
+
+
+def test_config_new_api_key_is_printed_once_and_saved(world, capsys) -> None:
+    r = world.run(capsys, "config", "--new-api-key")
+    assert r.code == 0
+    key = saved_config(world)["gateway"]["api_key"]
+    assert len(key) >= 43 and r.out.count(key) == 1
+    assert f"new API key (saved; shown only now): {key}" in r.out
+    assert re.search(r"gateway.api_key\s+\*{8} \(set\)", r.out)
+    again = world.run(capsys, "config")
+    assert key not in again.out
+    other = world.run(capsys, "config", "--new-api-key")
+    assert saved_config(world)["gateway"]["api_key"] != key and key not in other.out
+
+
+def test_config_new_api_key_json_and_with_a_host(world, capsys) -> None:
+    r = world.run(capsys, "config", "gateway.host=lan", "--new-api-key", "--json")
+    d = json.loads(r.out)
+    key = saved_config(world)["gateway"]["api_key"]
+    assert d["new_api_key"] == key and d["gateway"]["api_key"] == "********"
+    assert d["warnings"] == []                                  # exposed, but it has a key now
+    assert r.out.count(key) == 1
+
+
+def test_config_new_api_key_conflicts_with_an_explicit_one(world, capsys) -> None:
+    r = world.run(capsys, "config", "gateway.api_key=x", "--new-api-key")
+    assert r.code == 2 and "not both" in r.err and not (world.cfg_dir / "config.json").exists()
+
+
+def test_config_clears_the_key_with_an_empty_value(world, capsys) -> None:
+    world.cfg.gateway.api_key = "old"
+    assert world.run(capsys, "config", "gateway.api_key=").code == 0
+    assert saved_config(world)["gateway"]["api_key"] == ""
+
+
+def test_config_says_a_running_gateway_needs_down_and_up(world, capsys) -> None:
+    world.run(capsys, "up")
+    r = world.run(capsys, "config", "gateway.host=lan", "gateway.autostart=true")
+    assert "keeps its old gateway.host until you run `llamactl down` and `llamactl up`" in r.err
+    assert "autostart" not in r.err.split("keeps its old")[1]
+    world.gw.is_running = False
+    assert "keeps its old" not in world.run(capsys, "config", "gateway.port=9999").err
+
+
+def test_config_show_is_read_only() -> None:
+    parse = cli.build_parser().parse_args
+    assert cli.is_read_only(parse(["config"])) and cli.is_read_only(parse(["config", "--json"]))
+    assert not cli.is_read_only(parse(["config", "gateway.port=1"]))
+    assert not cli.is_read_only(parse(["config", "--new-api-key"]))

@@ -19,7 +19,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Sequence, TextIO
 
-from . import actions, gateway as gateway_mod, hardware, intents, library, render, report, tuner
+from . import (actions, cfgedit, gateway as gateway_mod, hardware, intents, library, network,
+               render, report, tuner)
 from .actions import ActionError
 from .calibration import TUNED, Calibration
 from .config import CONFIG_FILE, PRESET_SEP, Config
@@ -351,15 +352,53 @@ def _load_timeout(size: int) -> float:
     return tuner.health_timeout(size) if size else DEFAULT_LOAD_TIMEOUT
 
 
-def _serve_hint(sv: Services, base_url: str, model: str | None, info: ModelInfo,
+def _serve_hint(sv: Services, urls: list[str], model: str | None, info: ModelInfo,
                 api_key: bool) -> None:
-    """Print the endpoint, the model name to request and a curl example."""
-    sv.say(render.kv([
-        ("base URL", f"{base_url.rstrip('/')}/v1  (OpenAI compatible)"),
-        ("model", model or "(any; one model per server)"),
-        ("try", actions.curl_snippet(base_url, model, api_key=api_key,
-                                     embedding=info.is_embedding)),
-    ]))
+    """Print the endpoint(s), the model name to request and a curl example.
+
+    Args:
+        sv: Services.
+        urls: Client base URLs (``network.client_urls``): loopback first, then LAN ones.
+        model: Model id to request, None for a standalone server.
+        info: Model metadata.
+        api_key: A key is required (the curl line gets a placeholder header).
+    """
+    rows = [("base URL", f"{urls[0].rstrip('/')}/v1  (OpenAI compatible)")]
+    rows += [("on network", f"{u.rstrip('/')}/v1") for u in urls[1:]]
+    rows += [("model", model or "(any; one model per server)"),
+             ("try", actions.curl_snippet(network.primary_url(urls), model, api_key=api_key,
+                                          embedding=info.is_embedding))]
+    sv.say(render.kv(rows))
+
+
+def _requested_host(args: argparse.Namespace) -> str | None:
+    """The listen address asked for with ``--lan`` or ``--host``, for this start only.
+
+    Raises:
+        UsageError: When ``--host`` is not an address.
+    """
+    if getattr(args, "lan", False):
+        return network.WILDCARD
+    if getattr(args, "host", None) is None:
+        return None
+    try:
+        return network.check_host(args.host)
+    except ValueError as e:
+        raise UsageError(f"--host: {e}") from None
+
+
+def _warn_exposed(sv: Services, host: str, api_key: str) -> None:
+    """On stderr: the no-key warning and what this machine needs, for an exposed bind."""
+    if warning := network.key_warning(host, api_key):
+        sv.note(f"warning: {warning}")
+    for note in network.exposure_notes(host):
+        sv.note(f"note: {note}")
+
+
+def _gateway_host(sv: Services) -> str:
+    """The listen address the gateway runs on now (the configured one when unknown)."""
+    st = sv.gateway.state
+    return (st.host if st is not None and st.host else sv.cfg.gateway.host)
 
 
 # --------------------------------------------------------------------------- commands
@@ -443,6 +482,7 @@ def cmd_serve(args: argparse.Namespace, sv: Services) -> int:
         _intent(args, sv, info)
     if args.port is not None and not args.standalone:
         raise UsageError("--port applies to --standalone; the gateway port is a gateway setting")
+    host = _requested_host(args)
     sv.require_binary()
     cfg = sv.cfg
     try:
@@ -456,24 +496,25 @@ def cmd_serve(args: argparse.Namespace, sv: Services) -> int:
         sv.say("  an estimate: run `llamactl tune` to measure it on this machine")
     timeout = _load_timeout(info.size)
     if args.standalone:
-        return _serve_standalone(args, sv, path, chosen.name, info, timeout)
+        return _serve_standalone(args, sv, path, chosen.name, info, timeout, host)
     with Waiting(sv, "starting the gateway") as w:
         name = actions.serve_gateway(cfg, sv.gateway, str(path), chosen.name, clock=sv.clock,
-                                     sleep=sv.sleep, tick=w.tick)
+                                     sleep=sv.sleep, tick=w.tick, host=host)
     if not args.no_wait:
         with Waiting(sv, f"loading {name}") as w:
             actions.wait_loaded(sv.gateway, name, timeout, clock=sv.clock, sleep=sv.sleep,
                                 tick=w.tick)
     sv.say(f"{'serving' if not args.no_wait else 'loading'} {name}")
-    _serve_hint(sv, sv.gateway.listen_url, name, info, bool(cfg.gateway.api_key))
+    _serve_hint(sv, actions.gateway_urls(sv.gateway, host), name, info, bool(cfg.gateway.api_key))
+    _warn_exposed(sv, _gateway_host(sv), cfg.gateway.api_key)
     return EXIT_OK
 
 
 def _serve_standalone(args: argparse.Namespace, sv: Services, path: Path, preset: str,
-                      info: ModelInfo, timeout: float) -> int:
+                      info: ModelInfo, timeout: float, host: str | None = None) -> int:
     """Launch a standalone server for a preset and wait for it to answer."""
     try:
-        sess = sv.store.launch_server(sv.cfg, str(path), preset, port=args.port)
+        sess = sv.store.launch_server(sv.cfg, str(path), preset, port=args.port, host=host)
     except (LookupError, RuntimeError, OSError) as e:
         raise CliError(f"cannot start {path.name}: {e}") from None
     if not args.no_wait:
@@ -482,24 +523,30 @@ def _serve_standalone(args: argparse.Namespace, sv: Services, path: Path, preset
                                       tick=w.tick)
     sv.say(f"{'serving' if not args.no_wait else 'started'} {sess.name} on its own port "
            f"(pid {sess.pid}, log {sess.log})")
-    _serve_hint(sv, sess.url, None, info, bool(sv.cfg.profile_for(str(path)).api_key))
+    prof = sv.cfg.profile_for(str(path))
+    _serve_hint(sv, sess.urls, None, info, bool(prof.api_key))
+    _warn_exposed(sv, host if host is not None else prof.host, prof.api_key)
     return EXIT_OK
 
 
 def cmd_up(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl up``: start the gateway (nothing happens when it already runs)."""
+    host = _requested_host(args)
     sv.require_binary()
     gw = sv.gateway
     with Waiting(sv, "starting the gateway") as w:
-        st, started = actions.ensure_gateway(gw, clock=sv.clock, sleep=sv.sleep, tick=w.tick)
+        st, started = actions.ensure_gateway(gw, clock=sv.clock, sleep=sv.sleep, tick=w.tick,
+                                             host=host)
+    urls = ", ".join(actions.gateway_urls(gw, host))
     if not started:
-        sv.say(f"gateway already running at {st.url} (pid {st.pid})")
+        sv.say(f"gateway already running at {urls} (pid {st.pid})")
         return EXIT_OK
     count = actions.count_presets(gateway_mod.PRESETS_FILE)
-    sv.say(f"gateway running at {st.url} (pid {st.pid}); {count} preset{'s' * (count != 1)} "
+    sv.say(f"gateway running at {urls} (pid {st.pid}); {count} preset{'s' * (count != 1)} "
            "written; models load on first use or with `llamactl load`")
     for problem in gw.problems:
         sv.note(f"warning: {problem}")
+    _warn_exposed(sv, _gateway_host(sv), sv.cfg.gateway.api_key)
     return EXIT_OK
 
 
@@ -509,6 +556,53 @@ def cmd_down(args: argparse.Namespace, sv: Services) -> int:
         sv.say("gateway stopped (its loaded models went with it; standalone servers keep running)")
     else:
         sv.say("gateway was not running")
+    return EXIT_OK
+
+
+def cmd_config(args: argparse.Namespace, sv: Services) -> int:
+    """``llamactl config``: show the gateway and planning settings, or change them.
+
+    ``KEY=VALUE`` pairs are validated together and saved; ``--new-api-key`` generates a key,
+    saves it and prints it once (it is masked everywhere else).
+
+    Raises:
+        UsageError: For a malformed pair, an unknown key or a bad value (nothing is saved).
+    """
+    try:
+        pairs = [cfgedit.split_pair(p) for p in args.pairs]
+    except cfgedit.ConfigError as e:
+        raise UsageError(str(e)) from None
+    cfg = sv.cfg
+    new_key = ""
+    if args.new_api_key:
+        if any(k == "gateway.api_key" for k, _ in pairs):
+            raise UsageError("give gateway.api_key=VALUE or --new-api-key, not both")
+        new_key = network.new_api_key()
+        pairs.append(("gateway.api_key", new_key))
+    if pairs:
+        try:
+            changed = cfgedit.apply(cfg, pairs)
+        except cfgedit.ConfigError as e:
+            raise UsageError(str(e)) from None
+        if changed:
+            cfg.save()
+            sv.note("saved " + ", ".join(k.name for k in changed))
+            stale = [k.name for k in changed if k.restart]
+            if stale and sv.gateway.running:
+                sv.note(f"the running gateway keeps its old {', '.join(stale)} until you run "
+                        "`llamactl down` and `llamactl up`")
+        else:
+            sv.note("nothing changed")
+    data = cfgedit.show(cfg)
+    if new_key:
+        data["new_api_key"] = new_key
+    if args.json:
+        sv.emit(True, data, render.render_config)
+        return EXIT_OK
+    sv.say(render.render_config(data, sv.style))
+    if new_key:
+        sv.say("")
+        sv.say(f"new API key (saved; shown only now): {new_key}")
     return EXIT_OK
 
 
@@ -684,6 +778,15 @@ def _version() -> str:
         return "unknown"
 
 
+def _add_bind(sp: argparse.ArgumentParser) -> None:
+    """Add ``--lan`` / ``--host`` (mutually exclusive) to a subcommand."""
+    group = sp.add_mutually_exclusive_group()
+    group.add_argument("--lan", action="store_true",
+                       help="listen on every interface (0.0.0.0) for this start only")
+    group.add_argument("--host", metavar="ADDR",
+                       help="listen on this address for this start only (not saved)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The argument parser with all subcommands.
 
@@ -731,8 +834,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-wait", action="store_true", help="do not wait until the model is loaded")
     sp.add_argument("--no-activate", action="store_true",
                     help="with --for: serve as NAME@INTENT and keep the active preset")
-    add("up", cmd_up, "start the gateway")
+    _add_bind(sp)
+    sp = add("up", cmd_up, "start the gateway")
+    _add_bind(sp)
     add("down", cmd_down, "stop the gateway")
+    sp = add("config", cmd_config, "show or change gateway and planning settings", json_out=True)
+    sp.add_argument("pairs", nargs="*", metavar="KEY=VALUE",
+                    help=f"settings to save ({', '.join(cfgedit.KEYS)}); "
+                         "gateway.host also takes 'local' and 'lan'")
+    sp.add_argument("--new-api-key", action="store_true",
+                    help="generate a gateway API key, save it and print it once")
     add("ps", cmd_ps, "show gateway models and standalone servers", json_out=True)
     sp = add("load", cmd_load, "load a model in the gateway")
     sp.add_argument("name", metavar="NAME", help="model id as `llamactl ps` lists it")
@@ -753,7 +864,8 @@ def build_parser() -> argparse.ArgumentParser:
 def is_read_only(args: argparse.Namespace) -> bool:
     """True for invocations that must not write any state file."""
     return args.command in ("hw", "ls", "ps", "logs") or (
-        args.command == "plan" and not args.save)
+        args.command == "plan" and not args.save) or (
+        args.command == "config" and not args.pairs and not args.new_api_key)
 
 
 def launch_tui() -> int:

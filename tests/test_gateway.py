@@ -427,6 +427,44 @@ def test_wildcard_host_connects_via_loopback(env) -> None:
     assert env.gw.listen_url == "http://127.0.0.1:8080"
 
 
+def test_host_override_applies_to_one_start_and_is_remembered(env) -> None:
+    env.gw.host_override = "0.0.0.0"
+    assert env.gw.host == "0.0.0.0" and env.gw.listen_url == "http://127.0.0.1:8080"
+    argv = env.gw.command()
+    assert argv[argv.index("--host") + 1] == "0.0.0.0"
+    st = started(env)
+    assert st.host == "0.0.0.0" and st.url == "http://127.0.0.1:8080"
+    assert GatewayState.load().host == "0.0.0.0" and env.gw.running_host == "0.0.0.0"
+    assert env.cfg.gateway.host == "127.0.0.1"                     # never saved
+    s = env.gw.status()
+    assert s.host == "0.0.0.0" and s.url == "http://127.0.0.1:8080"
+
+
+def test_a_stopped_gateway_reports_the_host_it_would_use(env) -> None:
+    assert env.gw.status().host == "127.0.0.1"
+    env.gw.host_override = "10.0.0.5"
+    assert env.gw.status().host == "10.0.0.5" and env.gw.listen_url == "http://10.0.0.5:8080"
+
+
+def test_a_state_file_without_a_host_means_the_configured_one(env) -> None:
+    env.cfg_dir.mkdir(parents=True, exist_ok=True)
+    (env.cfg_dir / "gateway.json").write_text(
+        '{"pid": 5, "url": "http://127.0.0.1:8080", "log": "/l", "started": 1.0}')
+    env.alive.add(5)
+    assert GatewayState.load().host == "" and env.gw.running_host == "127.0.0.1"
+    env.cfg.gateway.host = "0.0.0.0"
+    assert env.gw.running_host == "0.0.0.0" and env.gw.status().host == "0.0.0.0"
+
+
+def test_start_checks_the_port_on_the_overridden_host(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple] = []
+    monkeypatch.setattr(gateway, "port_free", lambda port, host="127.0.0.1": seen.append((port, host)) or False)
+    env.gw.host_override = "0.0.0.0"
+    with pytest.raises(GatewayError, match="port 8080 on 0.0.0.0 is already in use"):
+        env.gw.start()
+    assert seen == [(8080, "0.0.0.0")]
+
+
 # --------------------------------------------------------------------------- models()
 
 def entry(name: str, status: dict[str, Any]) -> dict[str, Any]:

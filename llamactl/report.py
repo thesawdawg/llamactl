@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from . import hf, planner
+from . import hf, network, planner
 from .calibration import Calibration
 from .command import build_command, command_string
 from .config import Config, ModelEntry
@@ -277,16 +277,20 @@ def ps_data(status: GatewayStatus, models: list[GatewayModel] | None, error: str
         started: Gateway start time (Unix), 0 when unknown.
 
     Returns:
-        Dict with "gateway" and "sessions".
+        Dict with "gateway" and "sessions"; each has ``url`` (what llamactl connects to) and
+        ``urls`` (what a client should use: LAN URLs too for a wildcard bind).
     """
     return {
-        "gateway": {"running": status.running, "url": status.url, "healthy": status.healthy,
+        "gateway": {"running": status.running, "url": status.url,
+                    "urls": network.client_urls_for(status.url, status.host),
+                    "healthy": status.healthy,
                     "pid": status.pid, "uptime_s": int(now - started) if started else None,
                     "error": error,
                     "models": None if models is None else [
                         {"name": m.name, "state": m.state, "exit_code": m.exit_code}
                         for m in models]},
-        "sessions": [{"id": s.id, "name": s.name, "url": s.url, "pid": s.pid,
+        "sessions": [{"id": s.id, "name": s.name, "url": s.url,
+                      "urls": [s.url] if s.external else s.urls, "pid": s.pid,
                       "external": s.external, "log": s.log,
                       "state": states.get(s.id, "down"),
                       "uptime_s": int(now - s.started) if s.started else None}

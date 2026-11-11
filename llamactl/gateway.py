@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 import httpx
 
+from . import network
 from .command import check_ini_value, preset_items
 from .config import CONFIG_DIR, LOG_DIR, PRESET_SEP, Config, derive_alias
 from .sessions import pid_alive, port_free
@@ -31,8 +32,6 @@ SETTLE_SECONDS = 1.0
 
 # Model states reported by `GatewayModel.state`.
 UNLOADED, LOADING, LOADED, SLEEPING, FAILED = "unloaded", "loading", "loaded", "sleeping", "failed"
-
-_ANY_ADDRESS = {"", "0.0.0.0", "::", "[::]"}
 
 
 class GatewayError(RuntimeError):
@@ -135,15 +134,19 @@ class GatewayState:
 
     Attributes:
         pid: Process id of the router (also its process group id).
-        url: Base URL clients use, e.g. ``http://127.0.0.1:8080``.
+        url: Base URL llamactl connects to, e.g. ``http://127.0.0.1:8080`` (loopback, also for a
+            wildcard bind).
         log: Path of the log file.
         started: Unix time of the start.
+        host: The listen address the router was started with ("" in a state file written
+            before this was recorded).
     """
 
     pid: int
     url: str
     log: str
     started: float = 0.0
+    host: str = ""
 
     @classmethod
     def load(cls) -> "GatewayState | None":
@@ -155,7 +158,7 @@ class GatewayState:
         try:
             raw = json.loads(STATE_FILE.read_text())
             return cls(int(raw["pid"]), str(raw["url"]), str(raw.get("log", "")),
-                       float(raw.get("started", 0.0)))
+                       float(raw.get("started", 0.0)), str(raw.get("host", "")))
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
@@ -176,15 +179,18 @@ class GatewayStatus:
 
     Attributes:
         running: The router process exists.
-        url: Base URL (from the running gateway, else from the settings).
+        url: Base URL llamactl connects to (from the running gateway, else from the settings).
         healthy: ``GET /health`` answered 200.
         pid: Router process id, 0 when not running.
+        host: The listen address (of the running gateway, else the one it would start with);
+            "" when unknown. `network.client_urls_for(url, host)` gives the URLs for clients.
     """
 
     running: bool
     url: str
     healthy: bool = False
     pid: int = 0
+    host: str = ""
 
 
 @dataclass(frozen=True)
@@ -289,11 +295,6 @@ def log_reason(log: Path) -> str:
     return pick.split(" ", 2)[-1] if pick[:1].isdigit() else pick
 
 
-def _client_host(host: str) -> str:
-    """Address to connect to for a listen address (wildcards become loopback)."""
-    return "127.0.0.1" if host in _ANY_ADDRESS else host
-
-
 class Gateway:
     """The router-mode llama-server and its API.
 
@@ -309,6 +310,10 @@ class Gateway:
         sleep: Sleep function used while settling (injectable).
         read_only: Never touch ``gateway.json``: a dead gateway's state is reported as "not
             running" but not deleted (for commands that only look, like ``llamactl ps``).
+
+    Attributes:
+        host_override: Listen address for the next `start` instead of the configured one (never
+            saved); None uses ``cfg.gateway.host``.
     """
 
     def __init__(self, cfg: Config, popen: Callable[..., Any] = subprocess.Popen,
@@ -321,14 +326,25 @@ class Gateway:
         self._settle = settle
         self._sleep = sleep
         self.problems: list[str] = []
+        self.host_override: str | None = None
 
     # -- process -----------------------------------------------------------------------
 
     @property
+    def host(self) -> str:
+        """The listen address a start would use: the override, else the configured host."""
+        return self.cfg.gateway.host if self.host_override is None else self.host_override
+
+    @property
     def listen_url(self) -> str:
-        """Base URL implied by the gateway settings."""
-        g = self.cfg.gateway
-        return f"http://{_client_host(g.host)}:{g.port}"
+        """Base URL llamactl connects to (loopback for a wildcard bind)."""
+        return f"http://{network.probe_host(self.host)}:{self.cfg.gateway.port}"
+
+    @property
+    def running_host(self) -> str:
+        """The listen address of the running gateway (the configured one when it is unknown)."""
+        st = self.state
+        return (st.host if st is not None and st.host else self.cfg.gateway.host)
 
     @property
     def state(self) -> GatewayState | None:
@@ -353,7 +369,7 @@ class Gateway:
         """
         g = self.cfg.gateway
         argv = [str(Path(self.cfg.bin_dir) / "llama-server"), "--models-preset", str(PRESETS_FILE),
-                "--models-max", str(max(1, g.models_max)), "--host", g.host, "--port", str(g.port)]
+                "--models-max", str(max(1, g.models_max)), "--host", self.host, "--port", str(g.port)]
         if g.api_key:
             argv += ["--api-key", g.api_key]
         return argv
@@ -390,8 +406,8 @@ class Gateway:
         if (st := self.state) is not None:
             return st
         g = self.cfg.gateway
-        if not port_free(g.port, g.host):
-            raise GatewayError(f"port {g.port} on {g.host} is already in use; "
+        if not port_free(g.port, self.host):
+            raise GatewayError(f"port {g.port} on {self.host} is already in use; "
                                "stop what holds it or change the gateway port")
         self.write_presets()
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -409,7 +425,7 @@ class Gateway:
             waited += 0.1
         if self._settle > 0 and not pid_alive(proc.pid):
             raise GatewayError(f"the gateway exited at once: {log_reason(log)} (log: {log})")
-        st = GatewayState(proc.pid, self.listen_url, str(log), time.time())
+        st = GatewayState(proc.pid, self.listen_url, str(log), time.time(), self.host)
         st.save()
         return st
 
@@ -434,12 +450,12 @@ class Gateway:
         """
         st = self.state
         if st is None:
-            return GatewayStatus(False, self.listen_url)
+            return GatewayStatus(False, self.listen_url, host=self.host)
         try:
             healthy = self._request("GET", "/health").status_code == 200
         except GatewayError:
             healthy = False
-        return GatewayStatus(True, st.url, healthy, st.pid)
+        return GatewayStatus(True, st.url, healthy, st.pid, st.host or self.cfg.gateway.host)
 
     # -- router API --------------------------------------------------------------------
 

@@ -302,7 +302,7 @@ def render_ps(d: dict, style: Style) -> str:
         health = (style.paint("healthy", "green") if g["healthy"]
                   else style.paint("not answering", "red"))
         up = f", up {duration(g['uptime_s'])}" if g["uptime_s"] is not None else ""
-        lines = [f"{heading('Gateway', style)}  running at {g['url']} (pid {g['pid']}{up}), "
+        lines = [f"{heading('Gateway', style)}  running at {', '.join(g['urls'])} (pid {g['pid']}{up}), "
                  f"{health}"]
         if g["models"] is None:
             lines.append(f"  models unavailable: {g['error']}")
@@ -313,14 +313,38 @@ def render_ps(d: dict, style: Style) -> str:
         else:
             lines.append("  no models configured")
     else:
-        lines = [f"{heading('Gateway', style)}  not running (llamactl up starts it on {g['url']})"]
+        lines = [f"{heading('Gateway', style)}  not running (llamactl up starts it on {', '.join(g['urls'])})"]
     lines += ["", heading("Servers", style)]
     if d["sessions"]:
         lines.append(table(
             ["NAME", "URL", "STATE", "UP", "KIND"],
-            [[s["name"], s["url"], (s["state"], _STATE_COLOUR.get(s["state"], "")),
+            [[s["name"], ", ".join(s["urls"]), (s["state"], _STATE_COLOUR.get(s["state"], "")),
               duration(s["uptime_s"]), "attached" if s["external"] else "standalone"]
              for s in d["sessions"]], style, indent="  "))
     else:
         lines.append("  no standalone or attached servers")
+    return "\n".join(lines)
+
+
+def render_config(d: dict, style: Style) -> str:
+    """Text for ``llamactl config``: the settings, where clients connect, and any warning.
+
+    Args:
+        d: Result of `cfgedit.show`.
+        style: Colour settings.
+
+    Returns:
+        The lines; the API key is already masked in `d`.
+    """
+    g = d["gateway"]
+    key = f"{g['api_key']} (set)" if g["api_key"] else "none"
+    rows = [("gateway.host", f"{g['host']}  ({g['mode']})"), ("gateway.port", str(g["port"])),
+            ("gateway.api_key", key), ("gateway.models_max", str(g["models_max"])),
+            ("gateway.sleep_idle", str(g["sleep_idle"])),
+            ("gateway.autostart", "true" if g["autostart"] else "false"),
+            ("default_intent", d["default_intent"]), ("headroom_pct", str(d["headroom_pct"]))]
+    lines = [kv(rows), "", heading("Clients connect to", style)]
+    lines += [f"  {u}/v1" for u in d["urls"]]
+    lines += [style.paint(f"! {w}", "yellow") for w in d["warnings"]]
+    lines += [f"note: {n}" for n in d["notes"]]
     return "\n".join(lines)
