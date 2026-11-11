@@ -67,7 +67,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 9 - Network access
 
-- [ ] `network.py`: bind modes, LAN addresses, client URLs, API key, WSL mode and notes
+- [x] `network.py`: bind modes, LAN addresses, client URLs, API key, WSL mode and notes
 - [ ] Client URLs everywhere an endpoint is shown (Home, Serving, onboarding, `up`, `serve`, `ps`, curl)
 - [ ] Exposed-without-key warning when starting the gateway or a standalone server
 - [ ] Settings: "Listen on" select, URL line, Generate key; PresetEditor host choices

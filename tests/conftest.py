@@ -17,7 +17,7 @@ import pytest
 SESSION_HOME = Path(tempfile.mkdtemp(prefix="llamactl-test-home-"))
 os.environ["LLAMACTL_HOME"] = str(SESSION_HOME)
 
-from llamactl import calibration, config, gateway, gguf, hardware, sessions, tuner  # noqa: E402
+from llamactl import calibration, config, gateway, gguf, hardware, network, sessions, tuner  # noqa: E402
 from llamactl.hardware import Device, Host  # noqa: E402
 
 _U32, _F32, _STR, _ARR, _I32 = 4, 6, 8, 9, 5
@@ -80,6 +80,28 @@ def session_state_dir() -> Iterator[Path]:
     assert config.CONFIG_DIR == SESSION_HOME, "llamactl was imported before LLAMACTL_HOME was set"
     yield SESSION_HOME
     shutil.rmtree(SESSION_HOME, ignore_errors=True)
+
+
+FAKE_LAN = "192.168.50.7"
+
+
+@pytest.fixture(autouse=True)
+def fake_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Never run `ip` or `wslinfo`, read /proc or open a socket for the network lookups.
+
+    The machine is a plain Linux host with one LAN address (`FAKE_LAN` on eth1) and a docker
+    bridge; tests that care replace these functions again or pass their own to `network`.
+    """
+    ip = ("1: lo    inet 127.0.0.1/8 scope host lo\n"
+          f"2: eth1    inet {FAKE_LAN}/24 brd 192.168.50.255 scope global eth1\n"
+          "3: docker0    inet 172.17.0.1/16 scope global docker0\n")
+    monkeypatch.setattr(network, "read_ip_output", lambda: ip)
+    monkeypatch.setattr(network, "route_address", lambda: None)
+    monkeypatch.setattr(network, "read_osrelease", lambda: "6.6.0-generic")
+    monkeypatch.setattr(network, "read_wslinfo", lambda: None)
+    network.reset_cache()
+    yield
+    network.reset_cache()
 
 
 @pytest.fixture(autouse=True)
