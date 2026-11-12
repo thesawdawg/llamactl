@@ -37,14 +37,14 @@ class HFView(BaseView):
         Binding("k", "token", "Set token"),
         Binding("x", "cancel", "Cancel download"),
     ]
-    CSS = """
+    DEFAULT_CSS = """
     #hf_q { margin: 0 1; }
     #hf_body { height: 1fr; }
     #repos { height: 1fr; }
     #files { height: 2fr; }
     #hf_bar { margin: 0 1; display: none; }
-    #hf_note { color: $text-muted; padding: 0 1; height: auto; }
-    #hf_legend { color: $text-muted; padding: 0 1; height: auto; }
+    #hf_note { color: $text-muted; padding: 0 1; height: auto; width: 100%; }
+    #hf_legend { color: $text-muted; padding: 0 1; height: auto; width: 100%; }
     """
 
     def __init__(self) -> None:
