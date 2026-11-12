@@ -11,9 +11,11 @@ from pathlib import Path
 from . import planner
 from .calibration import TUNED, Calibration
 from .config import ModelEntry, Preset
+from .gguf import ModelInfo
 from .hardware import Host
 from .intents import INTENTS, by_key
-from .planner import VERDICT_CPU, VERDICT_GPU, VERDICT_NO, VERDICT_SPILL, Plan
+from .planner import (VERDICT_CPU, VERDICT_GPU, VERDICT_NO, VERDICT_SPILL, Plan,
+                      verdict_label)
 
 NO_PRESET = "New"            # shown for a model with no preset at all
 MAX_BEST = 4                 # intents named in the "Best for" cell before "+N"
@@ -167,12 +169,14 @@ def top_reason(plan: Plan) -> str:
     return plan.reasons.get("ctx_size") or next(iter(plan.reasons.values()), "")
 
 
-def intent_rows(plans: dict[str, Plan], entry: ModelEntry | None, path: Path, host: Host,
-                headroom_pct: float, calibration: Calibration, build: str) -> list[IntentRow]:
+def intent_rows(plans: dict[str, Plan], info: ModelInfo, entry: ModelEntry | None,
+                path: Path, host: Host, headroom_pct: float, calibration: Calibration,
+                build: str) -> list[IntentRow]:
     """One row per planned intent, in intent table order.
 
     Args:
         plans: Plans by intent key.
+        info: Model metadata (for the MoE verdict label).
         entry: The model's config entry, or None.
         path: Model file.
         host: Host snapshot (for the usable memory).
@@ -191,7 +195,8 @@ def intent_rows(plans: dict[str, Plan], entry: ModelEntry | None, path: Path, ho
             continue
         preset = entry.presets.get(intent.key) if entry else None
         rows.append(IntentRow(
-            intent.key, intent.label, intent.description, plan.verdict, plan.ctx_per_slot,
+            intent.key, intent.label, intent.description,
+            verdict_label(plan.verdict, plan.profile, info), plan.ctx_per_slot,
             intent.slots, plan.profile.cache_type_k, plan.budget.total(), usable,
             speed_of(preset), top_reason(plan), plan.warnings, preset.source if preset else "",
             bool(entry and preset and entry.active == intent.key),

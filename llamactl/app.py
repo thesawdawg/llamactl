@@ -894,8 +894,8 @@ class LlamaCtl(App):
         key = str(path)
         self.infos[key] = info
         ent = self.cfg.models.get(key)
-        rows = intent_rows(plans, ent, path, self.host, self.cfg.headroom_pct, self.calibration,
-                           self.build)
+        rows = intent_rows(plans, info, ent, path, self.host, self.cfg.headroom_pct,
+                           self.calibration, self.build)
         alias = self.alias_of(path)
 
         def after(choice: str | None) -> None:

@@ -15,7 +15,8 @@ from ..config import Config, Profile
 from ..gguf import ModelInfo
 from ..hardware import Host
 from ..intents import Intent
-from ..planner import estimate_budget, placeholder_info
+from ..planner import (estimate_budget, expert_ram_bytes, placeholder_info, verdict,
+                      verdict_label)
 from ..schema import Group
 from ..widgets import layout
 from ..widgets.budget import BudgetPanel
@@ -149,9 +150,12 @@ class PresetEditor(Screen[Profile | None]):
             "Auto-fit is ignored while experts are placed by hand; llamactl turns it off."
             if fit_conflict(self._draft) else "")
         info = self.info or placeholder_info(0)
+        budget = estimate_budget(info, self._draft, self.host, self.calibration)
+        v = verdict(budget, self.host, self.cfg.headroom_pct)
         self.query_one(BudgetPanel).update_budget(
-            estimate_budget(info, self._draft, self.host, self.calibration), self.host,
-            self.cfg.headroom_pct)
+            budget, self.host, self.cfg.headroom_pct,
+            expert_ram=expert_ram_bytes(info, self._draft),
+            verdict_text=verdict_label(v, self._draft, info))
         model = str(self.info.path) if self.info else "<model>"
         argv = build_command(self.cfg, model, self._draft, self._draft.port or 0)
         if not self._draft.port:
@@ -201,7 +205,8 @@ class PresetEditor(Screen[Profile | None]):
         self._draft = self._draft.merged(**{k: getattr(rec.profile, k) for k in rec.reasons})
         self._recompute()
         warn = f" Warning: {'; '.join(rec.warnings)}." if rec.warnings else ""
-        self._say(f"Plan applied ({intent.label}): {rec.verdict}.{warn} "
+        v = verdict_label(rec.verdict, rec.profile, self.info or placeholder_info(0))
+        self._say(f"Plan applied ({intent.label}): {v}.{warn} "
                   "Review, then F1 for help or Ctrl+S to save.")
 
     def action_reset_field(self) -> None:

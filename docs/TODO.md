@@ -104,11 +104,11 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 13 - MoE placement in the planner (SPEC 12.3)
 
-- [ ] `gguf.py`: tensor table across shards, sizes from offsets and alignment; `expert_bytes`, `dense_bytes`, `expert_used`; cache gate
-- [ ] Planner: GPU part from `dense_bytes`; `_moe_layers` from `expert_bytes`; RAM check and swap warning; `Plan.expert_ram`, `Plan.layer_gain`; fallback to the average
-- [ ] UI: BudgetPanel splits GPU part and experts in RAM (never red for a valid MoE plan)
-- [ ] UI: Models meta MoE line and `GPU+experts` verdict cell
-- [ ] UI: PlanScreen "Expert placement" block; `plan` text and `--json` fields
+- [x] `gguf.py`: tensor table across shards, sizes from offsets and alignment; `expert_bytes`, `dense_bytes`, `expert_used`; cache gate
+- [x] Planner: GPU part from `dense_bytes`; `_moe_layers` from `expert_bytes`; RAM check and swap warning; `Plan.expert_ram`, `Plan.layer_gain`; fallback to the average
+- [x] UI: BudgetPanel splits GPU part and experts in RAM (never red for a valid MoE plan)
+- [x] UI: Models meta MoE line and `GPU+experts` verdict cell
+- [x] UI: PlanScreen "Expert placement" block; `plan` text and `--json` fields
 - [ ] Manual: Qwen3.6-35B-A3B plan loads first time with headroom free; numbers readable
 
 ## Phase 14 - MoE search in the tuner (SPEC 12.4)

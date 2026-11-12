@@ -14,7 +14,8 @@ from .usage import SRC_ESTIMATE, SRC_PROCESS, SRC_TUNED, format_cpu, format_mem
 GB = 1e9
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
-_VERDICT_COLOUR = {"GPU": "green", "GPU+CPU": "yellow", "CPU": "yellow", "NO": "red"}
+_VERDICT_COLOUR = {"GPU": "green", "GPU+CPU": "yellow", "GPU+experts": "cyan",
+                   "CPU": "yellow", "NO": "red"}
 _STATE_COLOUR = {"loaded": "green", "ready": "green", "sleeping": "cyan", "loading": "yellow",
                  "unloaded": "dim", "down": "red", "failed": "red"}
 
@@ -230,7 +231,7 @@ def render_plan(d: dict, style: Style) -> str:
     m, it, b, mem = d["model"], d["intent"], d["budget"], d["memory"]
     lines = [
         f"{heading(m['alias'], style)} for {it['key']} ({it['description']})",
-        f"  verdict  {style.verdict(d['verdict'])}",
+        f"  verdict  {style.verdict(d['verdict_label'])}",
         f"  context  {d['ctx_per_slot']} tokens per slot x {d['slots']} slot"
         f"{'s' * (d['slots'] != 1)} = {d['ctx_total']} total (-c)",
         "",
@@ -248,6 +249,12 @@ def render_plan(d: dict, style: Style) -> str:
                      f"{gb(mem['vram_free'])} free now) and {gb(mem['ram_free'])} free RAM")
     else:
         lines.append(f"  against {gb(mem['ram_free'])} free RAM (no GPU)")
+    if d["expert_ram"]:
+        lines += ["", heading("Expert placement", style),
+                  f"  experts of {d['profile']['n_cpu_moe']}/{m['layers']} layers in RAM "
+                  f"({gb(d['expert_ram'])}); GPU part {gb(b['total'] - d['expert_ram'])}",
+                  f"  one more layer on the GPU needs {gb(d['layer_gain'])} more VRAM; "
+                  "fewer layers in RAM is faster"]
     lines += ["", heading("Why", style)]
     if d["reasons"]:
         lines.append(table(["SETTING", "REASON"], [[k, v] for k, v in d["reasons"].items()],
@@ -266,7 +273,7 @@ def render_plan(d: dict, style: Style) -> str:
 
 def render_plan_all(d: dict, style: Style) -> str:
     """Text for ``llamactl plan --all``: one row per applicable intent."""
-    rows = [[p["intent"], (p["verdict"], _VERDICT_COLOUR.get(p["verdict"], "")),
+    rows = [[p["intent"], (p["verdict_label"], _VERDICT_COLOUR.get(p["verdict_label"], "")),
              str(p["ctx_per_slot"]), str(p["slots"]), p["cache_type"], gb(p["needs"]),
              "; ".join(p["warnings"])] for p in d["plans"]]
     m = d["model"]

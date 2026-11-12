@@ -39,14 +39,17 @@ GB = 1e9
 EDITED = "edited"     # Preset.source of a hand-edited preset
 
 
-def best_text(plans: dict[str, Plan] | None, readable: bool) -> Text:
+def best_text(plans: dict[str, Plan] | None, readable: bool,
+              info: ModelInfo | None = None) -> Text:
     """The "Best for" cell: the intents with the best verdict, in that verdict's colour."""
     if not readable:
         return Text("unreadable", style="red")
     if plans is None:
         return Text("...", style="dim")
     b = best_for(plans)
-    return Text(b.text() if b.keys else "-", style=FITS_STYLE.get(b.verdict, ""))
+    v = (planner.verdict_label(b.verdict, plans[b.keys[0]].profile, info)
+         if b.keys and info else b.verdict)
+    return Text(b.text() if b.keys else "-", style=FITS_STYLE.get(v, ""))
 
 
 def preset_text(st: PresetState) -> Text:
@@ -210,7 +213,8 @@ class ModelsView(BaseView):
         st = self._state(path)
         size = info.size if info else _size(Path(path))
         return (a.alias_of(path), human(size) if size else "-", hf.quant_of(Path(path).name),
-                best_text(self.plans.get(path), path not in self._unreadable or info is not None),
+                best_text(self.plans.get(path),
+                          path not in self._unreadable or info is not None, info),
                 preset_text(st), f"{st.measured:.1f} t/s" if st.measured else "-")
 
     def _row(self, p: Path) -> None:
@@ -333,10 +337,10 @@ class ModelsView(BaseView):
     def rows_for(self, model: str) -> list[IntentRow]:
         """Per-intent rows of a model from the cached plans (empty while planning)."""
         a = self.app
-        plans = self.plans.get(model)
-        if not plans:
+        plans, info = self.plans.get(model), a.infos.get(model)
+        if not plans or info is None:
             return []
-        return intent_rows(plans, a.cfg.models.get(model), Path(model), a.host,
+        return intent_rows(plans, info, a.cfg.models.get(model), Path(model), a.host,
                            a.cfg.headroom_pct, a.calibration, a.build)
 
     def update_detail(self) -> None:
@@ -392,6 +396,11 @@ class ModelsView(BaseView):
                                             else "") + (f", {info.sharded} shards"
                                                         if info.sharded > 1 else "")
                  + ("  |  embedding model" if info.is_embedding else ""))
+        if info.expert_count:
+            used = f", {info.expert_used} per token" if info.expert_used else ""
+            ram = (f"; experts {human(sum(info.expert_bytes))} of {human(info.size)} "
+                   "can live in RAM" if info.expert_bytes else "")
+            t.append(f"\nMoE: {info.expert_count} experts{used}{ram}")
         if ent is None or not ent.presets:
             t.append("\nNo preset yet: Enter picks what it is for and serves it; t tunes it.",
                      style="yellow")
@@ -407,8 +416,11 @@ class ModelsView(BaseView):
             panel.display = False
             return
         plan = plans[key]
+        info = a.infos.get(model)
         panel.display = True
-        panel.update_budget(plan.budget, a.host, a.cfg.headroom_pct)
+        panel.update_budget(plan.budget, a.host, a.cfg.headroom_pct, expert_ram=plan.expert_ram,
+                            verdict_text=(planner.verdict_label(plan.verdict, plan.profile, info)
+                                          if info else plan.verdict))
         self.query_one("#m_warnings", Static).update(
             Text("\n".join(f"! {w}" for w in plan.warnings), style="yellow"))
         existing = a.cfg.preset(model, key)

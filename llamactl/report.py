@@ -84,19 +84,24 @@ def preset_rows(entry: ModelEntry | None, path: Path, calibration: Calibration,
     return out
 
 
-def plan_summary(plan: Plan, slots: int) -> dict:
+def plan_summary(plan: Plan, slots: int, info: ModelInfo) -> dict:
     """One intent's plan in compact form (for the ``ls`` column and ``plan --all``).
 
     Args:
         plan: The plan.
         slots: Parallel slots of the intent.
+        info: Model metadata (for the MoE verdict label).
 
     Returns:
-        Dict with intent, verdict, ctx_per_slot, slots, cache type, total bytes and warnings.
+        Dict with intent, verdict (plus its display label), ctx_per_slot, slots, cache type,
+        total bytes, warnings and MoE expert placement bytes.
     """
-    return {"intent": plan.intent, "verdict": plan.verdict, "ctx_per_slot": plan.ctx_per_slot,
+    return {"intent": plan.intent, "verdict": plan.verdict,
+            "verdict_label": planner.verdict_label(plan.verdict, plan.profile, info),
+            "ctx_per_slot": plan.ctx_per_slot,
             "slots": slots, "cache_type": plan.profile.cache_type_k,
-            "needs": plan.budget.total(), "warnings": list(plan.warnings)}
+            "needs": plan.budget.total(), "warnings": list(plan.warnings),
+            "expert_ram": plan.expert_ram, "layer_gain": plan.layer_gain}
 
 
 def model_row(path: Path, alias: str, info: ModelInfo | None, error: str, cfg: Config,
@@ -121,7 +126,7 @@ def model_row(path: Path, alias: str, info: ModelInfo | None, error: str, cfg: C
     fits: list[dict] = []
     if info is not None:
         for intent, plan in _plans(cfg, info, host, calibration):
-            fits.append(plan_summary(plan, intent.slots))
+            fits.append(plan_summary(plan, intent.slots, info))
     return {"alias": alias, "path": str(path), "size": size, "quant": quant_of(path),
             "params": params_str(info.parameter_count) if info else "", "error": error,
             "fits": fits,
@@ -159,13 +164,14 @@ def plan_all_data(cfg: Config, path: Path, alias: str, info: ModelInfo, host: Ho
         Dict with the model and a list of `plan_summary` dicts under "plans".
     """
     return {"model": _model(path, alias, info),
-            "plans": [plan_summary(p, i.slots) for i, p in _plans(cfg, info, host, calibration)]}
+            "plans": [plan_summary(p, i.slots, info)
+                      for i, p in _plans(cfg, info, host, calibration)]}
 
 
 def _model(path: Path, alias: str, info: ModelInfo) -> dict:
     """Identity block of a model."""
     return {"alias": alias, "path": str(path), "size": info.size, "quant": quant_of(path),
-            "params": params_str(info.parameter_count)}
+            "params": params_str(info.parameter_count), "layers": info.n_layer}
 
 
 def plan_data(cfg: Config, path: Path, alias: str, info: ModelInfo, host: Host, plan: Plan,
@@ -193,6 +199,7 @@ def plan_data(cfg: Config, path: Path, alias: str, info: ModelInfo, host: Host, 
         "intent": {"key": intent.key, "label": intent.label, "description": intent.description,
                    "ctx_min": planner.ctx_bounds(intent, info)[2], "slots": intent.slots},
         "verdict": plan.verdict,
+        "verdict_label": planner.verdict_label(plan.verdict, plan.profile, info),
         "ctx_per_slot": plan.ctx_per_slot,
         "slots": intent.slots,
         "ctx_total": plan.profile.ctx_size,
@@ -205,6 +212,8 @@ def plan_data(cfg: Config, path: Path, alias: str, info: ModelInfo, host: Host, 
                    "devices": len(host.gpus)},
         "reasons": dict(plan.reasons),
         "warnings": list(plan.warnings),
+        "expert_ram": plan.expert_ram,
+        "layer_gain": plan.layer_gain,
         "profile": plan.profile.to_dict(),
         "existing_preset": existing.source if existing else None,
         "command": command_string(build_command(cfg, str(path), plan.profile,

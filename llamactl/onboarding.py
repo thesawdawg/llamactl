@@ -298,7 +298,7 @@ class ModelChoice:
         path: Model file.
         alias: Name clients will use.
         size: File size in bytes.
-        verdict: Planner verdict ("GPU", "GPU+CPU", "CPU", "NO").
+        verdict: Planner verdict ("GPU", "GPU+CPU", "GPU+experts", "CPU", "NO").
         intent: Key of the intent the verdict is for (the default one, or the first that
             applies when the model is an embedding model).
         ctx: Planned context per slot.
@@ -335,8 +335,9 @@ def model_choices(models: list[Path], infos: dict[str, ModelInfo], host: Host, c
             continue
         intent = resolve(intent_key, info)
         plan = actions.plan_for(cfg, info, host, intent, calibration)
-        out.append(ModelChoice(str(p), aliases[p], info.size, plan.verdict, intent.key,
-                               plan.ctx_per_slot))
+        out.append(ModelChoice(str(p), aliases[p], info.size,
+                               planner.verdict_label(plan.verdict, plan.profile, info),
+                               intent.key, plan.ctx_per_slot))
     return out
 
 

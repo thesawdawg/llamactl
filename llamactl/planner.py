@@ -113,6 +113,61 @@ def calibration_factor(host: Host, calibration: Calibration | None) -> float:
     return calibration.factor(host.gpus[0].backend)
 
 
+def moe_split(info: ModelInfo, overflow: int) -> tuple[int, int] | None:
+    """Layers whose experts must stay in RAM to cover an overflow of usable VRAM.
+
+    ``--n-cpu-moe N`` keeps the experts of the first N layers in RAM, so the placement is
+    the smallest N whose expert bytes cover the overflow (dense leading layers count but
+    move nothing).
+
+    Args:
+        info: Model metadata with `expert_bytes` per layer.
+        overflow: Bytes by which the launch exceeds usable VRAM.
+
+    Returns:
+        (N, bytes of experts kept in RAM by those N layers); (0, 0) when nothing overflows;
+        None when the experts of every layer are not enough or `expert_bytes` is unknown.
+    """
+    if overflow <= 0:
+        return (0, 0)
+    total = 0
+    for n, size in enumerate(info.expert_bytes, 1):
+        total += size
+        if total >= overflow:
+            return (n, total)
+    return None
+
+
+def expert_ram_bytes(info: ModelInfo, prof: Profile) -> int:
+    """Bytes of experts a profile keeps in RAM: `expert_bytes` of its first `n_cpu_moe` layers.
+
+    Args:
+        info: Model metadata.
+        prof: Profile with `n_cpu_moe`.
+
+    Returns:
+        The sum; 0 when `expert_bytes` is unknown or `n_cpu_moe` is 0.
+    """
+    return sum(info.expert_bytes[:prof.n_cpu_moe])
+
+
+def verdict_label(verdict: str, prof: Profile, info: ModelInfo) -> str:
+    """Display label of a plan verdict: "GPU+experts" for a MoE expert split.
+
+    Args:
+        verdict: Raw verdict (``VERDICT_*``), as stored on `Plan`.
+        prof: The plan's profile.
+        info: Model metadata.
+
+    Returns:
+        "GPU+experts" when experts are kept in RAM by `n_cpu_moe`, else `verdict`.
+        Display only: `Plan.verdict` and the tuner keep the raw value.
+    """
+    if verdict == VERDICT_SPILL and prof.n_cpu_moe > 0 and info.expert_count > 0:
+        return "GPU+experts"
+    return verdict
+
+
 def _budget(info: ModelInfo, prof: Profile, factor: float) -> Budget:
     """Budget of a profile with an explicit calibration factor."""
     ctx = prof.ctx_size or info.ctx_train
@@ -227,6 +282,10 @@ class Plan:
         verdict: "GPU", "GPU+CPU", "CPU" or "NO".
         ctx_per_slot: Context each slot gets (total ``-c`` is this times the slots).
         warnings: Things the user should know, e.g. a context below the intent's minimum.
+        expert_ram: Bytes of expert tensors the plan keeps in RAM (MoE `n_cpu_moe`), 0
+            when not a MoE split or `expert_bytes` is unknown.
+        layer_gain: Expert bytes of the last RAM-placed layer (index `n_cpu_moe` - 1): the
+            VRAM needed to move one more layer's experts onto the GPU (`n_cpu_moe` one less).
     """
 
     intent: str
@@ -236,6 +295,8 @@ class Plan:
     verdict: str
     ctx_per_slot: int
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    expert_ram: int = 0
+    layer_gain: int = 0
 
 
 class _Pick(NamedTuple):
@@ -302,15 +363,27 @@ class _Env:
     def fits(self, ctx: int, kv: str, limit: int) -> bool:
         """True when `ctx` per slot with `kv` cache fits in `limit` bytes.
 
-        On a MoE model on a GPU host, the attention weights, KV cache and buffers must also fit
-        GPU memory, because only the experts can move to RAM.
+        On a MoE model on a GPU host, what stays on the GPU must also fit usable VRAM,
+        because only the experts can move to RAM: `dense_bytes` + KV + compute + overhead
+        when the tensor table is known, else KV + compute + overhead. With known
+        `expert_bytes` and a spill `limit`, the experts that must live in RAM must also
+        fit RAM minus a 10% reserve.
         """
         b = self.budget(ctx, kv)
         if b.total() > limit:
             return False
-        if self.info.expert_count and self.gpu_limit:
+        if not (self.info.expert_count and self.gpu_limit):
+            return True
+        if not self.info.expert_bytes:
             return b.total() - round(b.weights * b.scale) <= self.gpu_limit
-        return True
+        gpu_part = round((self.info.dense_bytes + b.kv + b.compute + b.overhead) * b.scale)
+        if gpu_part > self.gpu_limit:
+            return False
+        if limit <= self.gpu_limit:
+            return True
+        ram_budget = max(0, self.host.ram_free - self.host.ram_total // 10)
+        split = moe_split(self.info, b.total() - self.gpu_limit)
+        return split is not None and split[1] <= ram_budget
 
 
 def _trained(info: ModelInfo) -> int:
@@ -542,6 +615,9 @@ def _moe_layers(env: _Env, lay: _Layout) -> int:
     if info.n_layer <= 0 or info.size <= 0:
         return 0
     over = env.budget(lay.ctx, lay.kv).total() - env.gpu_limit
+    if info.expert_bytes:
+        split = moe_split(info, over)
+        return split[0] if split else info.n_layer
     return max(1, min(info.n_layer, math.ceil(over / (info.size / info.n_layer))))
 
 
@@ -563,9 +639,16 @@ def _apply_placement(d: _Draft, env: _Env, lay: _Layout) -> None:
     elif lay.mode == _MOE:
         n = _moe_layers(env, lay)
         d.set("gpu_layers", "all", "all layers on GPU; MoE experts kept in RAM")
-        d.set("n_cpu_moe", n,
-              f"experts of {n}/{env.info.n_layer} layers stay in RAM: needs {_gb(total)} > "
-              f"{_gb(env.gpu_limit)} usable VRAM")
+        if env.info.expert_bytes:
+            ram = sum(env.info.expert_bytes[:n])
+            b = env.budget(lay.ctx, lay.kv)
+            part = round((env.info.dense_bytes + b.kv + b.compute + b.overhead) * b.scale)
+            why = (f"experts of {n}/{env.info.n_layer} layers ({_gb(ram)}) stay in RAM; "
+                   f"GPU part {_gb(part)} of {_gb(env.gpu_limit)} usable VRAM")
+        else:
+            why = (f"experts of {n}/{env.info.n_layer} layers stay in RAM: needs {_gb(total)} > "
+                   f"{_gb(env.gpu_limit)} usable VRAM")
+        d.set("n_cpu_moe", n, why)
         d.set("fit", "off", "expert placement is explicit (n_cpu_moe)")
     else:
         d.set("gpu_layers", "auto",
@@ -581,7 +664,7 @@ def _apply_placement(d: _Draft, env: _Env, lay: _Layout) -> None:
               f"({', '.join(_gb(s) for s in shares)})")
 
 
-def _warnings(env: _Env, lay: _Layout, v: str) -> tuple[str, ...]:
+def _warnings(env: _Env, lay: _Layout, v: str, expert_ram: int = 0) -> tuple[str, ...]:
     """Warnings for the user about a layout."""
     out: list[str] = []
     if v == VERDICT_NO:
@@ -593,6 +676,9 @@ def _warnings(env: _Env, lay: _Layout, v: str) -> tuple[str, ...]:
                    f"{lay.ctx} per slot, the {env.intent.key} minimum is {env.floor}")
     elif v != VERDICT_NO and lay.mode in (_SPILL, _MOE) and env.intent.spill == SPILL_AVOID:
         out.append("does not fit usable VRAM; part of the model runs on the CPU (slower)")
+    if expert_ram > 0.6 * env.host.ram_total:
+        out.append(f"experts in RAM take {_gb(expert_ram)} of {_gb(env.host.ram_total)} RAM; "
+                   "the system may start swapping")
     return tuple(out)
 
 
@@ -623,7 +709,12 @@ def plan(intent: Intent, info: ModelInfo, host: Host, base: Profile, headroom_pc
     _apply_placement(d, env, lay)
     budget = _budget(info, d.profile, env.factor)
     v = verdict(budget, host, headroom_pct)
-    return Plan(intent.key, d.profile, d.reasons, budget, v, lay.ctx, _warnings(env, lay, v))
+    n_moe = d.profile.n_cpu_moe if lay.mode == _MOE else 0
+    expert_ram = sum(info.expert_bytes[:n_moe])
+    layer_gain = info.expert_bytes[n_moe - 1] if n_moe and n_moe <= len(info.expert_bytes) else 0
+    return Plan(intent.key, d.profile, d.reasons, budget, v, lay.ctx,
+                _warnings(env, lay, v, expert_ram),
+                expert_ram=expert_ram, layer_gain=layer_gain)
 
 
 def plan_all(info: ModelInfo, host: Host, base: Profile, headroom_pct: float = 10,

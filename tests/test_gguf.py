@@ -115,3 +115,28 @@ def test_read_only_cache_never_writes_and_corrupt_cache_is_empty(tmp_path: Path)
     cache.put(info)
     assert cache.get(info.path) == info                  # remembered in memory
     assert cache_file.read_text() == "{not json"         # but the file is untouched
+
+
+def _moe_file(tmp_path: Path) -> Path:
+    """A 2-layer MoE file: routed experts in `blk.1.ffn_up_exps`, the rest dense."""
+    tensors = [("token_embd.weight", 256), ("blk.0.attn_q.weight", 128),
+               ("blk.1.ffn_up_exps.weight", 512), ("blk.1.ffn_down_shexp.weight", 64)]
+    p = tmp_path / "moe.gguf"
+    p.write_bytes(gguf_blob([
+        kv_str("general.architecture", "testarch"),
+        kv_u32("testarch.block_count", 2),
+        kv_u32("testarch.embedding_length", 256),
+        kv_u32("testarch.attention.head_count", 8),
+        kv_u32("testarch.expert_count", 4),
+        kv_u32("testarch.expert_used_count", 2),
+        kv_u32("general.alignment", 32),
+    ], tensors))
+    return p
+
+
+def test_tensor_table_splits_expert_bytes(tmp_path: Path) -> None:
+    """Routed expert tensors count per layer; shared experts and the rest count as dense."""
+    info = read_model_info(_moe_file(tmp_path))
+    assert info.expert_bytes == (0, 512)
+    assert info.dense_bytes == 256 + 128 + 64
+    assert info.expert_used == 2

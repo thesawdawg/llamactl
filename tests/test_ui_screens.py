@@ -34,7 +34,7 @@ class Harness(App[None]):
 def _rows(cfg: Config):
     info, host = make_info(MODEL), make_host()
     plans = planner.plan_all(info, host, cfg.default_profile, cfg.headroom_pct)
-    return intent_rows(plans, cfg.models.get(MODEL), Path(MODEL), host, cfg.headroom_pct,
+    return intent_rows(plans, info, cfg.models.get(MODEL), Path(MODEL), host, cfg.headroom_pct,
                        Calibration(), ""), plans
 
 

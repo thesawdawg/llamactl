@@ -255,6 +255,21 @@ def test_moe_spill_uses_n_cpu_moe(moe35b: ModelInfo, gpu_host: Host) -> None:
     assert p.budget.total() - (p.profile.n_cpu_moe - 1) * per_layer > gpu_limit(gpu_host)
 
 
+def test_moe_split_uses_real_expert_bytes(moe35b: ModelInfo, gpu_host: Host) -> None:
+    """With a tensor table, n_cpu_moe covers the overflow by expert size, not the average."""
+    info = dataclasses.replace(
+        moe35b, expert_bytes=tuple([int(0.25e9)] * 40 + [int(0.05e9)] * 8),
+        dense_bytes=int(9e9))
+    p = _by("agent", info, gpu_host)
+    n = p.profile.n_cpu_moe
+    assert (p.profile.gpu_layers, p.profile.fit, p.verdict) == ("all", "off", "GPU+CPU")
+    overflow = p.budget.total() - gpu_limit(gpu_host)
+    assert sum(info.expert_bytes[:n]) >= overflow > sum(info.expert_bytes[:n - 1])
+    assert p.expert_ram == sum(info.expert_bytes[:n])
+    assert p.layer_gain == info.expert_bytes[n - 1]
+    assert "GPU part" in p.reasons["n_cpu_moe"]
+
+
 FLOOR_WARNING = ("part of the model runs on the CPU (slower) to keep a usable context: "
                  "{ctx} per slot, the {intent} minimum is {floor}")
 

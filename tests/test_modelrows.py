@@ -15,11 +15,11 @@ from llamactl.modelrows import best_for, default_intent_key, intent_rows, preset
 
 def _plans(vram: float = 16e9, size: int = int(4e9)):
     info, host = make_info(size=size), make_host(vram)
-    return planner.plan_all(info, host, Profile(), 10), host
+    return planner.plan_all(info, host, Profile(), 10), host, info
 
 
 def test_best_for_lists_intents_with_the_best_verdict() -> None:
-    plans, _ = _plans()
+    plans, _, _info = _plans()
     b = best_for(plans)
     assert b.verdict == "GPU" and b.keys == ("chat", "agent", "context", "speed", "api")
     assert b.text() == "chat agent context speed +1"
@@ -31,14 +31,14 @@ def test_best_for_collapses_after_four() -> None:
 
 
 def test_best_for_when_nothing_fits() -> None:
-    plans, _ = _plans(vram=2e9, size=int(80e9))
+    plans, _, _info = _plans(vram=2e9, size=int(80e9))
     b = best_for(plans)
     assert b.verdict == "NO" and b.text() == "-"
     assert best_for({}).text() == "-"
 
 
 def test_best_for_prefers_gpu_over_partial() -> None:
-    plans, _ = _plans(vram=6e9, size=int(4e9))
+    plans, _, _info = _plans(vram=6e9, size=int(4e9))
     b = best_for(plans)
     assert b.verdict in ("GPU", "GPU+CPU")
     assert all(plans[k].verdict == b.verdict for k in b.keys)
@@ -72,13 +72,13 @@ def test_preset_state_new_estimated_tuned_edited_and_extra_count() -> None:
 
 
 def test_intent_rows_have_plan_and_preset_facts() -> None:
-    plans, host = _plans()
+    plans, host, info = _plans()
     path = Path("/m/a.gguf")
     ent = ModelEntry("a", "agent", {
         "agent": Preset("agent", plans["agent"].profile, "tuned",
                         Measurement(ok=True, gen_tps=28.0, at="t", build="b")),
         "chat": Preset("chat", plans["chat"].profile, "estimated")})
-    rows = {r.key: r for r in intent_rows(plans, ent, path, host, 10, Calibration(), "b")}
+    rows = {r.key: r for r in intent_rows(plans, info, ent, path, host, 10, Calibration(), "b")}
     assert list(rows) == list(plans)
     agent, chat, speed = rows["agent"], rows["chat"], rows["speed"]
     assert (agent.source, agent.active, agent.tps) == ("tuned", True, 28.0)
@@ -92,13 +92,13 @@ def test_intent_rows_have_plan_and_preset_facts() -> None:
 
 
 def test_top_reason_prefers_the_context_line() -> None:
-    plans, _ = _plans()
+    plans, _, _info = _plans()
     r = modelrows.top_reason(plans["chat"])
     assert r == plans["chat"].reasons["ctx_size"]
 
 
 def test_default_intent_key_order() -> None:
-    plans, _ = _plans()
+    plans, _, _info = _plans()
     ent = ModelEntry("a", "speed", {"speed": Preset("speed")})
     assert default_intent_key(ent, plans, "chat") == "speed"
     assert default_intent_key(None, plans, "agent") == "agent"

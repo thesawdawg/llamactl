@@ -12,6 +12,9 @@ from .config import CONFIG_DIR
 
 CACHE_FILE = CONFIG_DIR / "gguf_cache.json"
 SHARD_RE = re.compile(r"^(?P<prefix>.*)-(?P<idx>\d{5})-of-(?P<total>\d{5})\.gguf$")
+# Tensors ``--n-cpu-moe`` moves to RAM (routed experts; shared ``_shexp`` experts stay on the
+# GPU). Group 1 is the layer index. Same pattern llama.cpp uses (common/common.h).
+EXPERT_RE = re.compile(r"blk\.(\d+)\.ffn_(up|down|gate|gate_up)_(ch|)exps")
 
 # GGUF value types: fixed byte size for scalars; strings/arrays carry lengths.
 _U8, _I8, _U16, _I16, _U32, _I32, _F32, _BOOL, _STR, _ARR, _U64, _I64, _F64 = range(13)
@@ -44,6 +47,11 @@ class ModelInfo:
         sharded: split.count or 1.
         parameter_count: general.parameter_count or 0 when absent.
         pooling_type: {arch}.pooling_type (0 none, 1 mean, 2 cls, 3 last, 4 rank), -1 when absent.
+        expert_bytes: Bytes of the expert tensors ``--n-cpu-moe`` can keep in RAM, per layer
+            (0 for dense layers); empty for dense models and when the tensor table could not
+            be read.
+        dense_bytes: Bytes of every other tensor (0 without the tensor table).
+        expert_used: {arch}.expert_used_count (routed experts used per token), 0 when absent.
     """
 
     path: Path
@@ -62,6 +70,9 @@ class ModelInfo:
     sharded: int
     parameter_count: int
     pooling_type: int = -1
+    expert_bytes: tuple[int, ...] = ()
+    dense_bytes: int = 0
+    expert_used: int = 0
 
     @property
     def is_embedding(self) -> bool:
@@ -125,6 +136,95 @@ def _shards(path: Path) -> list[Path]:
     return sorted(path.parent.glob(f"{m['prefix']}-*-of-{m['total']}.gguf"))
 
 
+def _header(fh, name: str) -> tuple[int, dict]:
+    """Read magic, version, tensor count and the metadata kv block of a GGUF file.
+
+    Args:
+        fh: Binary file at position 0, left right after the kv block.
+        name: File name for error messages.
+
+    Returns:
+        (tensor_count, metadata dict).
+
+    Raises:
+        GGUFError: On a bad magic or unsupported version.
+    """
+    if fh.read(4) != b"GGUF":
+        raise GGUFError(f"{name}: not a GGUF file")
+    (version,) = struct.unpack("<I", fh.read(4))
+    if version not in (2, 3):
+        raise GGUFError(f"{name}: unsupported GGUF version {version}")
+    (count,) = struct.unpack("<Q", fh.read(8))
+    return count, _read_kv(fh)
+
+
+def _tensor_sizes(path: Path) -> list[tuple[str, int]]:
+    """Byte size of every tensor of one GGUF shard, from the info table (never the data).
+
+    Tensor offsets are relative to the data section, which starts at the position after
+    the last tensor info rounded up to ``general.alignment`` (default 32), and tensors are
+    laid out back to back: a size is the gap to the next larger offset, the last tensor
+    runs to the end of the file.
+
+    Args:
+        path: One shard file.
+
+    Returns:
+        (tensor name, byte size) pairs, in table order.
+
+    Raises:
+        GGUFError: On a bad header, a truncated table or offsets that do not add up.
+        OSError: When the file cannot be read.
+    """
+    total = path.stat().st_size
+    with path.open("rb") as fh:
+        count, kv = _header(fh, path.name)
+        infos: list[tuple[str, int]] = []
+        for _ in range(count):
+            (nlen,) = struct.unpack("<Q", fh.read(8))
+            name = fh.read(nlen).decode("utf-8", errors="replace")
+            (n_dims,) = struct.unpack("<I", fh.read(4))
+            fh.seek(8 * n_dims + 4, 1)                      # dims + ggml type, both unused
+            (offset,) = struct.unpack("<Q", fh.read(8))
+            infos.append((name, offset))
+        align = max(1, int(kv.get("general.alignment", 32)))
+        end = total - (fh.tell() + align - 1) // align * align
+        ordered = sorted(infos, key=lambda t: t[1])
+        out: list[tuple[str, int]] = []
+        for i, (name, off) in enumerate(ordered):
+            nxt = ordered[i + 1][1] if i + 1 < len(ordered) else end
+            if nxt - off < 0:
+                raise GGUFError(f"{path.name}: tensor offsets do not add up")
+            out.append((name, nxt - off))
+    return out
+
+
+def _expert_split(path: Path, n_layer: int) -> tuple[tuple[int, ...], int]:
+    """Expert vs dense tensor bytes of a MoE model, summed over every shard.
+
+    Args:
+        path: First shard of the model.
+        n_layer: Transformer block count.
+
+    Returns:
+        (expert bytes per layer, bytes of every other tensor); ``((), 0)`` when a shard's
+        tensor table cannot be read or no expert tensor is found.
+    """
+    layers = [0] * max(0, n_layer)
+    dense = 0
+    try:
+        for shard in _shards(path):
+            for name, size in _tensor_sizes(shard):
+                m = EXPERT_RE.search(name)
+                if m and int(m.group(1)) < n_layer:
+                    layers[int(m.group(1))] += size
+                else:
+                    dense += size
+    except (GGUFError, OSError, struct.error):
+        return (), 0
+    return (tuple(layers), dense) if any(layers) else ((), 0)
+
+
 def read_model_info(path: Path) -> ModelInfo:
     """Parse the GGUF header of a model file.
 
@@ -132,20 +232,16 @@ def read_model_info(path: Path) -> ModelInfo:
         path: Path to the .gguf file (first shard when split).
 
     Returns:
-        The parsed ModelInfo.
+        The parsed ModelInfo. For a MoE model the tensor table of every shard is read too
+        (never tensor data) to split expert from dense bytes per layer; an unreadable table
+        leaves `expert_bytes` empty.
 
     Raises:
         GGUFError: On a bad magic, unsupported version, or missing keys.
     """
     try:
         with path.open("rb") as fh:
-            if fh.read(4) != b"GGUF":
-                raise GGUFError(f"{path.name}: not a GGUF file")
-            (version,) = struct.unpack("<I", fh.read(4))
-            if version not in (2, 3):
-                raise GGUFError(f"{path.name}: unsupported GGUF version {version}")
-            fh.seek(8, 1)  # tensor_count, unused
-            kv = _read_kv(fh)
+            _count, kv = _header(fh, path.name)
     except OSError as e:
         raise GGUFError(f"{path}: {e}") from e
     arch = kv.get("general.architecture", "")
@@ -156,6 +252,11 @@ def read_model_info(path: Path) -> ModelInfo:
         n_head = int(kv[a + "attention.head_count"])
     except KeyError as e:
         raise GGUFError(f"{path.name}: missing metadata key {e}") from e
+    expert_count = int(kv.get(a + "expert_count", 0))
+    expert_bytes: tuple[int, ...] = ()
+    dense_bytes = 0
+    if expert_count:
+        expert_bytes, dense_bytes = _expert_split(path, n_layer)
     return ModelInfo(
         path=path,
         size=sum(p.stat().st_size for p in _shards(path)),
@@ -168,11 +269,14 @@ def read_model_info(path: Path) -> ModelInfo:
         head_dim_k=int(kv.get(a + "attention.key_length", n_embd // n_head)),
         head_dim_v=int(kv.get(a + "attention.value_length", n_embd // n_head)),
         ctx_train=int(kv.get(a + "context_length", 0)),
-        expert_count=int(kv.get(a + "expert_count", 0)),
+        expert_count=expert_count,
         file_type=int(kv.get("general.file_type", 0)),
         sharded=int(kv.get("split.count", 1)),
         parameter_count=int(kv.get("general.parameter_count", 0)),
         pooling_type=int(kv.get(a + "pooling_type", -1)),
+        expert_bytes=expert_bytes,
+        dense_bytes=dense_bytes,
+        expert_used=int(kv.get(a + "expert_used_count", 0)),
     )
 
 
@@ -196,18 +300,20 @@ class ModelInfoCache:
         self._lock = threading.Lock()          # the app scan and the setup scan may both `put`
 
     def get(self, path: Path) -> ModelInfo | None:
-        """Cached info for `path`, or None when missing, stale or written before pooling_type.
+        """Cached info for `path`, or None when missing, stale or written before
+        pooling_type/expert_bytes.
 
         Args:
             path: Model file path.
         """
         ent = self._data.get(str(path))
-        if not ent or "pooling_type" not in ent:  # pre-pooling entries are re-read from disk
-            return None
+        if not ent or "pooling_type" not in ent or "expert_bytes" not in ent:
+            return None                                    # entries from older versions are re-read
         try:
             if ent["mtime"] != path.stat().st_mtime:
                 return None
-            ent = {**ent, "path": Path(ent["path"])}
+            ent = {**ent, "path": Path(ent["path"]),
+                   "expert_bytes": tuple(ent["expert_bytes"])}
             return ModelInfo(**{k: v for k, v in ent.items() if k != "mtime"})
         except (OSError, TypeError, KeyError):
             return None

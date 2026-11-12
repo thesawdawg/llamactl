@@ -455,8 +455,9 @@ def test_plan_json_shape(world, capsys) -> None:
     r = world.run(capsys, "plan", "qwen3", "--for", "agent", "--json")
     d = json.loads(r.out)
     assert r.err == ""
-    assert set(d) == {"model", "intent", "verdict", "ctx_per_slot", "slots", "ctx_total", "budget",
-                      "memory", "reasons", "warnings", "profile", "existing_preset", "command"}
+    assert set(d) == {"model", "intent", "verdict", "verdict_label", "ctx_per_slot", "slots",
+                      "ctx_total", "budget", "memory", "reasons", "warnings", "expert_ram",
+                      "layer_gain", "profile", "existing_preset", "command"}
     assert d["budget"]["total"] == sum(d["budget"][k] for k in ("weights", "kv", "compute", "overhead"))
     assert d["memory"]["vram_usable"] < d["memory"]["vram_total"]
     assert d["profile"]["cache_reuse"] == 256 and "cache_reuse" in d["reasons"]

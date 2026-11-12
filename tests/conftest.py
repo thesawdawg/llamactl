@@ -53,9 +53,24 @@ def kv_arr_str(key: str, vals: list[str]) -> bytes:
     return out
 
 
-def gguf_blob(kvs: list[bytes]) -> bytes:
-    """A minimal GGUF v3 blob with no tensors."""
-    return b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(kvs)) + b"".join(kvs)
+def gguf_blob(kvs: list[bytes], tensors: list[tuple[str, int]] = (),
+              align: int = 32) -> bytes:
+    """A minimal GGUF v3 blob; `tensors` are (name, data bytes) laid out back to back.
+
+    The data section starts at the position after the tensor infos rounded up to `align`
+    (the ``general.alignment`` value the kvs declare); each tensor's offset is the
+    cumulative size.
+    """
+    infos, offset = [], 0
+    for name, size in tensors:
+        n = name.encode()
+        infos.append(struct.pack("<Q", len(n)) + n + struct.pack("<I", 1) +
+                     struct.pack("<Q", size) + struct.pack("<I", 0) +
+                     struct.pack("<Q", offset))
+        offset += size
+    head = (b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", len(tensors)) +
+            struct.pack("<Q", len(kvs)) + b"".join(kvs) + b"".join(infos))
+    return head + b"\0" * (-len(head) % align) + b"\0" * offset
 
 
 MINI_KVS = [

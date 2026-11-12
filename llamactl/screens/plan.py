@@ -13,10 +13,11 @@ from .. import actions, schema
 from ..actions import ActionError
 from ..calibration import Calibration
 from ..config import Config
-from ..fmt import FITS_STYLE
+from ..fmt import FITS_STYLE, human
 from ..gguf import ModelInfo
 from ..hardware import Host
 from ..intents import Intent
+from ..planner import verdict_label
 from ..widgets import layout
 from ..widgets.budget import BudgetPanel
 from ..widgets.buttonbar import ButtonBar
@@ -62,12 +63,13 @@ class PlanScreen(Screen[str | None]):
                  intent: Intent, calibration: Calibration | None = None) -> None:
         super().__init__()
         self.cfg, self.model, self.alias, self.host, self.intent = cfg, model, alias, host, intent
+        self.info = info
         self.plan = actions.plan_for(cfg, info, host, intent, calibration)
 
     def compose(self) -> ComposeResult:
         """Verdict, budget, planned settings table, message line and action buttons."""
         yield Header()
-        v = self.plan.verdict
+        v = verdict_label(self.plan.verdict, self.plan.profile, self.info)
         with VerticalScroll(id="plan_body"):
             yield Label(Text.assemble(
                 (self.alias, "b"), (f"  -  {self.intent.label}: {self.intent.description}  -  ", ""),
@@ -77,6 +79,13 @@ class PlanScreen(Screen[str | None]):
             for warning in self.plan.warnings:
                 yield Label(Text(f"! {warning}", style="yellow"))
             yield BudgetPanel()
+            if self.plan.expert_ram:
+                yield Label(Text("Expert placement", style="bold"))
+                yield Label(f"experts of {self.plan.profile.n_cpu_moe}/{self.info.n_layer} "
+                            f"layers in RAM ({human(self.plan.expert_ram)}); "
+                            f"GPU part {human(self.plan.budget.total() - self.plan.expert_ram)}")
+                yield Label(f"one more layer on the GPU needs {human(self.plan.layer_gain)} "
+                            "more VRAM; fewer layers in RAM is faster")
             yield DataTable(id="plan_table")
             yield Label("The plan changes nothing from the base profile.", id="plan_none")
         yield Label("", id="plan_msg")
@@ -91,8 +100,9 @@ class PlanScreen(Screen[str | None]):
     def on_mount(self) -> None:
         """Fill the budget panel and the Setting/Base/Planned/Why table."""
         self.sub_title = f"Plan - {self.intent.label}"
-        self.query_one(BudgetPanel).update_budget(self.plan.budget, self.host,
-                                                  self.cfg.headroom_pct)
+        self.query_one(BudgetPanel).update_budget(
+            self.plan.budget, self.host, self.cfg.headroom_pct, expert_ram=self.plan.expert_ram,
+            verdict_text=verdict_label(self.plan.verdict, self.plan.profile, self.info))
         t = self.query_one("#plan_table", DataTable)
         t.add_columns("Setting", "Base", "Planned", "Why")
         base = self.cfg.default_profile
