@@ -1,6 +1,7 @@
 """Tuner search: candidate stepping, scoring, progress/cancel, saving, preflight (fake Runner)."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import statistics
 from pathlib import Path
@@ -15,9 +16,10 @@ from llamactl.config import Config, Preset, Profile
 from llamactl.gguf import ModelInfo
 from llamactl.hardware import Device, Host
 from llamactl.measure import ERR_ARGS, ERR_OOM, Measurement
-from llamactl.tuner import (HOW_ALL_GPU, HOW_CTX_DOWN, HOW_CTX_UP, HOW_KV_Q8, HOW_PLAN, HOW_SPILL,
-                            HOW_THREADS, Candidate, SearchSpace, TrialEvent, TuneResult,
-                            choose_best, next_candidate, preflight, save_result, tune)
+from llamactl.tuner import (HOW_ALL_GPU, HOW_CTX_DOWN, HOW_CTX_UP, HOW_KV_Q8, HOW_MOE_BACK,
+                            HOW_MORE_RAM, HOW_PLAN, HOW_SPILL, HOW_THREADS, Candidate,
+                            SearchSpace, TrialEvent, TuneResult, choose_best, next_candidate,
+                            preflight, save_result, tune)
 
 GB = 1e9
 
@@ -246,9 +248,12 @@ def test_gpu_cpu_plan_gets_one_threads_trial_and_keeps_the_faster(dense27b: Mode
 
 def test_no_threads_trial_when_already_at_all_cores_or_all_gpu(dense27b: ModelInfo,
                                                                 dense8b: ModelInfo) -> None:
+    # a profile with both thread counts already at the host maximum has nothing to try
     host = _host(16, threads=8)               # physical == logical
-    runner = Scripted(lambda p: ok(14))
-    assert len(_run("agent", dense27b, host, runner).trials) == 2   # plan + its all-GPU variant
+    space = SearchSpace(intents.by_key["agent"], dense27b, host)
+    plan = planner.plan(space.intent, dense27b, host, Profile())
+    cand = Candidate(plan.profile.merged(threads=8, threads_batch=8), plan, HOW_PLAN, plan.verdict)
+    assert space.threads(cand) is None
     runner = Scripted(lambda p: ok(9))
     assert len(_run("agent", dense8b, _host(), runner).trials) == 2  # plan already all-GPU: fill wins
 
@@ -540,3 +545,30 @@ def test_cancel_callable_is_handed_to_the_runner(dense8b: ModelInfo) -> None:
     cancel = lambda: False  # noqa: E731
     _run("chat", dense8b, _host(), Spy(lambda p: ok()), cancel=cancel)
     assert seen and all(c is cancel for c in seen)
+
+
+def test_moe_split_search_raises_and_trims_n_cpu_moe() -> None:
+    """Plan OOMs; down puts more experts in RAM in big steps; moe_fill lands on the
+    lowest count that fits."""
+    info = dataclasses.replace(
+        _info(12e9, 48, 4, 262144), expert_count=128,
+        expert_bytes=tuple([int(0.2e9)] * 48), dense_bytes=int(2e9))
+    host = _host(16)                                    # 14.4 GB usable VRAM
+
+    def answer(p: Profile) -> Measurement:
+        n = p.n_cpu_moe
+        if n < 13:
+            return oom()
+        return ok(13.7 + 0.2 * (16 - n), gen=60 - 10 * (n - 13),
+                  prompt=800 - 100 * (n - 13))
+
+    events: list[TrialEvent] = []
+    runner = Scripted(answer)
+    r = _run("agent", info, host, runner, progress=events.append)
+    hows = [e.summary.split(":")[0] for e in events if e.phase == "start"]
+    assert not r.trials[0].measurement.ok               # the plan runs out of memory
+    assert [p.n_cpu_moe for p in runner.profiles] == [10, 16, 13, 13]  # +6, probe, threads
+    assert HOW_MORE_RAM in hows and HOW_MOE_BACK in hows
+    assert r.best.how == HOW_MOE_BACK
+    assert r.ok and r.best.profile.n_cpu_moe == 13      # the lowest count that fits
+    assert "ran out of memory" in r.why

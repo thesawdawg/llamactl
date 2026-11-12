@@ -113,11 +113,11 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 14 - MoE search in the tuner (SPEC 12.4)
 
-- [ ] `down` raises `n_cpu_moe` from the overflow; falls through at `n_layer`
-- [ ] `moe_fill` predicts the lowest fitting `n_cpu_moe` from measured slack
-- [ ] Scoring drops trials >30% slower on prompt; threads trial sets `threads_batch`; +3 trials for MoE
-- [ ] UI: TuneScreen `CPU MoE` column, plain change labels, summary explains the winner
-- [ ] UI: Home next step for estimated MoE presets with experts in RAM; Models `pp / tg` for MoE
+- [x] `down` raises `n_cpu_moe` from the overflow; falls through at `n_layer`
+- [x] `moe_fill` predicts the lowest fitting `n_cpu_moe` from measured slack
+- [x] Scoring drops trials >30% slower on prompt; threads trial sets `threads_batch`; +3 trials for MoE
+- [x] UI: TuneScreen `CPU MoE` column, plain change labels, summary explains the winner
+- [x] UI: Home next step for estimated MoE presets with experts in RAM; Models `pp / tg` for MoE
 - [ ] Manual: tune Qwen3.6-35B-A3B (agent); `CPU MoE` drops over trials, summary explains the pick
 
 ## Phase 15 - Manual placement and host hints (SPEC 12.5)

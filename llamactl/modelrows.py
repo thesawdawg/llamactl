@@ -140,6 +140,8 @@ class IntentRow:
             "edited"), "" when there is none.
         active: That preset is the model's active one.
         stale: That preset is tuned and stale.
+        pp_tg: For a MoE model whose preset has a measurement, "prompt / generation" tok/s
+            to show instead of `tps`; "" otherwise.
     """
 
     key: str
@@ -157,6 +159,7 @@ class IntentRow:
     source: str
     active: bool
     stale: bool
+    pp_tg: str = ""
 
     @property
     def has_preset(self) -> bool:
@@ -194,13 +197,16 @@ def intent_rows(plans: dict[str, Plan], info: ModelInfo, entry: ModelEntry | Non
         if plan is None:
             continue
         preset = entry.presets.get(intent.key) if entry else None
+        m = preset.measured if preset else None
+        pp_tg = (f"{m.prompt_tps:.0f} / {m.gen_tps:.1f}"
+                 if info.expert_count > 0 and m is not None and m.ok else "")
         rows.append(IntentRow(
             intent.key, intent.label, intent.description,
             verdict_label(plan.verdict, plan.profile, info), plan.ctx_per_slot,
             intent.slots, plan.profile.cache_type_k, plan.budget.total(), usable,
             speed_of(preset), top_reason(plan), plan.warnings, preset.source if preset else "",
             bool(entry and preset and entry.active == intent.key),
-            bool(preset and calibration.is_stale(preset, path, build))))
+            bool(preset and calibration.is_stale(preset, path, build)), pp_tg))
     return rows
 
 

@@ -241,7 +241,7 @@ def tune_data(alias: str, result: TuneResult, reloaded: bool, factor: float) -> 
     best = result.best
     return {
         "model": alias, "intent": result.intent, "ok": result.ok, "cancelled": result.cancelled,
-        "message": result.message,
+        "message": result.message, "why": result.why,
         "best": None if best is None else {
             "how": best.how, "ctx_per_slot": best.ctx_per_slot, "verdict": best.verdict,
             "cache_type": best.profile.cache_type_k, "profile": best.profile.to_dict(),

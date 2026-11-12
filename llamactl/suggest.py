@@ -25,8 +25,9 @@ class Suggestion:
     """One next step.
 
     Attributes:
-        key: Stable identifier (``binary``, ``no-models``, ``no-presets``, ``tune:<path>:<preset>``,
-            ``retune:<path>:<preset>``, ``start-gateway``).
+        key: Stable identifier (``binary``, ``no-models``, ``no-presets``,
+            ``tune-moe:<path>:<preset>``, ``tune:<path>:<preset>``, ``retune:<path>:<preset>``,
+            ``start-gateway``).
         text: One line for the user.
         action: What choosing it does (``ACT_*``).
         model: Model path the action is about, "" when none.
@@ -51,7 +52,8 @@ def next_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
     """What the user should probably do next, most urgent first.
 
     Rules, in this order: llama-server missing (Settings); no model files (Discover); models
-    without any preset (Models); active presets that are only estimated, never tuned (tune);
+    without any preset (Models); estimated active presets of a MoE model with experts in
+    RAM (tune the split); other active presets that are only estimated, never tuned (tune);
     tuned presets gone stale because the model file or the llama.cpp build changed (re-tune);
     the gateway stopped while presets exist (start it). Tuning and starting are not suggested
     while llama-server is missing. Models whose header could not be read are ignored by the
@@ -97,21 +99,30 @@ def next_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
 
 def _tuning_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
                   calibration: Calibration, build: str, aliases: dict[Path, str]) -> list[Suggestion]:
-    """Tune suggestions for estimated active presets, then re-tune ones for stale tuned presets."""
+    """Tune suggestions: MoE expert splits first, then other estimated active presets, then
+    re-tune ones for stale tuned presets."""
+    moe: list[Suggestion] = []
     untuned: list[Suggestion] = []
     stale: list[Suggestion] = []
     for m in models:
         ent = cfg.models.get(str(m))
         if ent is None or str(m) not in infos:
             continue
+        info = infos[str(m)]
         active = ent.presets.get(ent.active)
         if active is not None and active.source == ESTIMATED:
-            untuned.append(Suggestion(
-                f"tune:{m}:{ent.active}", f"{aliases[m]} ({ent.active}) is only an estimate: "
-                "tune it to measure what fits", ACT_TUNE, str(m), ent.active))
+            if info.expert_count > 0 and active.profile.n_cpu_moe > 0:
+                moe.append(Suggestion(
+                    f"tune-moe:{m}:{ent.active}",
+                    f"{aliases[m]} is a MoE model with experts in RAM: tune it to find the "
+                    "fastest split", ACT_TUNE, str(m), ent.active))
+            else:
+                untuned.append(Suggestion(
+                    f"tune:{m}:{ent.active}", f"{aliases[m]} ({ent.active}) is only an estimate: "
+                    "tune it to measure what fits", ACT_TUNE, str(m), ent.active))
         for name, preset in sorted(ent.presets.items()):
             if preset.source == TUNED and calibration.is_stale(preset, m, build):
                 stale.append(Suggestion(
                     f"retune:{m}:{name}", f"{aliases[m]} ({name}) was tuned for a different "
                     "model file or llama.cpp build: tune it again", ACT_TUNE, str(m), name))
-    return untuned[:MAX_PER_RULE] + stale[:MAX_PER_RULE]
+    return moe[:MAX_PER_RULE] + untuned[:MAX_PER_RULE] + stale[:MAX_PER_RULE]

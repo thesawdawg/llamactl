@@ -739,8 +739,11 @@ llamactl chose is shown with why, in the place the user looks at it:
 ### 12.4 Search in the tuner (phase 14)
 
 - `down` on a MoE memory failure: raise `n_cpu_moe` by enough layers to cover the measured or
-  estimated overflow from `expert_bytes`, before lowering context. At `n_cpu_moe == n_layer` it
-  falls through to the existing ladder (context down, q8_0 KV).
+  estimated overflow from `expert_bytes`, before lowering context. After an out-of-memory
+  failure the estimate usually still claims the trial fits (that is why it was tried), so the
+  step is then at least `max(1, n_layer // 8)` layers; `moe_fill` bisects back down between
+  the failure and the first fit. At `n_cpu_moe == n_layer` it falls through to the existing
+  ladder (context down, q8_0 KV).
 - `moe_fill`: from the best fitting MoE trial, predict the lowest `n_cpu_moe` whose added expert
   bytes fit the measured slack (free VRAM after load minus headroom), and try it; on a failure
   step back up halfway. Bounded like `fill`; never tries a count already tried.

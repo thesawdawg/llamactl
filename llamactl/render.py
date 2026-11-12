@@ -297,6 +297,8 @@ def render_tune(d: dict, style: Style) -> str:
             ("speed", f"{m['gen_tps']:.1f} tok/s generation, {m['prompt_tps']:.1f} tok/s prompt"),
             ("memory", f"{gb(m['vram_used'])} VRAM, {gb(m['ram_used'])} RAM"),
         ], "  "))
+        if d["why"]:
+            lines.append(f"  {d['why']}")
         lines.append(f"  saved as the '{d['intent']}' preset (tuned)")
     lines.append(f"  calibration factor now x{d['calibration_factor']:.2f}")
     if d["gateway_reloaded"]:

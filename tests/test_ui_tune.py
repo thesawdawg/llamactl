@@ -33,10 +33,10 @@ def test_split_summary_and_cells() -> None:
         "threads, q8_0 KV, GPU+CPU, 16 threads", "4096")
     assert split_summary("weird") == ("weird", "-")
     cells = trial_cells(2, "plan: 8192 ctx, f16 KV, GPU", ok(41.2, int(7.5e9)))
-    assert [str(c) for c in cells] == ["2", "plan, f16 KV, GPU", "8192", "3", "7.5 GB", "900",
-                                       "41.2", "ok"]
-    assert str(trial_cells(1, "plan: 8192 ctx, f16 KV, GPU", None)[7]) == "running"
-    assert str(trial_cells(1, "plan: 8192 ctx, f16 KV, GPU", oom())[7]).startswith("out of memory")
+    assert [str(c) for c in cells] == ["2", "plan, f16 KV, GPU", "8192", "-", "3", "7.5 GB",
+                                       "900", "41.2", "ok"]
+    assert str(trial_cells(1, "plan: 8192 ctx, f16 KV, GPU", None)[8]) == "running"
+    assert str(trial_cells(1, "plan: 8192 ctx, f16 KV, GPU", oom())[8]).startswith("out of memory")
 
 
 async def test_tune_shows_trials_saves_the_winner_and_use_activates(

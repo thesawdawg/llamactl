@@ -25,7 +25,8 @@ from ..planner import GB, Plan
 from ..widgets import layout
 from ..widgets.buttonbar import ButtonBar
 
-COLUMNS = (("#", "n"), ("change", "how"), ("ctx", "ctx"), ("load s", "load"), ("VRAM", "vram"),
+COLUMNS = (("#", "n"), ("change", "how"), ("ctx", "ctx"), ("CPU MoE", "moe"),
+           ("load s", "load"), ("VRAM", "vram"),
            ("prompt tok/s", "pp"), ("gen tok/s", "tg"), ("outcome", "out"))
 SUMMARY_RE = re.compile(r"^(?P<how>[^:]+): (?P<ctx>\d+) ctx, (?P<kv>\S+) KV, (?P<verdict>[^,]+)"
                         r"(?:, (?P<threads>\d+) threads)?$")
@@ -55,7 +56,7 @@ def split_summary(summary: str) -> tuple[str, str]:
 
 
 def trial_cells(index: int, summary: str, m: Measurement | None,
-                note: str = "") -> tuple:
+                note: str = "", n_cpu_moe: int = 0) -> tuple:
     """Cells of one trial row; a running trial (no measurement) shows dots.
 
     Args:
@@ -64,20 +65,23 @@ def trial_cells(index: int, summary: str, m: Measurement | None,
         m: Its measurement, None while it runs.
         note: Why a loaded trial did not count as fitting (`TrialEvent.note`); it replaces
             the green "ok" in the outcome column.
+        n_cpu_moe: The trial's ``--n-cpu-moe`` (shown in the CPU MoE column, "-" when 0).
 
     Returns:
-        The eight cells.
+        The nine cells.
     """
     change, ctx = split_summary(summary)
+    moe = str(n_cpu_moe) if n_cpu_moe else "-"
     if m is None:
-        return (str(index), change, ctx, "...", "", "", "", Text("running", style="yellow"))
+        return (str(index), change, ctx, moe, "...", "", "", "", Text("running", style="yellow"))
     if m.cancelled:
-        return (str(index), change, ctx, "-", "-", "-", "-", Text("cancelled", style="yellow"))
+        return (str(index), change, ctx, moe, "-", "-", "-", "-",
+                Text("cancelled", style="yellow"))
     if not m.ok:
-        return (str(index), change, ctx, f"{m.load_s:.0f}" if m.load_s else "-", "-", "-", "-",
-                Text(m.error.split(" (log:")[0][:OUTCOME_WIDTH], style="red"))
+        return (str(index), change, ctx, moe, f"{m.load_s:.0f}" if m.load_s else "-",
+                "-", "-", "-", Text(m.error.split(" (log:")[0][:OUTCOME_WIDTH], style="red"))
     out = Text(note[:OUTCOME_WIDTH], style="yellow") if note else Text("ok", style="green")
-    return (str(index), change, ctx, f"{m.load_s:.0f}", f"{m.vram_used / GB:.1f} GB",
+    return (str(index), change, ctx, moe, f"{m.load_s:.0f}", f"{m.vram_used / GB:.1f} GB",
             f"{m.prompt_tps:.0f}", f"{m.gen_tps:.1f}" if m.gen_tps else "-", out)
 
 
@@ -102,6 +106,9 @@ def summary_text(plan: Plan, outcome: TuneOutcome, active: bool) -> Text:
     t.append(f"{best.ctx_per_slot} ctx per slot, {best.profile.cache_type_k} KV, {best.verdict}, "
              + (f"{m.gen_tps:.1f} tok/s" if m.gen_tps else f"{m.prompt_tps:.0f} prompt tok/s")
              + f", {m.vram_used / GB:.1f} GB VRAM, loads in {m.load_s:.0f} s\n")
+    if r.why:
+        t.append("Why  ", style="bold")
+        t.append(r.why + "\n")
     est = plan.budget.total()
     ratio = f" (measured is x{m.vram_used / est:.2f} of the estimate)" if est and m.vram_used else ""
     t.append("Estimate  ", style="bold")
@@ -165,7 +172,7 @@ class TuneScreen(ModalScreen[str | None]):
         self._cancel = threading.Event()
         self._t0 = 0.0
         self._last = ""
-        self._trials: dict[int, tuple[str, Measurement | None]] = {}
+        self._trials: dict[int, tuple[str, Measurement | None, int]] = {}
 
     def compose(self) -> ComposeResult:
         """Title, pre-flight text, trial table, progress, summary and buttons."""
@@ -190,7 +197,8 @@ class TuneScreen(ModalScreen[str | None]):
         a = self.app
         self.query_one("#t_title", Label).update(
             f"Tune {a.alias_of(self.model)} for {self.intent.label}  "
-            f"({Path(self.model).name}, up to {self.trials} trials)")
+            f"({Path(self.model).name}, up to "
+            f"{tuner.trial_budget(self.info, self.trials)} trials)")
         t = self.query_one("#t_trials", DataTable)
         for label, key in COLUMNS:
             t.add_column(label, key=key)
@@ -374,7 +382,7 @@ class TuneScreen(ModalScreen[str | None]):
     def _event(self, e: tuner.TrialEvent) -> None:
         """A trial started or finished: update its row and the progress line."""
         t = self.query_one("#t_trials", DataTable)
-        cells = trial_cells(e.index, e.summary, e.measurement, e.note)
+        cells = trial_cells(e.index, e.summary, e.measurement, e.note, e.n_cpu_moe)
         key = str(e.index)
         if key in t.rows:
             for col, v in zip([c for _, c in COLUMNS], cells):
@@ -382,7 +390,7 @@ class TuneScreen(ModalScreen[str | None]):
         else:
             t.add_row(*cells, key=key)
             t.move_cursor(row=t.row_count - 1)
-        self._trials[e.index] = (e.summary, e.measurement)
+        self._trials[e.index] = (e.summary, e.measurement, e.n_cpu_moe)
         self._last = f"trial {e.index} of up to {e.total}: {e.summary}"
         self._tick()
 
@@ -422,8 +430,8 @@ class TuneScreen(ModalScreen[str | None]):
         for i, note in enumerate(outcome.result.notes):
             key = str(i + 1)
             if key in t.rows and i + 1 in self._trials:
-                summary, m = self._trials[i + 1]
-                t.update_cell(key, "out", trial_cells(i + 1, summary, m, note)[-1],
+                summary, m, n_moe = self._trials[i + 1]
+                t.update_cell(key, "out", trial_cells(i + 1, summary, m, note, n_moe)[-1],
                               update_width=True)
 
     # -- actions -----------------------------------------------------------------------

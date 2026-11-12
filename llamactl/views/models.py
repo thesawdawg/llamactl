@@ -75,7 +75,7 @@ def intent_cells(r: IntentRow) -> tuple:
     return (Text(r.label, style="bold" if r.active else ""),
             Text(r.verdict, style=FITS_STYLE.get(r.verdict, "")),
             f"{r.ctx_per_slot} x{r.slots}", r.kv, f"{r.needs / GB:.1f} / {r.usable / GB:.1f} GB",
-            f"{r.tps:.1f}" if r.tps else "-", source)
+            r.pp_tg or (f"{r.tps:.1f}" if r.tps else "-"), source)
 
 
 class ModelTable(DataTable):

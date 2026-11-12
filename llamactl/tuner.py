@@ -6,7 +6,10 @@ llama.cpp had to split the model, then a context fill that probes toward the lar
 fitting fully on the GPU (predicted from the measured bytes per token, guarded by a headroom
 check plus a spill check on the generation speed, so a driver silently falling back to
 system memory does not count as fitting), and a threads variant for a GPU+CPU best as the
-last resort. The only parts that touch processes or HTTP are behind the `Runner` protocol;
+last resort. For a MoE model on a discrete GPU it also walks the expert split: failures move
+more experts to RAM (`--n-cpu-moe`, auto-fit off), and once a split fits it probes smaller
+counts back toward the GPU since fewer experts in RAM is faster. The only parts that touch
+processes or HTTP are behind the `Runner` protocol;
 `ServerRunner` is the real one, with every subprocess, HTTP, clock and device-memory call
 injectable so tests never start llama.cpp.
 """
@@ -43,10 +46,13 @@ SPEED_INTENT = "speed"
 # How a candidate was derived (shown in progress events).
 HOW_PLAN, HOW_CTX_DOWN, HOW_KV_Q8, HOW_SPILL = "plan", "ctx down", "q8_0 KV", "spill"
 HOW_ALL_GPU, HOW_CTX_UP, HOW_THREADS = "all GPU", "ctx up", "threads"
+HOW_MORE_RAM, HOW_MOE_BACK = "more experts to RAM", "experts back to GPU"
 
 CTX_STEP = 4096             # context probes are multiples of this
 SPEED_TOLERANCE = 0.05      # extra context beyond the target may cost at most ~5% speed
 SPILL_RATIO = 1 / 3         # below this share of the family best a trial probably spilled
+PROMPT_TOLERANCE = 0.30     # a trial this far below the tier's best prompt speed is dropped
+MOE_EXTRA_TRIALS = 3        # MoE models get this many launches beyond --trials for the split
 
 # ServerRunner timing (seconds).
 HEALTH_BASE = 60.0        # health timeout = HEALTH_BASE + HEALTH_PER_GB per GB of model file,
@@ -129,12 +135,14 @@ class TrialEvent:
 
     Attributes:
         index: 1-based number of the trial.
-        total: Most trials that can still happen (``max_trials``); the search may stop earlier.
+        total: Most trials that can still happen (the trial budget); the search may stop
+            earlier.
         phase: "start" before the launch, "done" after it.
         summary: Profile summary (`Candidate.summary`).
         measurement: The result on "done", else None.
         note: On "done", why the trial did not count as fitting (`SearchSpace.reject_reason`);
             "" when it did, and always "" for a trial that did not load.
+        n_cpu_moe: The candidate's ``--n-cpu-moe`` (0 when not a MoE split).
     """
 
     index: int
@@ -143,6 +151,7 @@ class TrialEvent:
     summary: str
     measurement: Measurement | None = None
     note: str = ""
+    n_cpu_moe: int = 0
 
 
 @dataclass(frozen=True)
@@ -160,6 +169,8 @@ class TuneResult:
         notes: The final `SearchSpace.reject_reason` of every trial, in order, computed
             against the full history (a later faster trial can turn an earlier one into a
             spill); "" for trials that did not load.
+        why: For a winner with experts in RAM, why its ``n_cpu_moe`` won over the lower
+            counts that were tried; "" otherwise.
     """
 
     intent: str
@@ -170,6 +181,7 @@ class TuneResult:
     message: str = ""
     cancelled: bool = False
     notes: tuple[str, ...] = ()
+    why: str = ""
 
 
 class Runner(Protocol):
@@ -224,11 +236,13 @@ def trial_verdict(profile: Profile, host: Host) -> str:
 class SearchSpace:
     """Everything candidate generation needs, with the step functions as methods.
 
-    `down` walks the failure ladder (smaller context, q8_0 KV, llama.cpp placement); `all_gpu`
-    re-tries a split model whole on the GPU; `fill` probes the largest context that still fits
-    fully on the GPU using the measured bytes-per-token slope; `fits` is the headroom and
-    spill guard a loaded trial must pass to count (`reject_reason` says why it failed);
-    `threads` is the last-resort variant for a GPU+CPU best.
+    `down` walks the failure ladder (on a MoE model first more experts to RAM, then smaller
+    context, q8_0 KV, llama.cpp placement); `all_gpu` re-tries a split model whole on the
+    GPU; `fill` probes the largest context that still fits fully on the GPU using the
+    measured bytes-per-token slope; `moe_fill` probes a lower ``n_cpu_moe`` from the best
+    fitting expert split; `fits` is the headroom and spill guard a loaded trial must pass
+    to count (`reject_reason` says why it failed); `threads` is the last-resort variant for
+    a GPU+CPU best.
 
     Attributes:
         intent: Intent being tuned.
@@ -257,20 +271,48 @@ class SearchSpace:
         slots = max(1, base.profile.parallel)
         return self.candidate(base.profile.merged(ctx_size=ctx * slots), how)
 
-    def down(self, c: Candidate) -> Candidate | None:
+    def _moe(self) -> bool:
+        """True when this search can place MoE experts: a MoE model with a known tensor
+        table on a non-unified GPU host."""
+        return (self.info.expert_count > 0 and bool(self.info.expert_bytes)
+                and bool(self.host.gpus) and not self.host.unified)
+
+    def down(self, c: Candidate, m: Measurement | None = None) -> Candidate | None:
         """The next, more modest candidate after `c` failed to load.
 
-        In order: the next lower context tier (not below the intent's minimum); then q8_0 K/V
-        if the intent allows quantised KV and `c` is still f16; then letting llama.cpp place
-        the layers (``gpu_layers`` auto with ``fit`` on) when the model is still fully on
-        the GPU and there is a second memory pool.
+        On a MoE model a memory failure first moves more experts to RAM: `n_cpu_moe` rises
+        by enough layers to cover the measured overflow (`m` loaded but rejected, +1 layer
+        minimum) or the estimated one (OOM, timeout, unknown). The estimate usually still
+        claims the failed trial fits, so after a failure without a usable measurement the
+        step is at least ``max(1, n_layer // 8)`` layers; `moe_fill` bisects back down
+        between the failure and the first fit. Only at ``n_cpu_moe == n_layer`` does the
+        search fall through to the usual ladder: the next lower context tier (not below the
+        intent's minimum); then q8_0 K/V if the intent allows quantised KV and `c` is still
+        f16; then letting llama.cpp place the layers (``gpu_layers`` auto with ``fit`` on)
+        when the model is still fully on the GPU and there is a second memory pool.
 
         Args:
             c: The candidate that failed.
+            m: Its measurement when there is one (used for the MoE overflow).
 
         Returns:
             The next candidate, or None when nothing less demanding is left.
         """
+        if self._moe() and c.profile.gpu_layers == "all" \
+                and c.profile.n_cpu_moe < self.info.n_layer:
+            if m is not None and m.ok:
+                overflow = self._headroom() - (self.host.vram_free - m.vram_used)
+                step = 1
+            else:
+                est = planner.estimate_budget(self.info, c.profile, self.host).total()
+                overflow = (est - planner.expert_ram_bytes(self.info, c.profile)
+                            - planner.gpu_limit(self.host, self.pct))
+                step = max(1, self.info.n_layer // 8)
+            target = planner.expert_ram_bytes(self.info, c.profile) + max(overflow, 1)
+            split = planner.moe_split(self.info, target)
+            n = max(c.profile.n_cpu_moe + step, split[0] if split else self.info.n_layer)
+            n = min(n, self.info.n_layer)
+            return self.candidate(c.profile.merged(n_cpu_moe=n, fit="off"), HOW_MORE_RAM)
         cands, _, floor = planner.ctx_bounds(self.intent, self.info)
         lower = [t for t in cands if floor <= t < c.ctx_per_slot]
         if lower:
@@ -429,16 +471,63 @@ class SearchSpace:
         cand = self.with_ctx(best, nxt, HOW_CTX_UP)
         return cand if profile_key(cand.profile) not in seen else None
 
+    def moe_fill(self, history: History) -> Candidate | None:
+        """The lowest expert count that should still fit, probed below the best MoE split.
+
+        From the best fitting trial with experts in RAM, the VRAM it left free beyond the
+        headroom is slack that could hold more experts: lowering ``n_cpu_moe`` by k puts the
+        expert bytes of the last k RAM-placed layers back on the GPU, and fewer layers in
+        RAM is faster. `f` is the largest count below it that provably did not fit (failed
+        to load, or loaded but rejected), so when both sides are known the probe goes
+        halfway between them instead. Never a profile already tried.
+
+        Args:
+            history: Trials so far as (candidate, measurement).
+
+        Returns:
+            The next candidate, or None.
+        """
+        if not self._moe():
+            return None
+        fitting = [(c, m) for c, m in history
+                   if c.profile.gpu_layers == "all" and c.profile.n_cpu_moe > 0
+                   and self.fits(c, m, history)]
+        if not fitting:
+            return None
+        best = max(fitting, key=lambda cm: (self.score(*cm), -cm[0].profile.n_cpu_moe))[0]
+        key = profile_key(best.profile.merged(n_cpu_moe=0))
+        family = [(c, m) for c, m in history
+                  if profile_key(c.profile.merged(n_cpu_moe=0)) == key]
+        fit_family = [(c, m) for c, m in family if self.fits(c, m, history)]
+        c_b, m_b = min(fit_family, key=lambda cm: cm[0].profile.n_cpu_moe)
+        n_b = c_b.profile.n_cpu_moe
+        f = max((c.profile.n_cpu_moe for c, m in family
+                 if c.profile.n_cpu_moe < n_b and not self.fits(c, m, history)), default=None)
+        slack = self.host.vram_free - m_b.vram_used - self._headroom()
+        k = n_b
+        while k > 0 and self.info.expert_bytes[k - 1] <= slack:
+            slack -= self.info.expert_bytes[k - 1]
+            k -= 1
+        if f is not None and k <= f:
+            k = (f + n_b + 1) // 2 if n_b - f >= 2 else None
+        if k is None or k == n_b:
+            return None
+        seen = {profile_key(c.profile) for c, _ in history}
+        cand = self.candidate(best.profile.merged(n_cpu_moe=k, fit="off"), HOW_MOE_BACK)
+        return cand if profile_key(cand.profile) not in seen else None
+
     def threads(self, c: Candidate) -> Candidate | None:
-        """`c` with ``threads`` set to every logical core, for a GPU+CPU candidate.
+        """`c` with ``threads`` and ``threads_batch`` set to every logical core, for a
+        GPU+CPU candidate (prompt speed with experts on the CPU depends on both).
 
         Returns:
             The variant, or None when `c` is not GPU+CPU or already uses that many threads.
         """
         n = self.host.cpu_threads
-        if c.verdict != VERDICT_SPILL or n <= 0 or c.profile.threads == n:
+        if c.verdict != VERDICT_SPILL or n <= 0 \
+                or (c.profile.threads == n and c.profile.threads_batch == n):
             return None
-        return self.candidate(c.profile.merged(threads=n), HOW_THREADS)
+        return self.candidate(c.profile.merged(threads=n, threads_batch=n), HOW_THREADS)
 
     def score(self, c: Candidate, m: Measurement) -> tuple[float, float]:
         """Ranking key of a loaded candidate (higher is better).
@@ -458,9 +547,11 @@ def choose_best(space: SearchSpace, history: History) -> tuple[Candidate, Measur
     Trials reaching the intent's minimum context are preferred; when none does, the best of
     the others is returned (the caller reports that it is below the minimum). The ``speed``
     intent ranks tokens/s first. For the others the largest context capped at the target
-    wins; within that tier a trial more than ``SPEED_TOLERANCE`` slower than the tier's
-    fastest is dropped — extra context beyond the target wins unless it costs more than
-    ~5 % speed. Ties go to the higher speed, then the earlier trial.
+    wins; within that tier a trial more than ``PROMPT_TOLERANCE`` below the tier's best
+    prompt speed is dropped first (experts in RAM slow prompt processing far more than
+    generation), then a trial more than ``SPEED_TOLERANCE`` slower than the tier's fastest
+    — extra context beyond the target wins unless it costs more than ~5 % speed. Ties go
+    to the higher speed, then the earlier trial.
 
     Args:
         space: Search space (for the intent's bounds and scoring).
@@ -480,6 +571,10 @@ def choose_best(space: SearchSpace, history: History) -> tuple[Candidate, Measur
     capped = max(min(c.ctx_per_slot, target) for c, _ in usable)
     group = [(i, c, m) for i, (c, m) in enumerate(usable)
              if min(c.ctx_per_slot, target) == capped]
+    top_prompt = max(m.prompt_tps for _, _, m in group)
+    group = [icm for icm in group
+             if not icm[2].gen_tps
+             or icm[2].prompt_tps >= (1 - PROMPT_TOLERANCE) * top_prompt]
     top_tps = max(m.gen_tps or m.prompt_tps for _, _, m in group)
     group = [icm for icm in group
              if (icm[2].gen_tps or icm[2].prompt_tps) >= (1 - SPEED_TOLERANCE) * top_tps]
@@ -510,12 +605,12 @@ def next_candidate(space: SearchSpace, history: History) -> Candidate | None:
     nxt: Candidate | None
     if not space.fits(last, m, history) and not any(space.fits(c, mm, history)
                                                   for c, mm in history):
-        nxt = space.down(last) if (m.resource_failure or m.ok) else None
+        nxt = space.down(last, m) if (m.resource_failure or m.ok) else None
         return nxt if nxt and profile_key(nxt.profile) not in seen else None
     best = choose_best(space, history)
     if best is None:
         return None
-    for cand in (space.all_gpu(best[0]), space.fill(history)):
+    for cand in (space.all_gpu(best[0]), space.moe_fill(history), space.fill(history)):
         if cand is not None and profile_key(cand.profile) not in seen:
             return cand
     nxt = space.threads(best[0])
@@ -527,6 +622,18 @@ def next_candidate(space: SearchSpace, history: History) -> Candidate | None:
 def _backend(host: Host) -> str:
     """Backend name of the host's first device, or "cpu"."""
     return host.gpus[0].backend if host.gpus else "cpu"
+
+
+def trial_budget(info: ModelInfo, max_trials: int) -> int:
+    """How many launches a tune may make: MoE models with a known expert split get extra
+    trials for the ``n_cpu_moe`` search.
+
+    Args:
+        info: Model metadata.
+        max_trials: The requested budget (``--trials``).
+    """
+    return (max_trials + MOE_EXTRA_TRIALS
+            if info.expert_count > 0 and info.expert_bytes else max_trials)
 
 
 def _mtime(path: Path) -> float:
@@ -544,6 +651,45 @@ def _verdict_message(space: SearchSpace, best: Candidate, m: Measurement, n: int
     speed = f"{m.gen_tps:.1f} tok/s" if m.gen_tps else f"{m.prompt_tps:.1f} prompt tok/s"
     return (f"{best.ctx_per_slot} ctx per slot, {best.profile.cache_type_k} KV, {best.verdict}, "
             f"{speed}, {m.vram_used / GB:.1f} GB VRAM after {n} trial{'s' * (n != 1)}{below}")
+
+
+def _why(space: SearchSpace, best: Candidate, m: Measurement,
+         history: History) -> str:
+    """Why the winner's ``n_cpu_moe`` is what it is, against the lower counts tried.
+
+    Only for a winner with experts in RAM: the headroom it kept, then — for every other
+    trial of its family that kept fewer experts in RAM, ascending — why it lost (out of
+    memory, its error kind, too little headroom left, a suspected spill, or slower), and
+    finally the winner's prompt speed, which is what the CPU experts cost.
+
+    Args:
+        space: Search space (for the family key and reject reasons).
+        best: The winning candidate.
+        m: Its measurement.
+        history: All trials, in order.
+    """
+    n = best.profile.n_cpu_moe
+    if n <= 0:
+        return ""
+    free = (space.host.vram_free - m.vram_used) / GB
+    out = f"n_cpu_moe {n}: fastest that kept {free:.1f} GB free"
+    key = profile_key(best.profile.merged(ctx_size=0, n_cpu_moe=0))
+    losers = sorted(
+        ((c, mm) for c, mm in history
+         if c.profile.n_cpu_moe < n
+         and profile_key(c.profile.merged(ctx_size=0, n_cpu_moe=0)) == key),
+        key=lambda cm: cm[0].profile.n_cpu_moe)
+    for c, mm in losers:
+        if not mm.ok:
+            reason = ("ran out of memory" if mm.resource_failure
+                      else mm.error.split(":")[0])
+        elif r := space.reject_reason(c, mm, history):
+            reason = ("left too little headroom" if r.startswith("left")
+                      else "spilled to system RAM?")
+        else:
+            reason = "was slower"
+        out += f"; {c.profile.n_cpu_moe} {reason}"
+    return out + f"; prompt {m.prompt_tps:.0f} tok/s"
 
 
 def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Runner, *,
@@ -581,17 +727,19 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
         why = plan.warnings[0] if plan.warnings else "does not fit this machine"
         return TuneResult(intent.key, None, None, [], False, f"not tried: {why}")
     mtime = _mtime(info.path)
+    budget = trial_budget(info, max_trials)
     history: History = []
     trials: list[Trial] = []
     cand: Candidate | None = space.from_plan(plan)
     cancelled = False
-    while cand is not None and len(history) < max_trials:
+    while cand is not None and len(history) < budget:
         if cancel is not None and cancel():
             cancelled = True
             break
         index = len(history) + 1
         if progress:
-            progress(TrialEvent(index, max_trials, "start", cand.summary))
+            progress(TrialEvent(index, budget, "start", cand.summary,
+                                n_cpu_moe=cand.profile.n_cpu_moe))
         try:
             m = runner.measure(info.path, cand.profile, cancel)
         except KeyboardInterrupt:      # Ctrl-C: the runner has stopped its server; keep what we have
@@ -600,7 +748,8 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
         if m.cancelled:                # stopped in flight: not a load failure, not a trial
             cancelled = True
             if progress:
-                progress(TrialEvent(index, max_trials, "done", cand.summary, m))
+                progress(TrialEvent(index, budget, "done", cand.summary, m,
+                                    n_cpu_moe=cand.profile.n_cpu_moe))
             break
         history.append((cand, m))
         trials.append(Trial(
@@ -609,7 +758,8 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
             verdict=cand.verdict, backend=_backend(host), measurement=m))
         if progress:
             note = space.reject_reason(cand, m, history) if m.ok else ""
-            progress(TrialEvent(index, max_trials, "done", cand.summary, m, note))
+            progress(TrialEvent(index, budget, "done", cand.summary, m, note,
+                                cand.profile.n_cpu_moe))
         cand = next_candidate(space, history)
     best = choose_best(space, history)
     notes = tuple(space.reject_reason(c, m, history) if m.ok else "" for c, m in history)
@@ -621,7 +771,7 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
     msg = _verdict_message(space, best[0], best[1], len(history))
     return TuneResult(intent.key, best[0], best[1], trials, True,
                       f"cancelled; best so far: {msg}" if cancelled else msg, cancelled,
-                      notes)
+                      notes, _why(space, best[0], best[1], history))
 
 
 def save_result(cfg: Config, model: str | Path, result: TuneResult, calibration: Calibration,
