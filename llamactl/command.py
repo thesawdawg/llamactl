@@ -18,9 +18,8 @@ PLACEMENT_FLAGS = frozenset(
 def places_tensors(prof: Profile) -> bool:
     """True when the profile places experts or tensors by hand.
 
-    That is ``n_cpu_moe`` above 0, an ``override_tensor`` setting (arrives with phase 15;
-    read with getattr so this works already), or one of `PLACEMENT_FLAGS` among the
-    ``extra_args`` tokens.
+    That is ``n_cpu_moe`` above 0, an ``override_tensor`` setting, or one of
+    `PLACEMENT_FLAGS` among the ``extra_args`` tokens.
 
     Args:
         prof: Profile to inspect.
@@ -28,7 +27,7 @@ def places_tensors(prof: Profile) -> bool:
     Returns:
         Whether a manual tensor placement is set.
     """
-    if prof.n_cpu_moe > 0 or getattr(prof, "override_tensor", ""):
+    if prof.n_cpu_moe > 0 or prof.override_tensor:
         return True
     try:
         tokens = shlex.split(prof.extra_args)

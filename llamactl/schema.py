@@ -143,6 +143,10 @@ def validate(setting: Setting, raw: str) -> Any:
         ValueError: With a user-readable message when the value is invalid.
     """
     raw = raw.strip()
+    if setting.key == "override_tensor" and raw:
+        # Python's re is close to, not identical with, llama.cpp's C++ regex.
+        from .placement import parse_overrides
+        parse_overrides(raw)
     if setting.key == "gpu_layers":
         if raw in ("auto", "all"):
             return raw
@@ -203,6 +207,22 @@ SETTINGS: tuple[Setting, ...] = (
               "Lower it if you run out of memory; the rest runs on the CPU.\n\n"
               "Flag: -ngl, --gpu-layers N"),
         default="all", unset="", impact=_budget_impact),
+    Setting(
+        key="override_tensor", flag="-ot", preset_key="override-tensor", kind=Kind.STR,
+        label="Tensor overrides", group=Group.MEMORY,
+        hint=("Place tensors by regex: PATTERN=DEVICE,... (MoE models). Turns auto-fit off. "
+              "Checked with Python's re: close to, not identical with, llama.cpp's C++ regex."),
+        help=("Place tensors by name pattern: -ot PATTERN=BUFFER[,PATTERN=BUFFER...]. The\n"
+              "pattern is a regex searched in each tensor name (for example\n"
+              "blk.12.ffn_up_exps.weight); the buffer is usually CPU or a device name.\n\n"
+              "The first matching pattern wins, so these overrides are emitted before\n"
+              "--n-cpu-moe and take precedence over it. Examples:\n"
+              "  blk\\.(2[0-9]|3[0-9])\\.ffn_.*_exps\\.=CPU   experts of layers 20-39 in RAM\n"
+              "  ffn_down_exps=CPU                          only down-projection experts in RAM\n\n"
+              "Meant for MoE models. llamactl turns auto-fit off while it is set, and tune\n"
+              "refuses presets that set it (the search places experts itself).\n\n"
+              "Flag: -ot, --override-tensor <pattern>=<buffer type>,..."),
+        default="", unset=""),
     Setting(
         key="n_cpu_moe", flag="--n-cpu-moe", preset_key="n-cpu-moe", kind=Kind.INT, label="CPU MoE layers", group=Group.MEMORY,
         hint="Keep expert weights of the first N layers in RAM. MoE models only. 0 = off.",

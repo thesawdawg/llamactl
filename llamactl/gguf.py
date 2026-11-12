@@ -199,6 +199,24 @@ def _tensor_sizes(path: Path) -> list[tuple[str, int]]:
     return out
 
 
+def tensor_table(path: Path) -> list[tuple[str, int]]:
+    """(name, byte size) of every tensor of a model, over all its shards.
+
+    Reads only the tensor info tables, never tensor data.
+
+    Args:
+        path: First shard of the model.
+
+    Returns:
+        (tensor name, byte size) pairs.
+
+    Raises:
+        GGUFError: On a bad header, a truncated table or offsets that do not add up.
+        OSError: When a file cannot be read.
+    """
+    return [t for shard in _shards(path) for t in _tensor_sizes(shard)]
+
+
 def _expert_split(path: Path, n_layer: int) -> tuple[tuple[int, ...], int]:
     """Expert vs dense tensor bytes of a MoE model, summed over every shard.
 

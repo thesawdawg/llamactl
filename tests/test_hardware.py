@@ -260,3 +260,13 @@ def test_macos_readings() -> None:
     assert (name, cores) == ("Apple M2", 8)
     assert hardware.read_memory(run, "win32") == (0, 0)
     assert hardware.read_cpu(run, "win32")[0] == ""
+
+
+def test_wsl_advice_suggests_leaving_room_for_windows() -> None:
+    """WSL sees 23.5 GiB of a 32 GiB machine: suggest 28 GiB (Windows keeps 4)."""
+    host = Host(ram_total=int(23.5 * hardware.GiB), cpu_threads=8)
+    advice = hardware.wsl_advice(host, 32 * hardware.GiB)
+    assert advice is not None and advice.suggested_gib == 28 and advice.worth
+    assert "memory=28GB" in advice.snippet
+    assert hardware.wsl_advice(host, None) is None
+    assert hardware.wsl_advice(host, 0) is None

@@ -67,7 +67,8 @@ def test_v3_round_trip(cfg_dir: Path) -> None:
     raw = json.loads((cfg_dir / "config.json").read_text())
     assert raw["version"] == 3
     assert list(raw) == ["version", "bin_dir", "model_dirs", "headroom_pct", "gauge_interval",
-                         "default_profile", "default_intent", "models", "gateway", "onboarded"]
+                         "default_profile", "default_intent", "models", "gateway", "onboarded",
+                         "wsl_windows_ram"]
     assert raw["models"]["/m/a.gguf"]["active"] == "agent"
     assert raw["models"]["/m/a.gguf"]["presets"]["agent"]["measured"]["gen_tps"] == 41.5
     assert not (cfg_dir / "config.v2.bak.json").exists()   # nothing to back up

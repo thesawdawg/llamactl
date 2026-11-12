@@ -417,7 +417,7 @@ def cmd_hw(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl hw``: devices, RAM, CPU, calibration factors and the llama.cpp build."""
     found = sv.binary_found()
     data = report.hw_data(sv.host(), sv.calibration, sv.cfg.bin_dir, found,
-                          sv.build() if found else "")
+                          sv.build() if found else "", sv.cfg.wsl_windows_ram)
     sv.emit(args.json, data, render.render_hw)
     return EXIT_OK
 
@@ -466,6 +466,8 @@ def cmd_tune(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl tune MODEL``: measured search, saves the tuned preset and reloads the gateway."""
     path, alias, info = _model_and_info(args, sv)
     intent = _intent(args, sv, info)
+    if refusal := actions.tune_refusal(sv.cfg, str(path), intent.key):
+        raise CliError(f"cannot tune {alias}: {refusal}")
     sv.require_binary()
     host = sv.fresh_host()
     sv.note(f"tuning {alias} for {intent.key}: up to {args.trials} trials, each launches "

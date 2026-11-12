@@ -22,6 +22,7 @@ from ..widgets import layout
 from ..widgets.budget import BudgetPanel
 from ..widgets.buttonbar import ButtonBar
 from .confirm import ConfirmScreen
+from .help import GuideScreen
 
 SAVED, EDIT, TUNE, SERVE = "saved", "edit", "tune", "serve"
 
@@ -94,6 +95,8 @@ class PlanScreen(Screen[str | None]):
             yield Button("Edit (e)", id="edit")
             yield Button("Tune (t)", id="tune")
             yield Button("Serve (v)", id="serve", variant="primary")
+            if self.plan.expert_ram:
+                yield Button("MoE guide", id="guide")
             yield Button("Cancel (Esc)", id="cancel")
         yield Footer()
 
@@ -148,8 +151,13 @@ class PlanScreen(Screen[str | None]):
         """Close without doing anything."""
         self.dismiss(None)
 
+    def _guide(self) -> None:
+        """Open the MoE guide (shown when the plan parks experts in RAM)."""
+        self.app.push_screen(GuideScreen())
+
     @on(Button.Pressed)
     def _pressed(self, event: Button.Pressed) -> None:
         """Route a button to its action."""
         {"save": self.action_save, "edit": self.action_edit, "tune": self.action_tune,
-         "serve": self.action_serve, "cancel": self.action_cancel}[str(event.button.id)]()
+         "serve": self.action_serve, "guide": self._guide,
+         "cancel": self.action_cancel}[str(event.button.id)]()

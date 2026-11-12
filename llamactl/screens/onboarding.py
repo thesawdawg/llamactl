@@ -16,6 +16,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import (Button, Checkbox, ContentSwitcher, Footer, Header, Input, Label,
                              OptionList, Static)
@@ -65,6 +66,9 @@ class OnboardingScreen(Screen[Dismissal]):
     OnboardingScreen #ob_hw { height: auto; border: round $primary; padding: 0 1; margin-bottom: 1; }
     OnboardingScreen #ob_hw:focus-within { border: round $accent; }
     OnboardingScreen #ob_sentence { height: auto; }
+    OnboardingScreen #ob_wsl_row { display: none; }
+    OnboardingScreen #ob_wsl { width: 1fr; max-width: 12; }
+    OnboardingScreen #ob_wsl_advice { display: none; }
     OnboardingScreen #ob_scan { height: auto; margin-top: 1; text-style: bold; }
     OnboardingScreen #ob_find { margin-top: 1; width: auto; }
     OnboardingScreen #purpose { height: 1fr; }
@@ -98,6 +102,8 @@ class OnboardingScreen(Screen[Dismissal]):
         self.bind_note = ""
         self._host_for = ""
         self._choices_for: tuple = ()
+        self._wsl_checked = False
+        self._wsl = False
 
     # -- layout --------------------------------------------------------------------------
 
@@ -116,6 +122,10 @@ class OnboardingScreen(Screen[Dismissal]):
                 with VerticalScroll(id=ob.STEP_HARDWARE, classes="step"):
                     yield Static("", id="ob_hw")
                     yield Static("", id="ob_sentence")
+                    with Horizontal(id="ob_wsl_row", classes="row"):
+                        yield Label("Windows RAM (GiB)")
+                        yield Input(id="ob_wsl", compact=True)
+                    yield Static("", id="ob_wsl_advice", classes="hint")
                 with VerticalScroll(id=ob.STEP_MODELS, classes="step"):
                     yield Static("Folders llamactl scans for .gguf files (subfolders included).",
                                  classes="lead")
@@ -348,8 +358,47 @@ class OnboardingScreen(Screen[Dismissal]):
     def _enter_hardware(self) -> None:
         """Draw the hardware step."""
         self._ensure_host()
+        self._ensure_wsl()
         self._draw_hardware()
         self.query_one("#ob_next", Button).focus()
+
+    def _ensure_wsl(self) -> None:
+        """Detect WSL once, off the UI thread; the RAM question shows when it is."""
+        if self._wsl_checked:
+            return
+        self._wsl_checked = True
+        self.app.run_bg(network.wsl_mode, label="Checking WSL", group="ob-wsl",
+                        exclusive=True, done=self._wsl_read, quiet=True)
+
+    def _wsl_read(self, mode: str | None) -> None:
+        """WSL detection finished: show the Windows-RAM row when under WSL."""
+        self._wsl = mode is not None
+        self._draw_wsl()
+
+    def _draw_wsl(self) -> None:
+        """Show the Windows-RAM question under WSL only, and mark the draft as asked."""
+        try:
+            row = self.query_one("#ob_wsl_row")
+            advice = self.query_one("#ob_wsl_advice", Static)
+        except NoMatches:
+            return
+        row.display = advice.display = self._wsl
+        if self._wsl:
+            self.draft.wsl_seen = True
+            self._wsl_advice()
+
+    def _wsl_advice(self) -> None:
+        """The suggestion for the entered Windows RAM, or nothing while it is invalid."""
+        advice = hardware.wsl_advice(self.host, self.draft.wsl_windows_ram)
+        self.query_one("#ob_wsl_advice", Static).update(advice.text if advice else "")
+
+    @on(Input.Changed, "#ob_wsl")
+    def _wsl_changed(self, event: Input.Changed) -> None:
+        """A whole GiB of Windows RAM goes into the draft; anything else keeps it unset."""
+        raw = event.value.strip()
+        gib = int(raw) if raw.isdigit() else 0
+        self.draft.wsl_windows_ram = gib * hardware.GiB if gib >= 1 else None
+        self._wsl_advice()
 
     def _draw_hardware(self) -> None:
         """Devices, RAM, CPU and the one-sentence meaning."""

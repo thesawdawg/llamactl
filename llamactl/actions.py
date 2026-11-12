@@ -454,6 +454,28 @@ class TuneOutcome:
     reload_error: str = ""
 
 
+def tune_refusal(cfg: Config, model: str, intent_key: str) -> str | None:
+    """Why a tune must not run for this preset: it places tensors by hand.
+
+    The search places experts itself, so it refuses when the default profile or the
+    model's existing preset for this intent sets ``override_tensor``. Unlike the
+    free-memory preflight this cannot be forced past.
+
+    Args:
+        cfg: Config holding the default profile and presets.
+        model: Model path.
+        intent_key: Preset/intent to tune.
+
+    Returns:
+        The refusal text, or None.
+    """
+    ent = cfg.models.get(model)
+    preset = ent.presets.get(intent_key) if ent else None
+    if cfg.default_profile.override_tensor or (preset and preset.profile.override_tensor):
+        return "remove the tensor overrides to tune; the search places experts itself"
+    return None
+
+
 def search_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: tuner.Runner,
                 calibration: Calibration, *, trials: int = 6, force: bool = False,
                 progress: Callable[[tuner.TrialEvent], None] | None = None,

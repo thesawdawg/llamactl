@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from . import hf, network, planner
+from . import hardware, hf, network, planner
 from .calibration import Calibration
 from .command import build_command, command_string
 from .config import Config, ModelEntry
@@ -26,7 +26,8 @@ from .tuner import TrialEvent, TuneResult
 from .usage import Usage
 
 
-def hw_data(host: Host, calibration: Calibration, bin_dir: str, found: bool, build: str) -> dict:
+def hw_data(host: Host, calibration: Calibration, bin_dir: str, found: bool, build: str,
+            windows_ram: int | None = None) -> dict:
     """Hardware summary.
 
     Args:
@@ -35,9 +36,10 @@ def hw_data(host: Host, calibration: Calibration, bin_dir: str, found: bool, bui
         bin_dir: Configured llama.cpp binary folder.
         found: ``llama-server`` exists in `bin_dir`.
         build: llama-server version string, "" when unknown.
+        windows_ram: The Windows machine's RAM in bytes (0/None = unknown); only used under WSL.
 
     Returns:
-        Dict with devices, ram, cpu, unified, calibration and llama_cpp.
+        Dict with devices, ram, cpu, unified, calibration, llama_cpp and wsl (null off WSL).
     """
     backends = list(dict.fromkeys(g.backend for g in host.gpus))
     return {
@@ -50,7 +52,29 @@ def hw_data(host: Host, calibration: Calibration, bin_dir: str, found: bool, bui
                                           if t.backend == b and t.ratio() is not None)}
                         for b in backends},
         "llama_cpp": {"bin_dir": bin_dir, "found": found, "build": build},
+        "wsl": wsl_data(host, windows_ram),
     }
+
+
+def wsl_data(host: Host, windows_ram: int | None) -> dict | None:
+    """The WSL section of `hw_data`: the mode and the RAM advice, or None off WSL.
+
+    Args:
+        host: Host snapshot (what the WSL VM sees).
+        windows_ram: The Windows machine's RAM in bytes, or None/0 when unknown.
+
+    Returns:
+        ``{"mode", "visible_ram", "windows_ram", "advice"}`` (advice null when unknown), or
+        None when this is not WSL.
+    """
+    mode = network.wsl_mode()
+    if mode is None:
+        return None
+    advice = hardware.wsl_advice(host, windows_ram)
+    return {"mode": mode, "visible_ram": host.ram_total, "windows_ram": windows_ram or 0,
+            "advice": ({"suggested_gib": advice.suggested_gib, "gain": advice.gain,
+                        "worth": advice.worth, "text": advice.text, "snippet": advice.snippet}
+                       if advice else None)}
 
 
 def quant_of(path: Path) -> str:

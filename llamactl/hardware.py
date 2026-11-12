@@ -466,3 +466,62 @@ def _with(host: Host, gpus: list[Device], runner: Runner) -> Host:
     return replace(host, gpus=gpus, ram_total=total or host.ram_total,
                    ram_free=free or host.ram_free,
                    unified=any(d.backend == "metal" for d in gpus))
+
+
+# --------------------------------------------------------------------------- WSL
+
+GiB = 1 << 30                     # WSL's "GB" in .wslconfig is GiB
+
+
+@dataclass(frozen=True)
+class WslAdvice:
+    """What the WSL VM could use of the Windows machine's RAM.
+
+    Attributes:
+        visible: RAM WSL currently sees (``host.ram_total``), bytes.
+        windows: RAM the user says Windows has, bytes.
+        suggested_gib: Whole GiB for ``memory=`` in .wslconfig (GiB despite the "GB" name).
+        gain: Bytes the suggestion adds over `visible` (may be negative).
+        worth: True when the gain is at least 2 GiB.
+        text: One sentence for the user.
+        snippet: The .wslconfig block to copy.
+    """
+
+    visible: int
+    windows: int
+    suggested_gib: int
+    gain: int
+    worth: bool
+    text: str
+    snippet: str
+
+
+def wsl_advice(host: Host, windows_ram: int | None) -> WslAdvice | None:
+    """Whether WSL could use more of the Windows machine's RAM, and the .wslconfig for it.
+
+    The suggestion reserves the larger of 4 GiB or an eighth of the Windows RAM for
+    Windows itself and gives WSL the rest, rounded down to whole GiB. It is worth showing
+    only when WSL would gain at least 2 GiB over what it sees now.
+
+    Args:
+        host: Host snapshot (what WSL currently sees).
+        windows_ram: The Windows machine's RAM in bytes, None or 0 when unknown.
+
+    Returns:
+        The advice, or None when `windows_ram` is not known.
+    """
+    if not windows_ram:
+        return None
+    suggested = (windows_ram - max(4 * GiB, windows_ram // 8)) // GiB
+    gain = suggested * GiB - host.ram_total
+    worth = gain >= 2 * GiB
+    if worth:
+        text = (f"WSL can use {host.ram_total / GiB:.1f} GiB of Windows' "
+                f"{windows_ram / GiB:.0f} GiB RAM; memory={suggested}GB in .wslconfig "
+                f"gives it about {gain / GiB:.1f} GiB more.")
+    else:
+        text = (f"WSL already has most of Windows' {windows_ram / GiB:.0f} GiB RAM; "
+                "more RAM is the next step for larger models.")
+    snippet = (f"[wsl2]\nmemory={suggested}GB\n# processors=  WSL sees {host.cpu_threads} "
+               "threads; set it to the number Windows shows if that is more\n")
+    return WslAdvice(host.ram_total, windows_ram, suggested, gain, worth, text, snippet)

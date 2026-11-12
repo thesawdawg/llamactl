@@ -13,6 +13,7 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 from rich.text import Text
 
 from .. import hf, network
+from ..hardware import GiB
 from ..intents import INTENTS
 from ..screens.prompt import PromptScreen
 from ..widgets.buttonbar import ButtonBar
@@ -23,7 +24,7 @@ from .hf import TOKEN_HINT
 LISTEN_OPTIONS = [("This machine (127.0.0.1)", network.LOCAL),
                   ("Local network (0.0.0.0)", network.LAN), ("Custom address", network.CUSTOM)]
 TEXT_INPUTS = ("bin_dir", "gauge_interval", "headroom_pct", "gw_host", "gw_port", "gw_models_max",
-               "gw_sleep_idle")
+               "gw_sleep_idle", "wsl_ram")
 RESTART_FIELDS = (("host", "host"), ("port", "port"), ("api_key", "API key"),
                   ("models_max", "models-max"))     # gateway settings that are command line options
 
@@ -45,6 +46,7 @@ class SettingsView(BaseView):
     #set_scroll .row Select { width: 1fr; max-width: 50; }
     #set_scroll .hint { color: $text-muted; text-style: italic; padding: 0 1; width: auto; }
     #set_scroll .row Button { margin-left: 1; }
+    #wsl_row { display: none; }
     #gw_urls { height: auto; margin-left: 28; padding: 0 1; }
     #set_buttons { margin: 0 1; }
     #set_msg { height: auto; padding: 0 1; }
@@ -112,6 +114,14 @@ class SettingsView(BaseView):
             yield row("Gauge interval (s)", Input(str(cfg.gauge_interval), id="gauge_interval",
                                                   compact=True, validators=[Number(minimum=1)]),
                       "applies on the next start")
+            yield Horizontal(
+                Label("Windows RAM (GiB)", classes="lbl"),
+                Input(str(cfg.wsl_windows_ram // GiB) if cfg.wsl_windows_ram else "",
+                      id="wsl_ram", compact=True, validators=[Function(
+                          lambda v: v.strip() == "" or v.strip().isdigit(),
+                          "a whole number of GiB")]),
+                Label("GiB Windows has; 0/empty = unknown", classes="hint"),
+                classes="row", id="wsl_row")
             yield Label("Hugging Face", classes="section")
             yield row("Access token", Button("Set token", id="set_token", compact=True))
         with ButtonBar(id="set_buttons", classes="-docked"):
@@ -121,9 +131,16 @@ class SettingsView(BaseView):
         yield Static("", id="set_msg")
 
     def on_mount(self) -> None:
-        """Show whether a token is set and where clients would connect."""
+        """Show whether a token is set and where clients would connect; detect WSL for the
+        Windows-RAM row off the UI thread."""
         self._token_state()
         self._refresh_urls()
+        self.app.run_bg(network.wsl_mode, label="Checking WSL", group="wsl", exclusive=True,
+                        done=self._wsl_known, quiet=True)
+
+    def _wsl_known(self, mode: str | None) -> None:
+        """WSL detection finished: the Windows-RAM row only makes sense under WSL."""
+        self.query_one("#wsl_row").display = mode is not None
 
     def focus_primary(self) -> None:
         """Focus the first field."""
@@ -236,6 +253,10 @@ class SettingsView(BaseView):
         g.models_max = int(self.query_one("#gw_models_max", Input).value)
         g.sleep_idle = int(self.query_one("#gw_sleep_idle", Input).value)
         g.autostart = self.query_one("#gw_autostart", Switch).value
+        if self.query_one("#wsl_row").display:
+            wsl_raw = self.query_one("#wsl_ram", Input).value.strip()
+            gib = int(wsl_raw) if wsl_raw.isdigit() else 0
+            cfg.wsl_windows_ram = gib * GiB if gib else 0   # 0/empty = unknown, do not re-ask
         try:
             cfg.save()
         except OSError as e:

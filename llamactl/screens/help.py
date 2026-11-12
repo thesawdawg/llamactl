@@ -7,6 +7,7 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Label
 
+from ..guide import MOE_GUIDE
 from ..schema import Setting
 
 
@@ -44,6 +45,26 @@ class HelpPanel(ModalScreen[None]):
             yield Label(f"[b]{s.label}[/b]  {s.flag or '(no flag)'}")
             yield Label("  ".join(bits), classes="meta")
             yield Label(s.help)
+            yield Label("Esc to close", classes="meta")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class GuideScreen(ModalScreen[None]):
+    """Modal with the MoE guide: scrollable text, Esc closes."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+    CSS = """
+    GuideScreen { align: center middle; }
+    GuideScreen #guide { width: 84%; max-width: 110; height: auto; max-height: 90%;
+        border: round $accent; padding: 1 2; background: $surface; }
+    GuideScreen .meta { color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="guide"):
+            yield Label(MOE_GUIDE)
             yield Label("Esc to close", classes="meta")
 
     def action_close(self) -> None:

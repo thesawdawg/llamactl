@@ -190,3 +190,11 @@ def test_manual_expert_placement_forces_fit_off() -> None:
     cmd = argv(Profile(n_cpu_moe=5))
     assert cmd[cmd.index("-fit") + 1] == "off" and ("fit", "off") in preset_items(
         Profile(n_cpu_moe=5))
+
+
+def test_override_tensor_comes_before_n_cpu_moe() -> None:
+    """The first matching override wins in llama.cpp, so -ot must precede --n-cpu-moe."""
+    cmd = argv(Profile(override_tensor="ffn_down_exps=CPU", n_cpu_moe=3))
+    assert cmd.index("-ot") < cmd.index("--n-cpu-moe")
+    assert cmd[cmd.index("-ot") + 1] == "ffn_down_exps=CPU"
+    assert cmd[cmd.index("-fit") + 1] == "off"

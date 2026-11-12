@@ -83,6 +83,7 @@ class Profile:
 
     ctx_size: int = 0
     gpu_layers: str = "all"
+    override_tensor: str = ""
     n_cpu_moe: int = 0
     fit: str = "on"
     fit_target: int = 0
@@ -327,6 +328,7 @@ class Config:
     gauge_interval: float = 3.0
     headroom_pct: int = 10
     onboarded: bool = False
+    wsl_windows_ram: int | None = None       # bytes; None = not asked, 0 = skipped
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":
@@ -353,6 +355,8 @@ class Config:
             gauge_interval=float(raw.get("gauge_interval", 3.0)),
             headroom_pct=int(raw.get("headroom_pct", 10)),
             onboarded=_parse_bool(raw.get("onboarded"), False),
+            wsl_windows_ram=(int(raw["wsl_windows_ram"])
+                             if isinstance(raw.get("wsl_windows_ram"), int) else None),
         )
         if isinstance(version, int) and version >= 3:
             for path, data in (raw.get("models") or {}).items():
@@ -393,6 +397,7 @@ class Config:
             "models": {k: v.to_dict() for k, v in self.models.items()},
             "gateway": self.gateway.to_dict(),
             "onboarded": self.onboarded,
+            "wsl_windows_ram": self.wsl_windows_ram,
         }
 
     @staticmethod

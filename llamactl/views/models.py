@@ -23,6 +23,7 @@ from ..modelrows import (IntentRow, PresetState, best_for, default_intent_key, i
                          preset_state)
 from ..planner import Plan
 from ..screens.confirm import ConfirmScreen
+from ..screens.help import GuideScreen
 from ..screens.intent_picker import IntentPicker
 from ..screens.plan import EDIT, SAVED, SERVE, TUNE, PlanScreen
 from ..screens.preset_editor import PresetEditor
@@ -101,6 +102,7 @@ class ModelsView(BaseView):
         Binding("a", "activate", "Set active"),
         Binding("delete", "delete_preset", "Delete preset"),
         Binding("D", "edit_default", "Defaults"),
+        Binding("g", "guide", "MoE guide"),
     ]
     # The -narrow rules key off a class of the screen (an ancestor), so this CSS has to
     # stay unscoped.
@@ -539,6 +541,10 @@ class ModelsView(BaseView):
         got = self._need_intent()
         if got:
             self.edit(got[0], got[2])
+
+    def action_guide(self) -> None:
+        """Open the MoE guide."""
+        self.app.push_screen(GuideScreen())
 
     def edit(self, model: str, key: str) -> None:
         """Open the preset editor for a model's preset named `key`.

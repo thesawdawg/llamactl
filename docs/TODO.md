@@ -122,10 +122,10 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 15 - Manual placement and host hints (SPEC 12.5)
 
-- [ ] Schema `override_tensor` (`-ot`) emitted before `--n-cpu-moe`; tune refuses presets that set it
-- [ ] Config `wsl_windows_ram`; start-up modal when WSL is detected and it was never asked; onboarding Hardware field; Settings field
-- [ ] `hardware.wsl_advice` (suggested `memory=`, gain, threshold)
-- [ ] UI: PresetEditor `-ot` examples, validation and tensor match preview
-- [ ] UI: WSL advice with Copy snippet on Home and onboarding; `llamactl hw` prints it
-- [ ] UI: Help page "Running MoE models on limited VRAM"
+- [x] Schema `override_tensor` (`-ot`) emitted before `--n-cpu-moe`; tune refuses presets that set it
+- [x] Config `wsl_windows_ram`; start-up modal when WSL is detected and it was never asked; onboarding Hardware field; Settings field
+- [x] `hardware.wsl_advice` (suggested `memory=`, gain, threshold)
+- [x] UI: PresetEditor `-ot` examples, validation and tensor match preview
+- [x] UI: WSL advice with Copy snippet on Home and onboarding; `llamactl hw` prints it
+- [x] UI: Help page "Running MoE models on limited VRAM"
 - [ ] Manual: first start under WSL asks for Windows RAM once; 32 GiB gives `memory=28GB`

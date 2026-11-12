@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .. import actions, network
+from .. import actions, hardware, network
 from ..calibration import Calibration
 from ..config import Config
 from ..hardware import Host
@@ -63,7 +63,7 @@ def _usage_line(label: str, used: float, total: float, note: str = "") -> Text:
 
 
 def hardware_text(host: Host, calibration: Calibration, bin_dir: str, found: bool,
-                  build: str) -> Text:
+                  build: str, windows_ram: int | None = None) -> Text:
     """The hardware card: devices with usage bars, RAM, CPU, calibration and llama.cpp.
 
     Args:
@@ -72,6 +72,7 @@ def hardware_text(host: Host, calibration: Calibration, bin_dir: str, found: boo
         bin_dir: Configured llama.cpp folder.
         found: ``llama-server`` exists there.
         build: llama-server version string, "" when unknown.
+        windows_ram: The Windows machine's RAM in bytes (0/None = unknown); only used under WSL.
 
     Returns:
         The card body.
@@ -98,6 +99,16 @@ def hardware_text(host: Host, calibration: Calibration, bin_dir: str, found: boo
     lines.append(Text(f"{'Build':<8}" + (build or ("unknown" if found else "llama-server not found")),
                       style="" if found else "red"))
     lines.append(Text(f"{'':<8}{bin_dir}", style="dim"))
+    if network.wsl_mode() is not None:
+        if advice := hardware.wsl_advice(host, windows_ram):
+            lines.append(Text(f"{'WSL':<8}{advice.text}"))
+            for ln in advice.snippet.rstrip("\n").split("\n"):
+                lines.append(Text(f"{'':<8}{ln}", style="dim"))
+            lines.append(Text(f"{'':<8}then run `wsl --shutdown` in Windows  (w copies)",
+                              style="dim"))
+        else:
+            lines.append(Text(f"{'WSL':<8}Windows RAM unknown: set it in Settings to see "
+                              "whether WSL can use more", style="yellow"))
     return Text("\n").join(lines)
 
 
@@ -149,6 +160,7 @@ class HomeView(BaseView):
         Binding("d", "stop_gateway", "Stop gateway"),
         Binding("y", "copy_url", "Copy URL"),
         Binding("c", "copy_snippet", "Copy curl"),
+        Binding("w", "copy_wslconfig", "Copy .wslconfig", show=False),
     ]
     # The -narrow / -wide.-short rules key off classes of the screen (an ancestor), so this
     # CSS has to stay unscoped.
@@ -265,7 +277,8 @@ class HomeView(BaseView):
         """Hardware card."""
         a = self.app
         self.query_one("#hw_card", Static).update(
-            hardware_text(a.host, a.calibration, a.cfg.bin_dir, binary_found(a.cfg), a.build))
+            hardware_text(a.host, a.calibration, a.cfg.bin_dir, binary_found(a.cfg), a.build,
+                          a.cfg.wsl_windows_ram))
 
     def gateway_url(self) -> str:
         """Base URL to hand out: the first LAN URL when the gateway is exposed, else loopback."""
@@ -408,3 +421,13 @@ class HomeView(BaseView):
             return self.say("No model to build a snippet for yet.")
         self.app.copy_to_clipboard(snippet)
         self.say("Copied the curl command")
+
+    def action_copy_wslconfig(self) -> None:
+        """Copy the suggested .wslconfig block shown in the hardware card."""
+        a = self.app
+        advice = (hardware.wsl_advice(a.host, a.cfg.wsl_windows_ram)
+                  if network.wsl_mode() is not None else None)
+        if advice is None:
+            return self.say("No .wslconfig suggestion: set Windows RAM in Settings first.")
+        self.app.copy_to_clipboard(advice.snippet)
+        self.say("Copied the .wslconfig block; run `wsl --shutdown` in Windows after saving")

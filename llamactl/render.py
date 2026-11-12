@@ -177,6 +177,15 @@ def render_hw(d: dict, style: Style) -> str:
     ll = d["llama_cpp"]
     state = (ll["build"] or "found (version unknown)") if ll["found"] else "llama-server not found"
     lines += ["", heading("llama.cpp", style), kv([("Folder", ll["bin_dir"]), ("Build", state)], "  ")]
+    if (w := d.get("wsl")) is not None:
+        lines += ["", heading("WSL", style)]
+        if advice := w["advice"]:
+            lines.append(f"  {advice['text']}")
+            lines += [f"  {ln}" for ln in advice["snippet"].rstrip("\n").split("\n")]
+            lines.append("  then run `wsl --shutdown` in Windows")
+        else:
+            lines.append("  Windows RAM unknown: set it in Settings to see whether WSL can "
+                         "use more")
     return "\n".join(lines)
 
 

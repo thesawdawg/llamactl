@@ -173,6 +173,7 @@ class TuneScreen(ModalScreen[str | None]):
         self._t0 = 0.0
         self._last = ""
         self._trials: dict[int, tuple[str, Measurement | None, int]] = {}
+        self._hard_refusal = ""              # a refusal "Tune anyway" cannot skip
 
     def compose(self) -> ComposeResult:
         """Title, pre-flight text, trial table, progress, summary and buttons."""
@@ -213,7 +214,7 @@ class TuneScreen(ModalScreen[str | None]):
         show = {
             "cancel": self.state == RUNNING and not self._cancel.is_set(),
             "unload": self.state == REFUSED and bool(self.loaded),
-            "anyway": self.state == REFUSED,
+            "anyway": self.state == REFUSED and not self._hard_refusal,
             "use": self.state == DONE and self._can_use(),
             "keep": self.state == DONE and self.outcome is not None and self.outcome.result.ok,
             "close": self.state != RUNNING or self._cancel.is_set(),
@@ -243,6 +244,10 @@ class TuneScreen(ModalScreen[str | None]):
         self.state = CHECKING
         self._buttons()
         self._say_pre("Checking free memory...")
+        if refusal := actions.tune_refusal(a.cfg, self.model, self.intent.key):
+            self.state, self._hard_refusal = REFUSED, refusal
+            self._say_pre(Text(f"Pre-flight refused: {refusal}", style="red"))
+            return self._buttons()
 
         def work() -> tuple[Host, Plan, str | None, list[str]]:
             host = (hardware.refresh(a.host, a.cfg.bin_dir) if a.host.ram_total

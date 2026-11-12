@@ -5,6 +5,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Footer, Header, Label, Static
 
@@ -12,17 +13,20 @@ from .. import actions, schema
 from ..calibration import Calibration
 from ..command import build_command, command_string, fit_conflict
 from ..config import Config, Profile
-from ..gguf import ModelInfo
+from ..fmt import human
+from ..gguf import ModelInfo, tensor_table
 from ..hardware import Host
 from ..intents import Intent
-from ..planner import (estimate_budget, expert_ram_bytes, placeholder_info, verdict,
-                      verdict_label)
+from ..placement import cpu_bytes, parse_overrides
+from ..planner import (estimate_budget, expert_ram_bytes, gpu_limit, placeholder_info,
+                      verdict, verdict_label)
+from ..planner import Budget
 from ..schema import Group
 from ..widgets import layout
 from ..widgets.budget import BudgetPanel
 from ..widgets.buttonbar import ButtonBar
 from ..widgets.field import SettingField
-from .help import HelpPanel
+from .help import GuideScreen, HelpPanel
 
 GROUP_TITLES = {Group.MEMORY: "Memory & offload", Group.SAMPLING: "Sampling",
                 Group.SERVER: "Server & API", Group.GENERAL: "Extra"}
@@ -84,11 +88,17 @@ class PresetEditor(Screen[Profile | None]):
         self.calibration = calibration
         self._draft = prof
         self.fields: dict[str, SettingField] = {}
+        self.tensors: list[tuple[str, int]] | None = None   # tensor table, read in a worker
+        self._tensor_err = ""                               # why that read failed
+
+    def _moe(self) -> bool:
+        """True when the edited model is a MoE model."""
+        return self.info is not None and self.info.expert_count > 0
 
     def _disabled_reason(self, s: schema.Setting) -> str:
         """Why a field is disabled for this model/host, or ''."""
         if self.info is not None:
-            if s.key == "n_cpu_moe" and self.info.expert_count == 0:
+            if s.key in ("n_cpu_moe", "override_tensor") and self.info.expert_count == 0:
                 return "not a MoE model"
         if s.key == "tensor_split" and len(self.host.gpus) < 2:
             return "only one GPU"
@@ -107,6 +117,15 @@ class PresetEditor(Screen[Profile | None]):
                                              self.host, self._disabled_reason(s))
                             self.fields[s.key] = f
                             yield f
+                            if s.key == "override_tensor" and self._moe():
+                                h = (self.info or placeholder_info(0)).n_layer // 2
+                                with Horizontal(id="ot_examples"):
+                                    yield Button(f"experts of layers {h}+ to CPU",
+                                                 id="ot_layers", compact=True)
+                                    yield Button("only down-projection experts to CPU",
+                                                 id="ot_down", compact=True)
+                                    yield Button("MoE guide", id="moe_guide", compact=True)
+                                yield Static("", id="ot_preview", classes="hint")
             with VerticalScroll(id="side"):
                 yield BudgetPanel()
                 yield Static("", id="preview")
@@ -118,11 +137,27 @@ class PresetEditor(Screen[Profile | None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Compute the first preview (and apply the plan when asked)."""
+        """Compute the first preview, read the tensor table of a MoE model for the -ot preview
+        (and apply the plan when asked)."""
         self.sub_title = self.title_text
         self._recompute()
+        if self._moe():
+            path = self.info.path
+            self.app.run_bg(lambda: tensor_table(path), label="Reading the tensor list",
+                            group="tensors", exclusive=True, done=self._tensors_read,
+                            failed=self._tensors_failed, quiet=True)
         if self._apply_plan_on_open:
             self.action_apply_plan()
+
+    def _tensors_read(self, tensors: list[tuple[str, int]]) -> None:
+        """The tensor table arrived: the -ot preview and simulated CPU bytes can fill in."""
+        self.tensors = tensors
+        self._recompute()
+
+    def _tensors_failed(self, e: Exception) -> None:
+        """The table could not be read: the preview explains why it stays empty."""
+        self._tensor_err = str(e)
+        self._recompute()
 
     def _rebuild_draft(self) -> None:
         """Rebuild the draft profile; invalid fields keep the previous value."""
@@ -152,16 +187,49 @@ class PresetEditor(Screen[Profile | None]):
         info = self.info or placeholder_info(0)
         budget = estimate_budget(info, self._draft, self.host, self.calibration)
         v = verdict(budget, self.host, self.cfg.headroom_pct)
+        expert_ram = expert_ram_bytes(info, self._draft)
+        if self.tensors is not None:
+            try:
+                overrides = parse_overrides(self._draft.override_tensor)
+            except ValueError:
+                overrides = []
+            expert_ram = cpu_bytes(self.tensors, overrides, self._draft.n_cpu_moe)[1]
         self.query_one(BudgetPanel).update_budget(
             budget, self.host, self.cfg.headroom_pct,
-            expert_ram=expert_ram_bytes(info, self._draft),
+            expert_ram=expert_ram,
             verdict_text=verdict_label(v, self._draft, info))
+        self._ot_preview(budget)
         model = str(self.info.path) if self.info else "<model>"
         argv = build_command(self.cfg, model, self._draft, self._draft.port or 0)
         if not self._draft.port:
             argv[argv.index("--port") + 1] = "<auto>"
         self.query_one("#preview", Static).update(command_string(argv))
         self.query_one("#save", Button).disabled = not self.all_valid
+
+    def _ot_preview(self, budget: Budget) -> None:
+        """One line under the -ot field: which tensors the patterns move to the CPU."""
+        try:
+            w = self.query_one("#ot_preview", Static)
+        except NoMatches:
+            return
+        text = ""
+        if self._draft.override_tensor.strip():
+            if self._tensor_err:
+                text = f"cannot read the tensor list: {self._tensor_err}"
+            elif self.tensors is None:
+                text = "loading tensor list..."
+            else:
+                try:
+                    overrides = parse_overrides(self._draft.override_tensor)
+                except ValueError:
+                    overrides = []
+                if overrides:
+                    matched, cpu = cpu_bytes(self.tensors, overrides,
+                                             self._draft.n_cpu_moe)
+                    text = (f"matches {matched} tensors, {human(cpu)} moves to CPU; "
+                            f"GPU part now {human(budget.total() - cpu)} of "
+                            f"{human(gpu_limit(self.host, self.cfg.headroom_pct))} usable")
+        w.update(text)
 
     @on(SettingField.Changed)
     def _changed(self) -> None:
@@ -231,6 +299,26 @@ class PresetEditor(Screen[Profile | None]):
     def _plan_btn(self) -> None:
         """The Apply plan button."""
         self.action_apply_plan()
+
+    @on(Button.Pressed, "#ot_layers")
+    def _ot_layers_btn(self) -> None:
+        """Fill -ot with the experts of the second half of the layers."""
+        n = (self.info or placeholder_info(0)).n_layer
+        self.fields["override_tensor"].set_value(
+            "blk\\.(" + "|".join(str(i) for i in range(n // 2, n))
+            + ")\\.ffn_.*_exps\\.=CPU")
+        self._recompute()
+
+    @on(Button.Pressed, "#ot_down")
+    def _ot_down_btn(self) -> None:
+        """Fill -ot with only the down-projection experts."""
+        self.fields["override_tensor"].set_value("ffn_down_exps=CPU")
+        self._recompute()
+
+    @on(Button.Pressed, "#moe_guide")
+    def _guide_btn(self) -> None:
+        """Open the MoE guide."""
+        self.app.push_screen(GuideScreen())
 
     @on(Button.Pressed, "#cancel")
     def _cancel_btn(self) -> None:

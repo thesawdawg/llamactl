@@ -158,6 +158,8 @@ class LlamaCtl(App):
         self.snapshot: ServingSnapshot | None = None
         self.gw_busy = ""                      # "starting" / "stopping" while the app does that
         self.views: dict[str, BaseView] = {}
+        self._wsl_asked = False                # the Windows-RAM question was pushed once
+        self._wsl_checking = False             # a WSL-detection worker is in flight
         self.cancel_flags: set[threading.Event] = set()    # running tunes, set on quit
         self._gw_lock = threading.Lock()       # one gateway writer/reloader at a time
         self._scan_gen = 0
@@ -206,6 +208,8 @@ class LlamaCtl(App):
                 self.fail(f"autostart: llama-server not found in {self.cfg.bin_dir}")
         if not self.cfg.onboarded:
             self.show_onboarding()
+        else:
+            self.maybe_ask_wsl_ram()
 
     def _alive(self) -> bool:
         """True while the app and its base screen can still be touched."""
@@ -387,6 +391,45 @@ class LlamaCtl(App):
         self.base.query_one("#gauges", ResourceGauges).update_host(host)
         for v in self.views.values():
             v.on_host(host)
+        self.maybe_ask_wsl_ram()
+
+    def maybe_ask_wsl_ram(self) -> None:
+        """Ask once how much RAM Windows has, when running under WSL.
+
+        Guarded by `wsl_windows_ram is None` (0 counts as answered), a known host RAM and
+        `_wsl_asked` so the modal opens at most once. Called from on_mount and
+        `_onboarding_done` per SPEC 12.5, and again from `_host_update` because the host
+        snapshot is still empty while the first poll is running.
+        """
+        if (self._wsl_asked or self._wsl_checking or not self.cfg.onboarded
+                or self.cfg.wsl_windows_ram is not None or not self.host.ram_total):
+            return
+        self._wsl_checking = True
+        self.run_bg(network.wsl_mode, label="Checking WSL", group="wsl", exclusive=True,
+                    done=self._wsl_checked, always=self._wsl_check_done, quiet=True)
+
+    def _wsl_check_done(self) -> None:
+        """The WSL check ended (however it ended): another one may run."""
+        self._wsl_checking = False
+
+    def _wsl_checked(self, mode: str | None) -> None:
+        """WSL detection finished: push the question when it applies."""
+        if (mode is None or self._wsl_asked or self.cfg.wsl_windows_ram is not None
+                or not self.host.ram_total):
+            return
+        from .screens.wsl_ram import WslRamScreen
+        self._wsl_asked = True
+        self.push_screen(WslRamScreen(self.host), self._wsl_answered)
+
+    def _wsl_answered(self, windows_ram: int | None) -> None:
+        """Store the answer (bytes; 0 = skipped), save and refresh the Home hardware card."""
+        self.cfg.wsl_windows_ram = windows_ram or 0
+        try:
+            self.cfg.save()
+        except OSError as e:
+            self.fail(f"cannot save the config: {e}")
+        if "home" in self.views:
+            self.views["home"].render_hardware()
 
     # ------------------------------------------------------------------ models
 
@@ -934,6 +977,7 @@ class LlamaCtl(App):
 
     def _onboarding_done(self, how: Dismissal | None) -> None:
         """The setup closed: land where it said (Discover, the tune screen) or stay put."""
+        self.maybe_ask_wsl_ram()
         if how is None:
             return
         if how.action == onboarding.ACT_DISCOVER:

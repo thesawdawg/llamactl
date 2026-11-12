@@ -356,6 +356,9 @@ class Draft:
         start_gateway: Start the gateway when the flow ends.
         reachable: Let other machines connect: listen on every interface and make sure an API
             key is set.
+        wsl_seen: The hardware step detected WSL and showed the Windows-RAM question.
+        wsl_windows_ram: The Windows machine's RAM in bytes, None while the field is empty
+            or invalid.
     """
 
     bin_dir: str = ""
@@ -365,6 +368,8 @@ class Draft:
     tune: bool = False
     start_gateway: bool = True
     reachable: bool = False
+    wsl_seen: bool = False
+    wsl_windows_ram: int | None = None
 
 
 class Flow:
@@ -544,6 +549,9 @@ def finish(cfg: Config, draft: Draft, infos: dict[str, ModelInfo], host: Host,
     cfg.model_dirs = list(draft.model_dirs)
     cfg.default_intent = draft.default_intent
     cfg.onboarded = True
+    if draft.wsl_seen:
+        # They saw the Windows-RAM question: an empty or invalid field counts as skipped.
+        cfg.wsl_windows_ram = draft.wsl_windows_ram or 0
     new_key = _apply_reachable(cfg, draft.reachable)
     wildcard = network.is_wildcard(cfg.gateway.host)
     urls = network.client_urls_for(base_url.rstrip("/"), cfg.gateway.host if wildcard else "")
