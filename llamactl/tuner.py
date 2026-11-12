@@ -4,10 +4,11 @@ The pure part (`SearchSpace`, `next_candidate`, `choose_best`, `tune`) decides w
 try next from what the previous trials measured: after the plan, an all-GPU trial when
 llama.cpp had to split the model, then a context fill that probes toward the largest context
 fitting fully on the GPU (predicted from the measured bytes per token, guarded by a headroom
-check so a driver silently falling back to system memory does not count as fitting), and a
-threads variant for a GPU+CPU best as the last resort. The only parts that touch processes or
-HTTP are behind the `Runner` protocol; `ServerRunner` is the real one, with every subprocess,
-HTTP, clock and device-memory call injectable so tests never start llama.cpp.
+check plus a spill check on the generation speed, so a driver silently falling back to
+system memory does not count as fitting), and a threads variant for a GPU+CPU best as the
+last resort. The only parts that touch processes or HTTP are behind the `Runner` protocol;
+`ServerRunner` is the real one, with every subprocess, HTTP, clock and device-memory call
+injectable so tests never start llama.cpp.
 """
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ HOW_ALL_GPU, HOW_CTX_UP, HOW_THREADS = "all GPU", "ctx up", "threads"
 
 CTX_STEP = 4096             # context probes are multiples of this
 SPEED_TOLERANCE = 0.05      # extra context beyond the target may cost at most ~5% speed
+SPILL_RATIO = 1 / 3         # below this share of the family best a trial probably spilled
 
 # ServerRunner timing (seconds).
 HEALTH_BASE = 60.0        # health timeout = HEALTH_BASE + HEALTH_PER_GB per GB of model file,
@@ -131,6 +133,8 @@ class TrialEvent:
         phase: "start" before the launch, "done" after it.
         summary: Profile summary (`Candidate.summary`).
         measurement: The result on "done", else None.
+        note: On "done", why the trial did not count as fitting (`SearchSpace.reject_reason`);
+            "" when it did, and always "" for a trial that did not load.
     """
 
     index: int
@@ -138,6 +142,7 @@ class TrialEvent:
     phase: str
     summary: str
     measurement: Measurement | None = None
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -152,6 +157,9 @@ class TuneResult:
         ok: A winner exists.
         message: Human readable outcome, or why there is no winner.
         cancelled: The search was cancelled before it finished.
+        notes: The final `SearchSpace.reject_reason` of every trial, in order, computed
+            against the full history (a later faster trial can turn an earlier one into a
+            spill); "" for trials that did not load.
     """
 
     intent: str
@@ -161,6 +169,7 @@ class TuneResult:
     ok: bool = False
     message: str = ""
     cancelled: bool = False
+    notes: tuple[str, ...] = ()
 
 
 class Runner(Protocol):
@@ -217,8 +226,9 @@ class SearchSpace:
 
     `down` walks the failure ladder (smaller context, q8_0 KV, llama.cpp placement); `all_gpu`
     re-tries a split model whole on the GPU; `fill` probes the largest context that still fits
-    fully on the GPU using the measured bytes-per-token slope; `fits` is the headroom guard a
-    loaded trial must pass to count; `threads` is the last-resort variant for a GPU+CPU best.
+    fully on the GPU using the measured bytes-per-token slope; `fits` is the headroom and
+    spill guard a loaded trial must pass to count (`reject_reason` says why it failed);
+    `threads` is the last-resort variant for a GPU+CPU best.
 
     Attributes:
         intent: Intent being tuned.
@@ -302,26 +312,63 @@ class SearchSpace:
         return self.candidate(p.merged(gpu_layers="all", fit="off", fit_target=0),
                               HOW_ALL_GPU)
 
-    def fits(self, c: Candidate, m: Measurement) -> bool:
-        """True when a trial's measurement counts as "fits on this machine".
+    def _guarded(self, c: Candidate) -> bool:
+        """True when the headroom and spill guards apply to `c`: every layer meant for the
+        GPU (``gpu_layers == "all"``, experts possibly in RAM) on a non-unified GPU host."""
+        return (c.profile.gpu_layers == "all" and bool(self.host.gpus)
+                and not self.host.unified)
 
-        Every loaded trial fits except a GPU-verdict one on a non-unified GPU host that did
-        not leave the headroom free: on Windows/WSL the NVIDIA driver can satisfy an
-        oversized CUDA allocation with system memory instead of failing, so a load that
-        ate into the headroom does not prove the model really is on the GPU.
+    def reject_reason(self, c: Candidate, m: Measurement, history: History = ()) -> str:
+        """Why a trial does not count as fitting, or "".
+
+        A loaded all-GPU trial on a non-unified GPU host is rejected when it did not leave
+        the headroom free — on Windows/WSL the NVIDIA driver can satisfy an oversized CUDA
+        allocation with system memory instead of failing, so a load that ate into the
+        headroom does not prove the model really is on the GPU — or when it generated far
+        slower than the best loaded trial of the same profile family (context aside) that
+        kept at least as many expert layers in RAM, which suggests the same silent spill
+        (more experts on the GPU should never be that much slower).
 
         Args:
             c: The tried candidate.
             m: Its measurement.
+            history: Trials so far as (candidate, measurement); the family the spill check
+                compares against comes from it.
 
         Returns:
-            Whether it loaded without eating into the headroom.
+            "" when the trial counts as fitting, else a short reason (60 chars at most,
+            shown in a table cell); "not loaded" for a failed trial.
         """
         if not m.ok:
-            return False
-        if c.verdict != VERDICT_GPU or not self.host.gpus or self.host.unified:
-            return True
-        return self.host.vram_free - m.vram_used >= self._headroom()
+            return "not loaded"
+        if not self._guarded(c):
+            return ""
+        free = self.host.vram_free - m.vram_used
+        need = self._headroom()
+        if free < need:
+            return f"left less than the headroom free: {free / GB:.1f} of {need / GB:.1f} GB"
+        if m.gen_tps > 0:
+            key = profile_key(c.profile.merged(ctx_size=0, n_cpu_moe=0))
+            family = [mm for cc, mm in history if mm.ok
+                      and cc.profile.n_cpu_moe >= c.profile.n_cpu_moe
+                      and profile_key(cc.profile.merged(ctx_size=0, n_cpu_moe=0)) == key]
+            best = max((mm.gen_tps for mm in family), default=0.0)
+            if best > 0 and m.gen_tps < SPILL_RATIO * best:
+                return f"spilled to system RAM? {m.gen_tps:.1f} vs {best:.1f} tok/s"
+        return ""
+
+    def fits(self, c: Candidate, m: Measurement, history: History = ()) -> bool:
+        """True when a trial's measurement counts as "fits on this machine".
+
+        Args:
+            c: The tried candidate.
+            m: Its measurement.
+            history: Trials so far; the spill check compares against them when given.
+
+        Returns:
+            Whether it loaded without a reject reason (see `reject_reason`).
+        """
+        return m.ok and not self.reject_reason(c, m, history)
 
     def fill(self, history: History) -> Candidate | None:
         """The next context probe toward the largest that still fits fully on the GPU.
@@ -342,7 +389,7 @@ class SearchSpace:
             The next candidate above `lo`, or None.
         """
         fitting = [(c, m) for c, m in history
-                   if c.verdict == VERDICT_GPU and self.fits(c, m)]
+                   if c.verdict == VERDICT_GPU and self.fits(c, m, history)]
         if not fitting:
             return None
         best = max(fitting, key=lambda cm: self.score(*cm))[0]
@@ -351,10 +398,11 @@ class SearchSpace:
         key = profile_key(best.profile.merged(ctx_size=0))
         same = [(c, m) for c, m in history
                 if profile_key(c.profile.merged(ctx_size=0)) == key]
-        family = [(c, m) for c, m in same if self.fits(c, m)]
+        family = [(c, m) for c, m in same if self.fits(c, m, history)]
         lo = max(c.ctx_per_slot for c, _ in family)
         his = [c.ctx_per_slot for c, m in same
-               if (m.ok and not self.fits(c, m)) or (not m.ok and m.resource_failure)]
+               if (m.ok and not self.fits(c, m, history))
+               or (not m.ok and m.resource_failure)]
         hi = min(his, default=None)
         ceiling = planner.ctx_ceiling(self.intent, self.info)
         if lo >= ceiling:
@@ -422,7 +470,7 @@ def choose_best(space: SearchSpace, history: History) -> tuple[Candidate, Measur
         The winner, or None when nothing loaded and fit.
     """
     floor = planner.ctx_bounds(space.intent, space.info)[2]
-    fit = [(c, m) for c, m in history if space.fits(c, m)]
+    fit = [(c, m) for c, m in history if space.fits(c, m, history)]
     usable = [(c, m) for c, m in fit if c.ctx_per_slot >= floor] or fit
     if not usable:
         return None
@@ -460,7 +508,8 @@ def next_candidate(space: SearchSpace, history: History) -> Candidate | None:
     if last.how == HOW_THREADS:
         return None
     nxt: Candidate | None
-    if not space.fits(last, m) and not any(space.fits(c, mm) for c, mm in history):
+    if not space.fits(last, m, history) and not any(space.fits(c, mm, history)
+                                                  for c, mm in history):
         nxt = space.down(last) if (m.resource_failure or m.ok) else None
         return nxt if nxt and profile_key(nxt.profile) not in seen else None
     best = choose_best(space, history)
@@ -559,17 +608,20 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
             estimated_total=planner.estimate_budget(info, cand.profile, host).raw_total(),
             verdict=cand.verdict, backend=_backend(host), measurement=m))
         if progress:
-            progress(TrialEvent(index, max_trials, "done", cand.summary, m))
+            note = space.reject_reason(cand, m, history) if m.ok else ""
+            progress(TrialEvent(index, max_trials, "done", cand.summary, m, note))
         cand = next_candidate(space, history)
     best = choose_best(space, history)
+    notes = tuple(space.reject_reason(c, m, history) if m.ok else "" for c, m in history)
     if best is None:
         last = history[-1][1].error if history else ""
         why = ("cancelled before any trial ran" if cancelled and not history else
                f"nothing loaded after {len(history)} trial{'s' * (len(history) != 1)}: {last}")
-        return TuneResult(intent.key, None, None, trials, False, why, cancelled)
+        return TuneResult(intent.key, None, None, trials, False, why, cancelled, notes)
     msg = _verdict_message(space, best[0], best[1], len(history))
     return TuneResult(intent.key, best[0], best[1], trials, True,
-                      f"cancelled; best so far: {msg}" if cancelled else msg, cancelled)
+                      f"cancelled; best so far: {msg}" if cancelled else msg, cancelled,
+                      notes)
 
 
 def save_result(cfg: Config, model: str | Path, result: TuneResult, calibration: Calibration,

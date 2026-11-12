@@ -95,16 +95,16 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 12 - MoE safety (SPEC 12.2)
 
-- [ ] `command.py`: force `-fit off` in argv and INI when `n_cpu_moe > 0` or `override_tensor` is set
-- [ ] Tuner headroom guard for every `gpu_layers == "all"` trial, not only verdict `GPU`
-- [ ] Spill check: `gen_tps` below a third of the family's best fails `fits` (`spilled to system RAM?`)
-- [ ] UI: PresetEditor Auto-fit conflict warning; preview shows the forced `-fit off`
-- [ ] UI: TuneScreen outcome names guarded trials (spilled / headroom) with numbers
+- [x] `command.py`: force `-fit off` in argv and INI when `n_cpu_moe > 0` or `override_tensor` is set
+- [x] Tuner headroom guard for every `gpu_layers == "all"` trial, not only verdict `GPU`
+- [x] Spill check: `gen_tps` below a third of the family's best fails `fits` (`spilled to system RAM?`)
+- [x] UI: PresetEditor Auto-fit conflict warning; preview shows the forced `-fit off`
+- [x] UI: TuneScreen outcome names guarded trials (spilled / headroom) with numbers
 - [ ] Manual: CPU MoE layers 5 with Auto-fit on shows the warning and `-fit off` in the preview
 
 ## Phase 13 - MoE placement in the planner (SPEC 12.3)
 
-- [ ] `gguf.py`: tensor table across shards, ggml type sizes, alignment; `expert_bytes`, `dense_bytes`, `expert_used`; cache gate
+- [ ] `gguf.py`: tensor table across shards, sizes from offsets and alignment; `expert_bytes`, `dense_bytes`, `expert_used`; cache gate
 - [ ] Planner: GPU part from `dense_bytes`; `_moe_layers` from `expert_bytes`; RAM check and swap warning; `Plan.expert_ram`, `Plan.layer_gain`; fallback to the average
 - [ ] UI: BudgetPanel splits GPU part and experts in RAM (never red for a valid MoE plan)
 - [ ] UI: Models meta MoE line and `GPU+experts` verdict cell

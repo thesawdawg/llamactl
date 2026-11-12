@@ -54,13 +54,16 @@ def split_summary(summary: str) -> tuple[str, str]:
     return f"{m['how']}, {m['kv']} KV, {m['verdict']}{extra}", m["ctx"]
 
 
-def trial_cells(index: int, summary: str, m: Measurement | None) -> tuple:
+def trial_cells(index: int, summary: str, m: Measurement | None,
+                note: str = "") -> tuple:
     """Cells of one trial row; a running trial (no measurement) shows dots.
 
     Args:
         index: 1-based trial number.
         summary: The trial's `Candidate.summary`.
         m: Its measurement, None while it runs.
+        note: Why a loaded trial did not count as fitting (`TrialEvent.note`); it replaces
+            the green "ok" in the outcome column.
 
     Returns:
         The eight cells.
@@ -73,9 +76,9 @@ def trial_cells(index: int, summary: str, m: Measurement | None) -> tuple:
     if not m.ok:
         return (str(index), change, ctx, f"{m.load_s:.0f}" if m.load_s else "-", "-", "-", "-",
                 Text(m.error.split(" (log:")[0][:OUTCOME_WIDTH], style="red"))
+    out = Text(note[:OUTCOME_WIDTH], style="yellow") if note else Text("ok", style="green")
     return (str(index), change, ctx, f"{m.load_s:.0f}", f"{m.vram_used / GB:.1f} GB",
-            f"{m.prompt_tps:.0f}", f"{m.gen_tps:.1f}" if m.gen_tps else "-",
-            Text("ok", style="green"))
+            f"{m.prompt_tps:.0f}", f"{m.gen_tps:.1f}" if m.gen_tps else "-", out)
 
 
 def summary_text(plan: Plan, outcome: TuneOutcome, active: bool) -> Text:
@@ -162,6 +165,7 @@ class TuneScreen(ModalScreen[str | None]):
         self._cancel = threading.Event()
         self._t0 = 0.0
         self._last = ""
+        self._trials: dict[int, tuple[str, Measurement | None]] = {}
 
     def compose(self) -> ComposeResult:
         """Title, pre-flight text, trial table, progress, summary and buttons."""
@@ -370,7 +374,7 @@ class TuneScreen(ModalScreen[str | None]):
     def _event(self, e: tuner.TrialEvent) -> None:
         """A trial started or finished: update its row and the progress line."""
         t = self.query_one("#t_trials", DataTable)
-        cells = trial_cells(e.index, e.summary, e.measurement)
+        cells = trial_cells(e.index, e.summary, e.measurement, e.note)
         key = str(e.index)
         if key in t.rows:
             for col, v in zip([c for _, c in COLUMNS], cells):
@@ -378,6 +382,7 @@ class TuneScreen(ModalScreen[str | None]):
         else:
             t.add_row(*cells, key=key)
             t.move_cursor(row=t.row_count - 1)
+        self._trials[e.index] = (e.summary, e.measurement)
         self._last = f"trial {e.index} of up to {e.total}: {e.summary}"
         self._tick()
 
@@ -399,11 +404,27 @@ class TuneScreen(ModalScreen[str | None]):
         if outcome is None:
             summary.update(Text(error or "the tune failed", style="red"))
         else:
+            self._final_notes(outcome)
             ent = self.app.cfg.models.get(self.model)
             active = bool(ent and ent.active == self.intent.key)
             assert self.plan is not None
             summary.update(summary_text(self.plan, outcome, active))
         self._buttons()
+
+    def _final_notes(self, outcome: TuneOutcome) -> None:
+        """Re-apply the tune's final trial notes to the outcome column.
+
+        The note a done event carried was computed against the history so far; the result's
+        `notes` are computed against the full history, so a later faster trial can mark an
+        earlier "ok" as a spill.
+        """
+        t = self.query_one("#t_trials", DataTable)
+        for i, note in enumerate(outcome.result.notes):
+            key = str(i + 1)
+            if key in t.rows and i + 1 in self._trials:
+                summary, m = self._trials[i + 1]
+                t.update_cell(key, "out", trial_cells(i + 1, summary, m, note)[-1],
+                              update_width=True)
 
     # -- actions -----------------------------------------------------------------------
 

@@ -8,12 +8,68 @@ from pathlib import Path
 from .config import Config, Profile
 from .schema import SETTINGS, Kind
 
+# Flags that place experts or tensors by hand; with any of them llama.cpp's --fit cannot
+# adjust around the user's placement (common/fit.cpp aborts with "already set by user",
+# logs a warning and loads unfitted), so llamactl turns fit off instead.
+PLACEMENT_FLAGS = frozenset(
+    {"-ot", "--override-tensor", "-cmoe", "--cpu-moe", "-ncmoe", "--n-cpu-moe"})
+
+
+def places_tensors(prof: Profile) -> bool:
+    """True when the profile places experts or tensors by hand.
+
+    That is ``n_cpu_moe`` above 0, an ``override_tensor`` setting (arrives with phase 15;
+    read with getattr so this works already), or one of `PLACEMENT_FLAGS` among the
+    ``extra_args`` tokens.
+
+    Args:
+        prof: Profile to inspect.
+
+    Returns:
+        Whether a manual tensor placement is set.
+    """
+    if prof.n_cpu_moe > 0 or getattr(prof, "override_tensor", ""):
+        return True
+    try:
+        tokens = shlex.split(prof.extra_args)
+    except ValueError:
+        return False
+    return any(t.partition("=")[0] in PLACEMENT_FLAGS for t in tokens)
+
+
+def fit_conflict(prof: Profile) -> bool:
+    """True when the profile places tensors by hand while auto-fit is not off.
+
+    Args:
+        prof: Profile to inspect.
+
+    Returns:
+        Whether llama.cpp's --fit would conflict with the manual placement.
+    """
+    return places_tensors(prof) and prof.fit != "off"
+
+
+def effective_profile(prof: Profile) -> Profile:
+    """The profile as it is launched: fit forced off under a manual tensor placement.
+
+    Args:
+        prof: The stored or edited profile.
+
+    Returns:
+        ``prof.merged(fit="off")`` when `fit_conflict` applies, else `prof` unchanged.
+    """
+    return prof.merged(fit="off") if fit_conflict(prof) else prof
+
 
 def build_command(cfg: Config, model: str, prof: Profile, port: int) -> list[str]:
     """Build the llama-server argv for a model + profile.
 
     Iterates the settings registry in order: values equal to their unset value
-    are skipped, port uses the resolved port, extra_args is appended last.
+    are skipped, port uses the resolved port, extra_args is appended last. When the
+    profile places tensors by hand while auto-fit is on, fit is forced off (see
+    `effective_profile`): llama.cpp's --fit aborts with "already set by user" when
+    tensor overrides or layers are set, logs a warning and loads unfitted
+    (common/fit.cpp).
 
     Args:
         cfg: Global config (for bin_dir).
@@ -24,6 +80,7 @@ def build_command(cfg: Config, model: str, prof: Profile, port: int) -> list[str
     Returns:
         The argv list.
     """
+    prof = effective_profile(prof)
     argv = [str(Path(cfg.bin_dir) / "llama-server"), "-m", model]
     for s in SETTINGS:
         if not s.flag:
@@ -125,7 +182,8 @@ def preset_items(prof: Profile) -> list[tuple[str, str]]:
     router owns (host, port, api_key, alias) and settings with no preset key. Booleans are
     written ``true`` / ``false``: llama.cpp turns ``cont-batching = false`` into
     ``--no-cont-batching`` itself. extra_args is parsed into further pairs; an option named
-    there replaces the registry's value for the same option.
+    there replaces the registry's value for the same option. Like `build_command`, a
+    manual tensor placement forces ``fit = off`` (see `effective_profile`).
 
     Args:
         prof: Profile to render.
@@ -137,6 +195,7 @@ def preset_items(prof: Profile) -> list[tuple[str, str]]:
         ValueError: When extra_args cannot be expressed as options, or a value holds a
             character the INI format cannot carry.
     """
+    prof = effective_profile(prof)
     items: list[tuple[str, str]] = []
     for s in SETTINGS:
         if not s.preset_key or s.router_owned:

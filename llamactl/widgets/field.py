@@ -73,6 +73,7 @@ class SettingField(Widget):
     SettingField .hint { color: $text-muted; text-style: italic; }
     SettingField .impact { color: $secondary; }
     SettingField .impact.recommended { color: $success; text-style: bold; }
+    SettingField .warning { color: $warning; }
     SettingField.invalid Input { border: round $error; }
     """
 
@@ -93,6 +94,7 @@ class SettingField(Widget):
         self._value = value
         self._reason = ""  # active recommendation reason, kept until user edits
         self._impact = ("", False)  # impact line text and whether it is a plan reason
+        self._warning = ""  # warning line text, hidden while empty
         self._pending = 0  # programmatic set_value calls with a Changed event in flight
         if setting.kind == Kind.INT:
             inp: Widget = (_StepInput(str(value), step=setting.step, integer=True,
@@ -130,6 +132,7 @@ class SettingField(Widget):
         hint = f"disabled: {self._disabled_reason}" if self._disabled_reason else s.hint
         yield Label(hint, classes="hint")
         yield Label("", classes="impact")
+        yield Label("", classes="warning")
 
     def on_mount(self) -> None:
         """Disable the input when the field is not applicable; paint any impact already set."""
@@ -190,18 +193,27 @@ class SettingField(Widget):
         self._impact = (text, True)
         self._paint()
 
+    def show_warning(self, text: str) -> None:
+        """Show a warning line under the field ("" clears and hides it)."""
+        self._warning = text
+        self._paint()
+
     def _paint(self) -> None:
-        """Show the stored impact line; a field whose children are not mounted yet shows it later.
+        """Show the stored impact and warning lines; a field whose children are not mounted
+        yet shows them later.
 
         The editor computes its first preview while the collapsible groups are still being
-        composed, so the label may not exist yet (`on_mount` paints again).
+        composed, so the labels may not exist yet (`on_mount` paints again).
         """
         try:
             lbl = self.query_one(".impact", Label)
+            warn = self.query_one(".warning", Label)
         except NoMatches:
             return
         lbl.set_class(self._impact[1], "recommended")
         lbl.update(self._impact[0])
+        warn.update(self._warning)
+        warn.display = bool(self._warning)
 
     def _check(self) -> None:
         """Re-validate and mark the field, then notify the editor."""

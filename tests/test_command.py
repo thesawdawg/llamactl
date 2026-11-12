@@ -183,3 +183,10 @@ def test_extra_args_unmappable(extra: str, needle: str) -> None:
 def test_value_with_comment_character_is_refused() -> None:
     with pytest.raises(ValueError, match="mmproj"):
         preset_items(Profile(mmproj="/m/a#1.gguf"))
+
+
+def test_manual_expert_placement_forces_fit_off() -> None:
+    """n_cpu_moe places tensors by hand; llama.cpp's fit cannot adjust around it."""
+    cmd = argv(Profile(n_cpu_moe=5))
+    assert cmd[cmd.index("-fit") + 1] == "off" and ("fit", "off") in preset_items(
+        Profile(n_cpu_moe=5))

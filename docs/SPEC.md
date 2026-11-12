@@ -683,8 +683,9 @@ llamactl chose is shown with why, in the place the user looks at it:
   on a non-unified GPU host, not only verdict `GPU`, so MoE trials are guarded against the
   Windows/WSL driver's sysmem fallback.
 - Spill check: a loaded trial whose `gen_tps` is below a third of the best loaded trial of the
-  same profile family (context and `n_cpu_moe` aside) fails `fits` with the outcome
-  `spilled to system RAM?`.
+  same profile family (context aside) with at least as many expert layers in RAM
+  (`n_cpu_moe` >= its own) fails `fits` with the outcome `spilled to system RAM?`. Fewer
+  experts on the GPU is legitimately slower, so only the reverse counts as a spill.
 - UI:
   - PresetEditor shows a warning under Auto-fit when it is on while CPU MoE layers or tensor
     overrides are set: "Auto-fit is ignored while experts are placed by hand; llamactl turns it
@@ -696,16 +697,19 @@ llamactl chose is shown with why, in the place the user looks at it:
 ### 12.3 Placement in the planner (phase 13)
 
 - `gguf.py` reads the tensor info table (name, dims, type, offset; never data) of every shard
-  and merges by the `blk.N.` index in the name. Byte sizes come from a ggml type table (block
-  size, bytes per block) and `general.alignment` (default 32). `ModelInfo` gains:
+  of a MoE model and merges by the `blk.N.` index in the name. Byte sizes come from the
+  offsets: tensors are laid out back to back in the data section (which starts at the end of
+  the tensor table rounded up to `general.alignment`, default 32), so a tensor's size is the
+  next offset minus its own, and the last one runs to the end of the file. This needs no ggml
+  type table and works for any quantisation. `ModelInfo` gains:
   - `expert_bytes: tuple[int, ...]` - per layer, the tensors `--n-cpu-moe` matches
     (`ffn_(up|down|gate|gate_up)_(ch|)exps`); 0 for dense layers. Shared experts (`_shexp`) are
     not included: they stay on the GPU.
   - `dense_bytes: int` - every other tensor.
   - `expert_used: int` - `<arch>.expert_used_count`.
-  An unknown tensor type leaves `expert_bytes` empty and the planner falls back to today's
-  average-per-layer estimate. `ModelInfoCache.get` treats entries without `expert_bytes` as
-  stale and re-reads them.
+  A tensor table that cannot be read leaves `expert_bytes` empty (also for dense models) and
+  the planner falls back to today's average-per-layer estimate. `ModelInfoCache.get` treats
+  entries without `expert_bytes` as stale and re-reads them.
 - `planner`:
   - MoE GPU part = `dense_bytes` + KV + compute + overhead (scaled by the calibration factor);
     it must fit usable VRAM.

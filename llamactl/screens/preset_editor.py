@@ -10,7 +10,7 @@ from textual.widgets import Button, Collapsible, Footer, Header, Label, Static
 
 from .. import actions, schema
 from ..calibration import Calibration
-from ..command import build_command, command_string
+from ..command import build_command, command_string, fit_conflict
 from ..config import Config, Profile
 from ..gguf import ModelInfo
 from ..hardware import Host
@@ -145,6 +145,9 @@ class PresetEditor(Screen[Profile | None]):
             s = schema.by_key[key]
             if s.impact and f.valid and not f.input.disabled:
                 f.set_impact(s.impact(self._draft, self.info, self.host))
+        self.fields["fit"].show_warning(
+            "Auto-fit is ignored while experts are placed by hand; llamactl turns it off."
+            if fit_conflict(self._draft) else "")
         info = self.info or placeholder_info(0)
         self.query_one(BudgetPanel).update_budget(
             estimate_budget(info, self._draft, self.host, self.calibration), self.host,

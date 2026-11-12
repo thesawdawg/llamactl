@@ -315,7 +315,7 @@ def test_failed_trials_never_win_and_below_minimum_is_a_last_resort(dense8b: Mod
     assert choose_best(space, [(big, oom())]) is None
     assert choose_best(space, []) is None
     assert choose_best(space, [(small, ok(gen=90)), (big, oom())])[0] is small
-    assert choose_best(space, [(small, ok(gen=90)), (_cand(space, 8192), ok(gen=10))])[0].ctx_per_slot == 8192
+    assert choose_best(space, [(small, ok(gen=90)), (_cand(space, 8192), ok(gen=40))])[0].ctx_per_slot == 8192
 
 
 def test_embedding_scores_by_prompt_speed() -> None:
