@@ -642,3 +642,152 @@ Each phase lands as Conventional Commits on the `redesign-v2` branch. No pushing
 8. **Release prep** - README, CHANGELOG, AGENTS.md, version 0.2.0 (no tag, no publish).
 9. **Network access** - LAN bind modes, client URLs, API key prompts, WSL notes, `config`
    command (section 7.3); part of 0.2.0.
+10. **Resource usage** - per-model CPU/RAM/VRAM in `ps` and the Serving view.
+11. **Tuner: largest full-GPU context** - all-GPU trial, headroom guard, context fill.
+12. **MoE safety** - section 12.2.
+13. **MoE placement in the planner** - section 12.3.
+14. **MoE search in the tuner** - section 12.4.
+15. **Manual placement and host hints** - section 12.5, including the WSL RAM question.
+
+Every phase from 12 on ships the UI that explains its result (section 12.1): a core change
+without its guidance is not done.
+
+## 12. MoE models on limited hardware
+
+Mixture-of-experts models read only a few experts per token, so their expert weights can live
+in RAM while everything else stays on the GPU. llama.cpp places whole layers' experts
+(`--n-cpu-moe N` = the first N layers, implemented as tensor buffer overrides) or any tensor by
+regex (`-ot`); a GGUF stores all experts of a layer in one tensor per projection, so a single
+expert cannot be placed. This section makes llamactl plan, tune and explain that split
+accurately. Verified against llama.cpp `common/common.h` (n-cpu-moe patterns),
+`src/llama-model-loader.cpp` (first matching override wins) and `common/fit.cpp` (fit aborts
+when layers or overrides are set by the user).
+
+### 12.1 Guidance principle
+
+The user should never need to know llama.cpp flags to get a good MoE setup. Every number
+llamactl chose is shown with why, in the place the user looks at it:
+
+- where the memory goes (GPU part vs experts in RAM), in Models and PlanScreen;
+- what one more or one fewer expert layer on the GPU costs, in PlanScreen;
+- why a tune picked its winner and which trials were rejected, in TuneScreen;
+- what to do next, as Home next steps;
+- limits of the host itself (WSL caps), on Home and in onboarding.
+
+### 12.2 Safety (phase 12)
+
+- `command.py`: argv and preset INI always carry `-fit off` when `n_cpu_moe > 0` or
+  `override_tensor` is set, whatever the profile's `fit` says. llama.cpp's fit cannot adjust
+  around user overrides; it logs a warning and loads unfitted.
+- `tuner.SearchSpace.fits`: the headroom guard applies to every trial with `gpu_layers == "all"`
+  on a non-unified GPU host, not only verdict `GPU`, so MoE trials are guarded against the
+  Windows/WSL driver's sysmem fallback.
+- Spill check: a loaded trial whose `gen_tps` is below a third of the best loaded trial of the
+  same profile family (context and `n_cpu_moe` aside) fails `fits` with the outcome
+  `spilled to system RAM?`.
+- UI:
+  - PresetEditor shows a warning under Auto-fit when it is on while CPU MoE layers or tensor
+    overrides are set: "Auto-fit is ignored while experts are placed by hand; llamactl turns it
+    off." The command preview shows the forced `-fit off`.
+  - TuneScreen's outcome column shows `spilled to system RAM?` or `left less than the headroom
+    free` instead of `ok` for guarded trials, with the numbers in the row's detail.
+- Test: a MoE profile with `fit` on renders `-fit off` in argv and INI.
+
+### 12.3 Placement in the planner (phase 13)
+
+- `gguf.py` reads the tensor info table (name, dims, type, offset; never data) of every shard
+  and merges by the `blk.N.` index in the name. Byte sizes come from a ggml type table (block
+  size, bytes per block) and `general.alignment` (default 32). `ModelInfo` gains:
+  - `expert_bytes: tuple[int, ...]` - per layer, the tensors `--n-cpu-moe` matches
+    (`ffn_(up|down|gate|gate_up)_(ch|)exps`); 0 for dense layers. Shared experts (`_shexp`) are
+    not included: they stay on the GPU.
+  - `dense_bytes: int` - every other tensor.
+  - `expert_used: int` - `<arch>.expert_used_count`.
+  An unknown tensor type leaves `expert_bytes` empty and the planner falls back to today's
+  average-per-layer estimate. `ModelInfoCache.get` treats entries without `expert_bytes` as
+  stale and re-reads them.
+- `planner`:
+  - MoE GPU part = `dense_bytes` + KV + compute + overhead (scaled by the calibration factor);
+    it must fit usable VRAM.
+  - `_moe_layers` sums `expert_bytes` from layer 0 until the overflow is covered (matching
+    `--n-cpu-moe` order; dense leading layers count but move nothing).
+  - Experts in RAM are checked against `ram_free` minus 10% of `ram_total`; above 60% of
+    `ram_total` the plan warns that the system may start swapping (CPU expert tensors can be
+    repacked into anonymous memory, so mmap does not make them free).
+  - Reasons quote real numbers: "experts of 14/40 layers (9.8 GB) stay in RAM".
+  - `Plan` gains `expert_ram: int` (bytes of experts in RAM) and `layer_gain: int` (VRAM one
+    more expert layer on the GPU would need).
+- Why explicit `n_cpu_moe` with `fit off` rather than llama.cpp's own MoE fitting: placement is
+  deterministic, explainable in reasons, and repeatable by the tuner.
+- UI:
+  - BudgetPanel, MoE plans: the VRAM bar shows only the GPU part, the RAM bar shows the experts
+    in RAM, and the stacked bar gets an "experts (RAM)" segment. A valid MoE plan is never red.
+  - Models detail meta line: "MoE: 128 experts, 8 per token; experts 18.4 GB of 21.0 GB can
+    live in RAM".
+  - Models verdict cell: `GPU+experts` for a MoE plan instead of `GPU+CPU`, so a cheap split
+    reads differently from a slow dense spill.
+  - PlanScreen "Expert placement" block: experts of N/L layers in RAM (size), what one more
+    layer on the GPU costs, and that fewer layers in RAM is faster.
+  - CLI: `plan` text shows the same block; `plan --json` adds `expert_ram` and `layer_gain`.
+- Tests: the tensor table parser on a tiny generated GGUF (two layers, one expert tensor); the
+  planner's `n_cpu_moe` covers the overflow from `expert_bytes`.
+
+### 12.4 Search in the tuner (phase 14)
+
+- `down` on a MoE memory failure: raise `n_cpu_moe` by enough layers to cover the measured or
+  estimated overflow from `expert_bytes`, before lowering context. At `n_cpu_moe == n_layer` it
+  falls through to the existing ladder (context down, q8_0 KV).
+- `moe_fill`: from the best fitting MoE trial, predict the lowest `n_cpu_moe` whose added expert
+  bytes fit the measured slack (free VRAM after load minus headroom), and try it; on a failure
+  step back up halfway. Bounded like `fill`; never tries a count already tried.
+- Score at equal context tier: drop trials whose `prompt_tps` is more than 30% below the tier's
+  best, then the existing `SPEED_TOLERANCE` on `gen_tps`, then higher `gen_tps`.
+- The GPU+CPU threads trial also sets `threads_batch` to all logical cores (prompt speed with
+  experts on the CPU depends on it).
+- Trial budget: `--trials` default stays 6; MoE models get 3 more.
+- UI:
+  - TuneScreen gains a `CPU MoE` column; change labels read "more experts to RAM" and "experts
+    back to GPU"; the summary names the winner and the reason ("n_cpu_moe 12: fastest that kept
+    1.6 GB free; 10 left too little headroom; prompt 410 tok/s").
+  - Home next step, above the generic tune rule: "<alias> is a MoE model with experts in RAM:
+    tune it to find the fastest split" for estimated MoE presets with `n_cpu_moe > 0`.
+  - Models intent table shows prompt and generation tok/s for MoE presets (`pp / tg`).
+- Test: a fake runner where the plan runs out of memory, `down` raises `n_cpu_moe`, and
+  `moe_fill` lands on the lowest count that fits.
+
+### 12.5 Manual placement and host hints (phase 15)
+
+- Schema `override_tensor`: flag `-ot`, preset key `override-tensor`, STR, MEMORY group,
+  disabled for dense models. Emitted before `--n-cpu-moe` so its patterns win (first match
+  wins). The planner never sets it; `tune` refuses a preset that has it ("remove the tensor
+  overrides to tune; the search places experts itself").
+- WSL RAM question. llamactl cannot see Windows' RAM from inside the WSL VM, so it asks once:
+  - Config gains `wsl_windows_ram: int | None` (bytes). `None` = not asked yet, `0` = skipped.
+  - When `network.wsl_mode()` is not None and the value is `None`, the app opens a modal on
+    start (after onboarding when onboarding runs): "llamactl runs inside WSL, which can use
+    25.2 GB of RAM and 12 threads. How much RAM does Windows have?" One GB input (Windows
+    reports GiB, so 32 means 32 GiB), Save and Skip. Onboarding's Hardware step shows the same
+    field when WSL is detected, so a new user is asked there and not again. Settings can change
+    it.
+  - Pure `hardware.wsl_advice(host, windows_ram) -> WslAdvice | None`: suggested
+    `memory=` is Windows RAM minus max(4 GiB, 1/8 of it), rounded down to whole GiB; the gain is
+    that minus what WSL sees now. Shown only when the gain is at least 2 GiB; otherwise the
+    advice says WSL already has most of the RAM and more RAM is the next step. A 32 GiB machine
+    gets `memory=28GB`.
+- UI:
+  - PresetEditor `-ot` field: example buttons ("experts of layers 20+ to CPU", "only
+    down-projection experts to CPU"), live validation with Python `re` (marked as close to, not
+    identical with, llama.cpp's C++ regex), and a match preview from the tensor table: "matches
+    60 tensors, 6.2 GB moves to CPU; GPU part now 9.1 GB of 14.4 GB usable".
+  - Home hardware card and onboarding Hardware step: the WSL advice with a Copy button for the
+    `.wslconfig` snippet (`[wsl2]`, `memory=`, and `processors=` as a line to check) and the
+    reminder to run `wsl --shutdown` after editing. `llamactl hw` prints the same.
+  - Help screen page "Running MoE models on limited VRAM": experts in RAM, when to tune, when
+    `-ot` helps, and WSL limits.
+- Test: `wsl_advice` for 32 GiB Windows with 23.5 GiB visible suggests `memory=28GB`.
+
+### 12.6 Later
+
+Other llama.cpp builds (ik_llama.cpp, MoE hot-cache forks): capability detection from
+`llama-server --help`, settings hidden when the build lacks the flag. Undecided; the gateway
+runs one router binary, so builds cannot be mixed there.

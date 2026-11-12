@@ -92,3 +92,40 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
   slope, in 4096 steps up to `ctx_max`
 - [x] Scoring: context beyond the target wins unless it costs more than 5% speed
 - [x] Realistic benchmark prompt (~2k tokens), `--trials` default 6
+
+## Phase 12 - MoE safety (SPEC 12.2)
+
+- [ ] `command.py`: force `-fit off` in argv and INI when `n_cpu_moe > 0` or `override_tensor` is set
+- [ ] Tuner headroom guard for every `gpu_layers == "all"` trial, not only verdict `GPU`
+- [ ] Spill check: `gen_tps` below a third of the family's best fails `fits` (`spilled to system RAM?`)
+- [ ] UI: PresetEditor Auto-fit conflict warning; preview shows the forced `-fit off`
+- [ ] UI: TuneScreen outcome names guarded trials (spilled / headroom) with numbers
+- [ ] Manual: CPU MoE layers 5 with Auto-fit on shows the warning and `-fit off` in the preview
+
+## Phase 13 - MoE placement in the planner (SPEC 12.3)
+
+- [ ] `gguf.py`: tensor table across shards, ggml type sizes, alignment; `expert_bytes`, `dense_bytes`, `expert_used`; cache gate
+- [ ] Planner: GPU part from `dense_bytes`; `_moe_layers` from `expert_bytes`; RAM check and swap warning; `Plan.expert_ram`, `Plan.layer_gain`; fallback to the average
+- [ ] UI: BudgetPanel splits GPU part and experts in RAM (never red for a valid MoE plan)
+- [ ] UI: Models meta MoE line and `GPU+experts` verdict cell
+- [ ] UI: PlanScreen "Expert placement" block; `plan` text and `--json` fields
+- [ ] Manual: Qwen3.6-35B-A3B plan loads first time with headroom free; numbers readable
+
+## Phase 14 - MoE search in the tuner (SPEC 12.4)
+
+- [ ] `down` raises `n_cpu_moe` from the overflow; falls through at `n_layer`
+- [ ] `moe_fill` predicts the lowest fitting `n_cpu_moe` from measured slack
+- [ ] Scoring drops trials >30% slower on prompt; threads trial sets `threads_batch`; +3 trials for MoE
+- [ ] UI: TuneScreen `CPU MoE` column, plain change labels, summary explains the winner
+- [ ] UI: Home next step for estimated MoE presets with experts in RAM; Models `pp / tg` for MoE
+- [ ] Manual: tune Qwen3.6-35B-A3B (agent); `CPU MoE` drops over trials, summary explains the pick
+
+## Phase 15 - Manual placement and host hints (SPEC 12.5)
+
+- [ ] Schema `override_tensor` (`-ot`) emitted before `--n-cpu-moe`; tune refuses presets that set it
+- [ ] Config `wsl_windows_ram`; start-up modal when WSL is detected and it was never asked; onboarding Hardware field; Settings field
+- [ ] `hardware.wsl_advice` (suggested `memory=`, gain, threshold)
+- [ ] UI: PresetEditor `-ot` examples, validation and tensor match preview
+- [ ] UI: WSL advice with Copy snippet on Home and onboarding; `llamactl hw` prints it
+- [ ] UI: Help page "Running MoE models on limited VRAM"
+- [ ] Manual: first start under WSL asks for Windows RAM once; 32 GiB gives `memory=28GB`
