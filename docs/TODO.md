@@ -129,3 +129,20 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [x] UI: WSL advice with Copy snippet on Home and onboarding; `llamactl hw` prints it
 - [x] UI: Help page "Running MoE models on limited VRAM"
 - [ ] Manual: first start under WSL asks for Windows RAM once; 32 GiB gives `memory=28GB`
+
+## Phase 16 - Architecture support (SPEC 13.2)
+
+- [ ] `support.py`: build check on `libllama.so` (tail match), learned unknown-architecture failures per build, upstream `llama-arch.cpp` list cached 24 h
+- [ ] `not_llm` table (`clip`, draft-only, audio/TTS); Library skips `clip` by architecture
+- [ ] Planner `VERDICT_UNSUPPORTED`; gateway INI leaves unsupported models out; `serve`/`up`/`load`/`tune` refuse with the reason
+- [ ] UI: Models verdict `update llama.cpp` / `unsupported`, detail with rebuild commands and Copy; Tune and Serve disabled with the reason
+- [ ] UI: Home next step "N models need a newer llama.cpp"; Discover marks repos and confirms before download; `ls`/`plan`/`tune` print the reason
+- [ ] UI: Help page "When a model will not load", including that the check is not all-inclusive (vLLM-only models, new variants, templates, missing mmproj, broken files)
+- [ ] Manual: clef and Ripple show `update llama.cpp` and cannot be served; after rebuilding llama.cpp both plan normally
+
+## Phase 17 - Memory by architecture family (SPEC 13.3)
+
+- [ ] `kv_per_token` by family: hybrid recurrent, sliding window, MLA (confirm first), shared KV, generic fallback
+- [ ] Tune records the logged KV size per architecture; PlanScreen warns when the estimate was >20% off
+- [ ] UI: PlanScreen and Models detail explain the KV figure
+- [ ] Manual: `llamactl plan ornith-1.5-9b-q8_0` fits much larger contexts on the GPU; a tune's logged KV size matches the estimate

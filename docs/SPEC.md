@@ -648,6 +648,8 @@ Each phase lands as Conventional Commits on the `redesign-v2` branch. No pushing
 13. **MoE placement in the planner** - section 12.3.
 14. **MoE search in the tuner** - section 12.4.
 15. **Manual placement and host hints** - section 12.5, including the WSL RAM question.
+16. **Architecture support** - section 13.2.
+17. **Memory by architecture family** - section 13.3.
 
 Every phase from 12 on ships the UI that explains its result (section 12.1): a core change
 without its guidance is not done.
@@ -798,3 +800,98 @@ llamactl chose is shown with why, in the place the user looks at it:
 Other llama.cpp builds (ik_llama.cpp, MoE hot-cache forks): capability detection from
 `llama-server --help`, settings hidden when the build lacks the flag. Undecided; the gateway
 runs one router binary, so builds cannot be mixed there.
+
+## 13. Model architectures
+
+A GGUF names its architecture in `general.architecture`. llama.cpp refuses a file whose
+architecture its build does not know (`unknown model architecture: 'clef'`), and it sizes the
+KV cache per architecture. Today llamactl plans such a file as if it would load, and its KV
+estimate assumes every layer keeps a full cache, which is wrong for most recent architectures.
+Verified against llama.cpp `src/llama-arch.cpp` (`LLM_ARCH_NAMES`), `src/llama-hparams.cpp`
+and `src/llama-model.cpp`, and against the local models: `clef` and `ricursive` are on master
+but not in build `5fc4f3c`; every `qwen35`/`qwen35moe` file has `full_attention_interval 4`.
+
+### 13.1 Scope and limits
+
+Support detection answers one question: can this llama.cpp build load this architecture? It
+is not all-inclusive. A model can pass every check and still fail or misbehave, for example:
+
+- models published for other runtimes only (vLLM, SGLang, TensorRT-LLM, MLX) whose GGUF
+  conversions are unofficial or incomplete;
+- a known architecture with tensors or hyperparameters the build does not handle yet (a new
+  variant under an old name), which fails later in loading with a different error;
+- chat templates or tool-call formats the build cannot parse;
+- multimodal models whose mmproj file is missing or for another build;
+- broken or truncated downloads, or quantisations the backend has no kernels for.
+
+These surface as load errors. The tuner and serving already show llama.cpp's root-cause line;
+the guidance text and the Help page say that `unsupported` is a known-bad answer, and that a
+model without the mark is not guaranteed to work.
+
+### 13.2 Architecture support (phase 16)
+
+- New `support.py`, everything injectable (file reads, `--version`, HTTP):
+  - Build check: the bytes of `libllama.so` in `bin_dir` (or `llama-server` when there is no
+    shared library) are searched for `name + b"\0"`. Architecture names are string constants
+    there; the compiler may store a name only as the tail of a longer one (`bert` exists only
+    inside `modern-bert\0`), so the match is on the ending, not `\0name\0`. That can give a
+    false "supported" for a name that is the tail of another, never a false "unsupported" for a
+    name in the table. Cached by (path, size, mtime).
+  - Learned failures: a load whose log has `unknown model architecture: '<x>'` records `<x>`
+    as unsupported for the build (`llama-server --version`) in `arch_support.json` in the state
+    directory. A different build clears the records. This is the final word over the build
+    check.
+  - Upstream: master's `src/llama-arch.cpp` from GitHub raw, parsed for the `LLM_ARCH_NAMES`
+    strings, cached for 24 h; network failures leave it unknown and never block anything.
+  - `Support` = `ok` / `update` (not in this build, in master) / `unsupported` (in neither) /
+    `not_llm` (see below) / `unknown` (nothing could be checked; treated as ok).
+- Not standalone text models (`not_llm`): a small table - `clip` (mmproj projectors),
+  draft-only models (`eagle3`, `dflash`), audio and TTS decoders (`wavtokenizer-dec`,
+  `qwen3tts`, `pockettts`). Library skips `clip` files by architecture as well as by the
+  `mmproj` name.
+- Planner: `VERDICT_UNSUPPORTED` with the reason; `plan_all` returns it for every intent.
+- Serving: models whose support is `update`, `unsupported` or `not_llm` are left out of the
+  router INI with a line in the gateway log; `serve`, `up`, `load` and `tune` refuse them with
+  the reason (exit code for a refused request). `unknown` never blocks.
+- Unsupported models are warned about in place, never hidden: a file the user downloaded must
+  not seem to vanish.
+- UI:
+  - Models: the verdict cells read `update llama.cpp` or `unsupported` in red; the detail
+    explains it ("Architecture 'clef' is not in your llama.cpp (0.5.0-dev, 5fc4f3c) but is in
+    llama.cpp master: rebuild llama.cpp") with the rebuild commands and a Copy button. Tune
+    and Serve are disabled with that reason. `unsupported` says llama.cpp does not run this
+    architecture; it may be meant for another runtime such as vLLM.
+  - Home next steps, ranked first: "2 models need a newer llama.cpp".
+  - Discover: repos whose `gguf.architecture` is not `ok` are marked in the results; picking a
+    file from one asks for confirmation before downloading.
+  - CLI: `ls` shows the verdict; `plan` and `tune` print the reason.
+  - Help page "When a model will not load": what the marks mean and the limits in 13.1.
+- Tests: the build check on fake library bytes (including the tail match); parsing the
+  unknown-architecture line from a load log; the planner verdict.
+
+### 13.3 Memory by architecture family (phase 17)
+
+`kv_per_token` becomes family-aware, using only header metadata. The family comes from the
+metadata keys present, with a small per-architecture table where llama.cpp hardcodes a value:
+
+- Hybrid recurrent (`qwen35`, `qwen35moe`, `qwen3next`, `mamba`, `mamba2`, `jamba`,
+  `falcon-h1`, `granitehybrid`, `nemotron_h`, `lfm2`, ...): KV only on attention layers, taken
+  from `attention.recurrent_layers`, else `full_attention_interval`, else the zeros of a
+  per-layer `attention.head_count_kv`; plus a fixed recurrent state per slot from `ssm.*`
+  (f32, independent of context).
+- Sliding window (`gemma2/3/4`, `cohere2`, `gpt-oss`, `granite_swa`, ...): window layers from
+  `attention.sliding_window_pattern` (array or period) or the table, costing at most
+  window + ubatch tokens per slot unless `--swa-full`.
+- Compressed cache (MLA: `deepseek2`, `kimi-*`, `hy_v4`, ...): K-only cache of
+  `attention.key_length_mla` with one head. Ships as a hypothesis (not yet checked against
+  `src/llama-kv-cache.cpp`); the logged-KV check below and a manual test confirm it later.
+- Shared KV (`gemma3n`, `attention.shared_kv_layers`): the last layers reuse earlier caches.
+- Anything else: today's formula, labelled "generic estimate".
+- Check against reality: tune reads the KV size llama.cpp logs at load and stores the
+  estimated/measured ratio per architecture in the calibration store; PlanScreen warns when
+  the estimate was more than 20% off.
+- UI: PlanScreen and the Models detail say how the KV figure was worked out ("KV on 8 of 33
+  layers (hybrid, 1 in 4 full attention) + 50 MB state"; "window layers capped at 1,024
+  tokens").
+- Tests: a hybrid case with Ornith's real numbers (33 layers, interval 4, 4 KV heads,
+  256/256 dims) and one sliding-window case.
