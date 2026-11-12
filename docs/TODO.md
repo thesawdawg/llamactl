@@ -146,3 +146,10 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 - [ ] Tune records the logged KV size per architecture; PlanScreen warns when the estimate was >20% off
 - [ ] UI: PlanScreen and Models detail explain the KV figure
 - [ ] Manual: `llamactl plan ornith-1.5-9b-q8_0` fits much larger contexts on the GPU; a tune's logged KV size matches the estimate
+
+## Update command
+
+- [x] `update.py`: `repo_status` (fetch, HEAD, branch, upstream, ahead/behind, dirty), `llamactl_source` (uv receipt or package checkout), `llama_source` (CMakeCache), built-commit match, per-part plans and `apply_steps` with injectable `run`/`stream`
+- [x] `update` subcommand (`--check`, `--yes`, `--only`), [y/N] asks, non-TTY reports only, llama.cpp refused while serving, EXIT_FAILURE on a failed step
+- [x] Docs: AGENTS.md exception and command list, SPEC section 8, README table
+- [ ] Manual: `llamactl update --check` reports llama.cpp "pulled but not rebuilt"; update rebuilds it and clef/Ripple plan normally

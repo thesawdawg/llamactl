@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from importlib import metadata
@@ -20,7 +21,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence, TextIO
 
 from . import (actions, cfgedit, gateway as gateway_mod, hardware, intents, library, network,
-               render, report, support as support_mod, tuner, usage as usage_mod)
+               render, report, support as support_mod, tuner, update as update_mod,
+               usage as usage_mod)
 from .usage import UsageProbe
 from .actions import ActionError
 from .calibration import Calibration
@@ -76,6 +78,11 @@ class Services:
         health: Returns "ready", "loading" or "down" for a server URL.
         support: Architecture support checker for the configured build.
         probe: Process usage probe (for ``ps``).
+        run: ``subprocess.run`` compatible command runner (``update``).
+        stream: Runs a command with output on the terminal, returns the exit code (the
+            long build of ``update``).
+        confirm: Asks a [y/N] question, returns the answer (``update``).
+        tty: True when stdin is interactive (``update`` only asks then).
         sleep: Sleep function.
         clock: Monotonic clock in seconds.
         now: Wall clock in Unix seconds.
@@ -92,6 +99,10 @@ class Services:
                  health: Callable[[str], str] = http_health,
                  support: support_mod.SupportChecker | None = None,
                  probe: UsageProbe | None = None,
+                 run: Callable[..., Any] = subprocess.run,
+                 stream: Callable[[list[str]], int] | None = None,
+                 confirm: Callable[[str], bool] | None = None,
+                 tty: Callable[[], bool] = sys.stdin.isatty,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], float] = time.time) -> None:
@@ -101,6 +112,10 @@ class Services:
         self.style = Style(render.use_colour(self.out) if colour is None else colour)
         self.read_only = read_only
         self.health = health
+        self.run = run
+        self.stream = stream or _stream
+        self.confirm = confirm or _confirm
+        self.tty = tty
         self.sleep = sleep
         self.clock = clock
         self.now = now
@@ -896,6 +911,85 @@ def cmd_logs(args: argparse.Namespace, sv: Services) -> int:
         raise CliError(f"cannot follow {path}: {e}") from None
 
 
+# --------------------------------------------------------------------------- update
+
+def _stream(argv: list[str]) -> int:
+    """Run a long command with its output on the terminal; return the exit code."""
+    return subprocess.run(argv).returncode
+
+
+def _confirm(question: str) -> bool:
+    """Prompt ``<question> [y/N]`` on stdin; False on EOF or a non-y answer."""
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _update_part(args: argparse.Namespace, sv: Services, lines: list[str],
+                 steps: list[update_mod.Step], question: str) -> str:
+    """Print one part's report, list its steps and run them unless told not to.
+
+    Args:
+        args: Parsed arguments (``--check``, ``--yes``).
+        sv: Services.
+        lines: The report lines.
+        steps: The planned commands.
+        question: The [y/N] question.
+
+    Returns:
+        ``ok`` when every step ran, ``failed`` when one failed, ``skipped`` when nothing
+        ran (no steps, ``--check``, no TTY or a declined prompt).
+    """
+    for line in lines:
+        sv.say(line)
+    if not steps:
+        return "skipped"
+    for s in steps:
+        sv.say(f"  $ {' '.join(s.argv)}")
+    if args.check:
+        return "skipped"
+    if not args.yes and not sv.tty():
+        sv.note("stdin is not a terminal; pass --yes to apply these steps")
+        return "skipped"
+    if not args.yes and not sv.confirm(question):
+        sv.say("  skipped")
+        return "skipped"
+    return "ok" if update_mod.apply_steps(sv.run, sv.stream, steps, sv.say, sv.note) else "failed"
+
+
+def cmd_update(args: argparse.Namespace, sv: Services) -> int:
+    """``llamactl update``: report what is pending, then pull and rebuild (asks first)."""
+    parts = {args.only} if args.only else {"llamactl", "llama.cpp"}
+    failed = False
+    if "llamactl" in parts:
+        src, by_uv = update_mod.llamactl_source(sv.run)
+        st = update_mod.repo_status(src, sv.run) if src is not None else None
+        lines, steps, question = update_mod.plan_llamactl(st, by_uv)
+        outcome = _update_part(args, sv, lines, steps, question)
+        if outcome == "ok":
+            sv.say("llamactl updated; restart llamactl to use the new version")
+        failed = outcome == "failed"
+    if "llama.cpp" in parts:
+        found = update_mod.llama_source(sv.cfg.bin_dir)
+        if found is None:
+            sv.say(update_mod.no_source_line(sv.cfg.bin_dir))
+        else:
+            src, build_dir = found
+            st = update_mod.repo_status(src, sv.run)
+            built = update_mod.built_commit(sv.build())
+            serving = sv.gateway.running or any(s.alive for s in sv.store.sessions)
+            lines, steps, question = update_mod.plan_llama(st, build_dir, built, serving)
+            outcome = _update_part(args, sv, lines, steps, question)
+            if outcome == "ok":
+                sv.say(f"llama-server is now "
+                       f"{update_mod.new_version(sv.run, sv.cfg.bin_dir)}")
+                sv.say("tuned presets are now stale; Home suggests re-tuning; architecture "
+                       "checks pick up the new build automatically")
+            failed |= outcome == "failed"
+    return EXIT_FAILURE if failed else EXIT_OK
+
+
 # --------------------------------------------------------------------------- parser
 
 def _positive(text: str) -> int:
@@ -997,6 +1091,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-f", "--follow", action="store_true", help="keep printing new lines (Ctrl-C ends)")
     sp.add_argument("-n", "--lines", type=int, default=DEFAULT_TAIL, metavar="LINES",
                     help=f"lines to show first (default {DEFAULT_TAIL})")
+    sp = add("update", cmd_update, "pull and rebuild llamactl and llama.cpp (asks before changing anything)")
+    sp.add_argument("--check", action="store_true", help="only report what is pending")
+    sp.add_argument("-y", "--yes", action="store_true", help="apply without asking")
+    sp.add_argument("--only", choices=["llamactl", "llama.cpp"], metavar="PART",
+                    help="update only this part")
     return p
 
 

@@ -7,7 +7,7 @@ Python 3.14 venv at `.venv`.
 
 ```sh
 .venv/bin/python -m llamactl            # the TUI
-.venv/bin/python -m llamactl ls         # CLI: hw, ls, plan, tune, serve, up, down, config, ps, load, unload, stop, logs
+.venv/bin/python -m llamactl ls         # CLI: hw, ls, plan, tune, serve, up, down, config, ps, load, unload, stop, logs, update
 ```
 
 For manual runs, point the state directory at a scratch folder so the real one is never
@@ -29,4 +29,6 @@ items in [docs/TODO.md](docs/TODO.md) in the commit that completes them. Work on
 - Conventional Commits (`feat:`, `fix:`, `test:`, `chore:`), short and plain.
 - Never `git push`. No `Co-Authored-By` trailer.
 - No new runtime dependencies; tests use the `dev` extra.
-- Never touch files under `~/.config/llamactl` or `~/llama.cpp` from code or tests.
+- Never touch files under `~/.config/llamactl` or `~/llama.cpp` from code or tests, except
+  `llamactl update`, which the user runs to pull and rebuild llama.cpp (tests still never
+  touch it).

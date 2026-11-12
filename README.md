@@ -26,7 +26,8 @@ How it works:
 - Python 3.11 or newer (CI covers 3.11 to 3.14; development uses 3.14).
 - A llama.cpp build whose `llama-server` supports router mode (`--models-preset`,
   `--models-max`) and `--list-devices`. llamactl is checked against 0.5.0-dev (commit
-  `5fc4f3c`). llamactl does not download or build llama.cpp.
+  `5fc4f3c`). llamactl does not download llama.cpp; `llamactl update` pulls and rebuilds
+  a checkout you already have.
 - Linux is the main target. macOS is best effort.
 
 ## Install
@@ -102,6 +103,7 @@ stem. Commands that print data accept `--json`. Exit codes: 0 success, 1 runtime
 | `llamactl load NAME` / `llamactl unload NAME` | load / unload a model in the gateway |
 | `llamactl stop [NAME \| --all]` | stop standalone servers (never the gateway) |
 | `llamactl logs NAME [-f] [-n LINES]` | print or follow a log; `NAME` is `gateway` or a server |
+| `llamactl update [--check] [-y] [--only {llamactl,llama.cpp}]` | report, then pull and rebuild llamactl and llama.cpp |
 
 Examples:
 

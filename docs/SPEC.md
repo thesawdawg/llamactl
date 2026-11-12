@@ -482,6 +482,17 @@ data; models are named by alias, file stem or unique substring):
 | `llamactl load NAME` / `unload NAME` | gateway model control |
 | `llamactl stop NAME\|--all` | stop standalone servers |
 | `llamactl logs NAME [-f]` | print or follow a log |
+| `llamactl update [--check] [--yes] [--only PART]` | report, then pull and rebuild llamactl and llama.cpp |
+
+`llamactl update` handles two parts. llamactl itself: the local clone it was installed
+from (a `uv tool` `directory` install, or the package living in a checkout); other install
+kinds get a printed instruction. llama.cpp: the source tree named by the `CMakeCache.txt`
+in `bin_dir`'s parent. Each part reports its git state (new commits / up to date / dirty /
+diverged / no upstream) plus "pulled but not rebuilt" when the built binary's commit does
+not match HEAD, lists its steps (`git pull --ff-only`, `uv tool install --reinstall`,
+`cmake --build` in the existing build dir so configured flags are kept), asks `[y/N]`
+unless `--yes` or a non-TTY stdin (which reports only), refuses llama.cpp while the gateway
+or a standalone session runs, and stops a part at the first failed step.
 
 Exit codes: 0 ok, 1 runtime failure, 2 usage / unknown or ambiguous model.
 
