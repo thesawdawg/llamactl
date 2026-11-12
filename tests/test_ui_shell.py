@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 from textual.widgets import DataTable, Input, OptionList, Static
 
-from fakes import FakeGateway, FakeRunner, FakeStore, plain, runner_factory, wait_for
+from fakes import (FakeGateway, FakeRunner, FakeStore, FakeSupport, plain, runner_factory,
+                   wait_for)
 from llamactl.app import LlamaCtl, ServingChanged
 from llamactl.config import Config, Preset, Profile
 from llamactl.gateway import FAILED, LOADED, UNLOADED, GatewayError
@@ -28,6 +29,7 @@ def make_app(env: SimpleNamespace, *, running: bool = False, store: FakeStore | 
     config is the environment's."""
     gw = gateway or FakeGateway(env.cfg, running=running)
     kw.setdefault("health", lambda url: "ready")
+    kw.setdefault("support", FakeSupport())
     return LlamaCtl(cfg=env.cfg, gateway=gw, store=store or FakeStore(),
                     runner_factory=runner_factory(runner or FakeRunner()),
                     build=lambda: "b1", **kw)

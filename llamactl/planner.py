@@ -16,6 +16,7 @@ from .config import Profile
 from .gguf import ModelInfo
 from .hardware import Host
 from .intents import KV_IF_NEEDED, KV_NEVER, KV_PREFER, SPILL_ALLOW, SPILL_AVOID, Intent, applicable
+from .support import ArchSupport
 
 MiB = 1 << 20
 GB = 1e9
@@ -29,6 +30,7 @@ BYTES_PER_ELEM = {"f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 34 / 32, "q5_1": 
 F16, Q8 = "f16", "q8_0"
 
 VERDICT_GPU, VERDICT_SPILL, VERDICT_CPU, VERDICT_NO = "GPU", "GPU+CPU", "CPU", "NO"
+VERDICT_UNSUPPORTED = "unsupported"     # the build cannot load the architecture at all
 
 # placement modes of a layout
 _GPU, _SPILL, _MOE, _CPU = "gpu", "spill", "moe", "cpu"
@@ -151,18 +153,24 @@ def expert_ram_bytes(info: ModelInfo, prof: Profile) -> int:
     return sum(info.expert_bytes[:prof.n_cpu_moe])
 
 
-def verdict_label(verdict: str, prof: Profile, info: ModelInfo) -> str:
+def verdict_label(verdict: str, prof: Profile, info: ModelInfo,
+                  support: ArchSupport | None = None) -> str:
     """Display label of a plan verdict: "GPU+experts" for a MoE expert split.
 
     Args:
         verdict: Raw verdict (``VERDICT_*``), as stored on `Plan`.
         prof: The plan's profile.
         info: Model metadata.
+        support: The support check behind ``VERDICT_UNSUPPORTED``, when there is one;
+            its label ("update llama.cpp", "unsupported", "not a text model") is shown.
 
     Returns:
-        "GPU+experts" when experts are kept in RAM by `n_cpu_moe`, else `verdict`.
+        "GPU+experts" when experts are kept in RAM by `n_cpu_moe`, the support label for
+        ``VERDICT_UNSUPPORTED``, else `verdict`.
         Display only: `Plan.verdict` and the tuner keep the raw value.
     """
+    if verdict == VERDICT_UNSUPPORTED:
+        return support.label() if support is not None and support.label() else "unsupported"
     if verdict == VERDICT_SPILL and prof.n_cpu_moe > 0 and info.expert_count > 0:
         return "GPU+experts"
     return verdict
@@ -279,13 +287,15 @@ class Plan:
         profile: The planned profile.
         reasons: key -> one line with the numbers used, only for keys that differ from base.
         budget: Memory budget of the planned profile (calibrated).
-        verdict: "GPU", "GPU+CPU", "CPU" or "NO".
+        verdict: "GPU", "GPU+CPU", "CPU", "NO" or "unsupported".
         ctx_per_slot: Context each slot gets (total ``-c`` is this times the slots).
         warnings: Things the user should know, e.g. a context below the intent's minimum.
         expert_ram: Bytes of expert tensors the plan keeps in RAM (MoE `n_cpu_moe`), 0
             when not a MoE split or `expert_bytes` is unknown.
         layer_gain: Expert bytes of the last RAM-placed layer (index `n_cpu_moe` - 1): the
             VRAM needed to move one more layer's experts onto the GPU (`n_cpu_moe` one less).
+        support: The architecture support check behind ``VERDICT_UNSUPPORTED``, None for a
+            normal plan.
     """
 
     intent: str
@@ -297,6 +307,7 @@ class Plan:
     warnings: tuple[str, ...] = field(default_factory=tuple)
     expert_ram: int = 0
     layer_gain: int = 0
+    support: ArchSupport | None = None
 
 
 class _Pick(NamedTuple):
@@ -683,12 +694,14 @@ def _warnings(env: _Env, lay: _Layout, v: str, expert_ram: int = 0) -> tuple[str
 
 
 def plan(intent: Intent, info: ModelInfo, host: Host, base: Profile, headroom_pct: float = 10,
-         calibration: Calibration | None = None) -> Plan:
+         calibration: Calibration | None = None, support: ArchSupport | None = None) -> Plan:
     """Plan settings for an intent on a host.
 
     Sampling and server identity fields (host, port, api_key, alias) are never changed.
     Usable VRAM is per device total minus headroom; the calibration factor of the host's
-    backend multiplies every estimated total.
+    backend multiplies every estimated total. A blocking `support` check short-circuits the
+    plan: the verdict is ``VERDICT_UNSUPPORTED``, the profile stays the base, and the reason
+    is the only warning (the budget is still computed, harmlessly).
 
     Args:
         intent: What the model is for.
@@ -697,10 +710,14 @@ def plan(intent: Intent, info: ModelInfo, host: Host, base: Profile, headroom_pc
         base: Profile to start from (usually the default profile).
         headroom_pct: Percentage of each device kept free (min 512 MiB).
         calibration: Measured data correcting the estimates, or None.
+        support: The architecture support check of the model, or None.
 
     Returns:
         The plan; ``reasons`` lists exactly the keys that differ from `base`.
     """
+    if support is not None and support.blocks:
+        return Plan(intent.key, base, {}, _budget(info, base, calibration_factor(host, calibration)),
+                    VERDICT_UNSUPPORTED, 0, (support.reason(),), support=support)
     env = _make_env(intent, info, host, base, headroom_pct, calibration)
     lay = _choose(env)
     d = _Draft(base)
@@ -718,7 +735,8 @@ def plan(intent: Intent, info: ModelInfo, host: Host, base: Profile, headroom_pc
 
 
 def plan_all(info: ModelInfo, host: Host, base: Profile, headroom_pct: float = 10,
-             calibration: Calibration | None = None) -> dict[str, Plan]:
+             calibration: Calibration | None = None,
+             support: ArchSupport | None = None) -> dict[str, Plan]:
     """Plan every intent that applies to the model.
 
     Args:
@@ -727,9 +745,11 @@ def plan_all(info: ModelInfo, host: Host, base: Profile, headroom_pct: float = 1
         base: Profile to start from.
         headroom_pct: Percentage of each device kept free (min 512 MiB).
         calibration: Measured data correcting the estimates, or None.
+        support: The architecture support check of the model; a blocking one gives
+            ``VERDICT_UNSUPPORTED`` for every intent.
 
     Returns:
         Plans by intent key, in intent table order.
     """
-    return {i.key: plan(i, info, host, base, headroom_pct, calibration)
+    return {i.key: plan(i, info, host, base, headroom_pct, calibration, support)
             for i in applicable(info)}

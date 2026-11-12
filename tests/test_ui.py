@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from textual.app import App
 from textual.widgets import Button, DataTable, Input, Label
 
-from fakes import wait_for as _wait
+from fakes import FakeSupport, wait_for as _wait
 from llamactl import actions, hf, intents, planner
 from llamactl.app import LlamaCtl
 from llamactl.config import Config, Profile
@@ -35,7 +35,7 @@ def onboarded_app() -> LlamaCtl:
     """The real app over the isolated (empty) state, as if the first-run setup had been done."""
     cfg = Config.load()
     cfg.onboarded = True
-    return LlamaCtl(cfg=cfg)
+    return LlamaCtl(cfg=cfg, support=FakeSupport())
 
 
 class _App(App[None]):

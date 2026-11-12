@@ -77,7 +77,8 @@ def _section(name: str, model: Path, items: list[tuple[str, str]]) -> str:
 
 
 def render_presets(cfg: Config, models: list[Path] | None = None,
-                   problems: list[str] | None = None) -> str:
+                   problems: list[str] | None = None,
+                   blocked: dict[str, str] | None = None) -> str:
     """Render the router's ``--models-preset`` INI from the config.
 
     Each model's active preset is served as ``[alias]``; every other preset as
@@ -85,13 +86,16 @@ def render_presets(cfg: Config, models: list[Path] | None = None,
     separator is `PRESET_SEP`). A ``[*]`` section carries ``sleep-idle-seconds`` from the
     gateway settings when it is above 0. Models are sorted by alias and presets by name, so
     the output is stable and diffable. Models whose file no longer exists are skipped, and so
-    is any preset the INI format cannot hold (see `problems`).
+    is any preset the INI format cannot hold (see `problems`), and any model `blocked` names
+    (a ``; skipped`` comment in the file keeps it from looking like it vanished).
 
     Args:
         cfg: Config with the models, presets and gateway settings.
         models: Render only these model files; None renders every model with presets.
-        problems: When given, receives one line per skipped preset that could not be written
-            (e.g. an extra_args token with no flag). Missing model files are not problems.
+        problems: When given, receives one line per skipped preset or blocked model.
+            Missing model files are not problems.
+        blocked: Model path -> reason the build cannot load it (e.g. an architecture it does
+            not support); those models are left out of the INI.
 
     Returns:
         The INI text.
@@ -104,6 +108,12 @@ def render_presets(cfg: Config, models: list[Path] | None = None,
         blocks.append(f"[*]\nsleep-idle-seconds = {cfg.gateway.sleep_idle}\n")
     seen: set[str] = set()
     for alias, path, ent in sorted(found):
+        if blocked and path in blocked:
+            line = f"skipped [{alias}]: {blocked[path]}"
+            blocks.append(f"; {line}\n")
+            if problems is not None:
+                problems.append(line)
+            continue
         active = ent.active if ent.active in ent.presets else sorted(ent.presets)[0]
         order = [active] + sorted(n for n in ent.presets if n != active)
         for pname in order:
@@ -310,6 +320,10 @@ class Gateway:
         sleep: Sleep function used while settling (injectable).
         read_only: Never touch ``gateway.json``: a dead gateway's state is reported as "not
             running" but not deleted (for commands that only look, like ``llamactl ps``).
+        learn: Called with a log file when the router exits right away, so an
+            ``unknown model architecture`` line can be remembered (or None).
+        blocked: Returns model path -> reason the build cannot load it; those models are left
+            out of the preset INI (or None).
 
     Attributes:
         host_override: Listen address for the next `start` instead of the configured one (never
@@ -318,13 +332,17 @@ class Gateway:
 
     def __init__(self, cfg: Config, popen: Callable[..., Any] = subprocess.Popen,
                  http: Callable[..., Any] = httpx.Client, settle: float = SETTLE_SECONDS,
-                 sleep: Callable[[float], None] = time.sleep, read_only: bool = False) -> None:
+                 sleep: Callable[[float], None] = time.sleep, read_only: bool = False,
+                 learn: Callable[[Path], None] | None = None,
+                 blocked: Callable[[], dict[str, str]] | None = None) -> None:
         self.read_only = read_only
         self.cfg = cfg
         self._popen = popen
         self._http = http
         self._settle = settle
         self._sleep = sleep
+        self._learn = learn
+        self._blocked = blocked
         self.problems: list[str] = []
         self.host_override: str | None = None
 
@@ -383,7 +401,8 @@ class Gateway:
             The path of the file.
         """
         self.problems = []
-        text = render_presets(self.cfg, problems=self.problems)
+        text = render_presets(self.cfg, problems=self.problems,
+                              blocked=self._blocked() if self._blocked else None)
         PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
         PRESETS_FILE.write_text(text)
         return PRESETS_FILE
@@ -424,6 +443,8 @@ class Gateway:
             self._sleep(0.1)
             waited += 0.1
         if self._settle > 0 and not pid_alive(proc.pid):
+            if self._learn is not None:
+                self._learn(log)
             raise GatewayError(f"the gateway exited at once: {log_reason(log)} (log: {log})")
         st = GatewayState(proc.pid, self.listen_url, str(log), time.time(), self.host)
         st.save()

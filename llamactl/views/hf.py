@@ -16,6 +16,7 @@ from .. import discover, hf
 from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import GGUFError, read_model_info
 from ..intents import by_key
+from ..screens.confirm import ConfirmScreen
 from ..screens.prompt import PromptScreen
 from .base import BaseView
 
@@ -54,6 +55,8 @@ class HFView(BaseView):
         self.files: list[dict] = []              # as listed by hf.list_gguf, in table order
         self.fits: list[discover.FileFit] = []   # the same files, judged and sorted
         self.repo = ""
+        self._repo_blocked = ""                # why the selected repo's arch is blocked, or ""
+        self._blocked: dict[str, str] = {}     # repo id -> blocking reason, filled in fill_repos
         self._shown_host: tuple = ()
         self.cancel_ev = threading.Event()
         self.downloading = False
@@ -142,11 +145,20 @@ class HFView(BaseView):
 
     def fill_repos(self) -> None:
         t = self.query_one("#repos", DataTable)
+        a = self.app
         t.clear()
         for r in self.repos:
             g = r.get("gguf") or {}
+            arch = g.get("architecture", "")
+            s = a.support.check(arch, a.build) if arch else None
+            arch_cell: str | Text = arch
+            if s is not None and s.blocks:
+                self._blocked[r["id"]] = s.reason()
+                arch_cell = Text(f"{arch} ⚠ {s.label()}", style="red")
+            else:
+                self._blocked.pop(r["id"], None)
             t.add_row(r["id"] + (" [gated]" if r.get("gated") else ""),
-                      params_str(g.get("total")), g.get("architecture", ""),
+                      params_str(g.get("total")), arch_cell,
                       f"{g['context_length']:,}" if g.get("context_length") else "",
                       f"{r.get('downloads', 0):,}", r.get("likes", 0),
                       r.get("lastModified", "")[:10])
@@ -162,10 +174,21 @@ class HFView(BaseView):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "repos" and self.repos:
             self.repo = self.repos[event.cursor_row]["id"]
+            self._repo_blocked = self._blocked.get(self.repo, "")
             self.refresh_status(f"Listing files of {self.repo}...")
             self.load_files(self.repo)
         elif event.data_table.id == "files" and self.files:
-            self.start_download(self.files[event.cursor_row]["path"])
+            path = self.files[event.cursor_row]["path"]
+            if not self._repo_blocked:
+                return self.start_download(path)
+
+            def done(ok: bool | None) -> None:
+                """Download the file after the user confirmed the blocked architecture."""
+                if ok:
+                    self.start_download(path)
+
+            self.app.push_screen(
+                ConfirmScreen(f"{self.repo}: {self._repo_blocked}\nDownload anyway?"), done)
 
     @work(thread=True, exclusive=True, group="hffiles")
     def load_files(self, repo: str) -> None:

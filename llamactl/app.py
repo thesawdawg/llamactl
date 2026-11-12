@@ -40,6 +40,7 @@ from .serving import (GW_STARTING, GW_STOPPING, Health, ServingSnapshot, gateway
 from .sessions import Session, SessionStore
 from .suggest import (ACT_DISCOVER, ACT_MODELS, ACT_SETTINGS, ACT_START_GATEWAY, ACT_TUNE,
                       Suggestion, binary_found)
+from .support import SupportChecker
 from .tuner import Runner, ServerRunner
 from .views.base import BaseView
 from .views.hf import HFView
@@ -104,6 +105,7 @@ class LlamaCtl(App):
         health: Returns "ready", "loading" or "down" for a server URL.
         probe: Process usage probe; consecutive serving polls give the CPU deltas.
         which: ``shutil.which`` compatible lookup the first-run setup uses to find llama-server.
+        support: Architecture support checker (one shared instance; or None to make one).
     """
 
     TITLE = "llamactl"
@@ -137,16 +139,19 @@ class LlamaCtl(App):
                  runner_factory: Callable[[], Runner] | None = None,
                  build: Callable[[], str] | None = None, health: Health = http_health,
                  probe: usage_mod.UsageProbe | None = None,
-                 which: Callable[[str], str | None] = shutil.which) -> None:
+                 which: Callable[[str], str | None] = shutil.which,
+                 support: SupportChecker | None = None) -> None:
         super().__init__()
         self.cfg = cfg or Config.load()
         self.calibration = calibration or Calibration.load()
         self.probe = probe or usage_mod.UsageProbe()
         self.store = store or SessionStore()
-        self.gateway = gateway or Gateway(self.cfg)
+        self.support = support or SupportChecker(self.cfg.bin_dir)
+        self.gateway = gateway or Gateway(self.cfg, learn=self._learn_log,
+                                          blocked=self.blocked_map)
         self.info_cache = info_cache or ModelInfoCache()
         self.runner_factory: Callable[[], Runner] = runner_factory or (
-            lambda: ServerRunner(self.cfg))
+            lambda: ServerRunner(self.cfg, support=self.support))
         self._build_fn = build or (lambda: ServerRunner(self.cfg).build())
         self.health = health
         self.which = which
@@ -199,6 +204,7 @@ class LlamaCtl(App):
         self.set_interval(SERVING_POLL, self._serving_tick)
         self.rescan()
         self.detect_build()
+        self.refresh_upstream()
         self.refresh_serving()
         self.views["home"].on_activate()
         if self.cfg.gateway.autostart:
@@ -540,6 +546,43 @@ class LlamaCtl(App):
         for v in self.views.values():
             v.on_presets_changed(())
 
+    # ------------------------------------------------------------------ architecture support
+
+    def refresh_upstream(self) -> None:
+        """Refresh the llama.cpp master architecture list (worker, then re-plan)."""
+        self.run_bg(self.support.refresh_upstream, label="Checking llama.cpp architectures",
+                    group="upstream", exclusive=True, done=self._upstream_ready, quiet=True)
+
+    def _upstream_ready(self, _ok: bool) -> None:
+        """The upstream list is current (or unreachable): re-plan and refresh views."""
+        for v in self.views.values():
+            v.on_config_changed()
+
+    def blocked_map(self) -> dict[str, str]:
+        """Model path -> reason the build cannot load it, for the gateway's preset INI.
+
+        Returns:
+            A map with an entry per scanned model whose architecture support check blocks it.
+        """
+        out: dict[str, str] = {}
+        for path, info in self.infos.items():
+            s = self.support.check(info.architecture, self.build)
+            if s.blocks:
+                out[path] = s.reason()
+        return out
+
+    def _learn_log(self, log: Path) -> None:
+        """Record an ``unknown model architecture`` line of a failed load's log.
+
+        Args:
+            log: The failed server's log file.
+        """
+        try:
+            text = log.read_text(errors="replace")
+        except OSError:
+            return
+        self.support.learn(text, self.build)
+
     # ------------------------------------------------------------------ serving state
 
     def _serving_tick(self) -> None:
@@ -645,7 +688,7 @@ class LlamaCtl(App):
 
         def work() -> tuple[bool, str, str]:
             with self._gw_lock:
-                st, started = actions.ensure_gateway(self.gateway)
+                st, started = actions.ensure_gateway(self.gateway, learn=self._learn_log)
             host = st.host or self.cfg.gateway.host
             return started, host, ", ".join(network.client_urls_for(st.url, host))
 
@@ -698,7 +741,8 @@ class LlamaCtl(App):
             t0 = time.monotonic()
             actions.wait_loaded(
                 self.gateway, name, tuner.health_timeout(size) if size else 300.0,
-                tick=lambda: self.ui(self.say, f"Loading {name}... {time.monotonic() - t0:.0f} s"))
+                tick=lambda: self.ui(self.say, f"Loading {name}... {time.monotonic() - t0:.0f} s"),
+                learn=self._learn_log)
             return name
 
         self.run_bg(work, label=f"Loading {name}", group="load", done=self._loaded,
@@ -757,6 +801,8 @@ class LlamaCtl(App):
         if not binary_found(self.cfg):
             return self.fail(f"llama-server not found in {self.cfg.bin_dir}; set the llama.cpp "
                              "folder in Settings")
+        if (s := self.support.check(info.architecture, self.build)).blocks:
+            return self.fail(f"cannot serve {Path(path).stem}: {s.reason()}")
         try:
             chosen = actions.pick_preset(
                 self.cfg, info, self.host, self.calibration, intent_key,
@@ -788,12 +834,13 @@ class LlamaCtl(App):
         def work() -> str:
             with self._gw_lock:
                 name = actions.serve_gateway(
-                    self.cfg, self.gateway, path, preset,
+                    self.cfg, self.gateway, path, preset, learn=self._learn_log,
                     tick=lambda: self.ui(self.say, "Starting the gateway..."))
             self.ui(self.refresh_serving)
             t0 = time.monotonic()
-            actions.wait_loaded(self.gateway, name, timeout, tick=lambda: self.ui(
-                self.say, f"Loading {name}... {time.monotonic() - t0:.0f} s"))
+            actions.wait_loaded(self.gateway, name, timeout, learn=self._learn_log,
+                                tick=lambda: self.ui(
+                                    self.say, f"Loading {name}... {time.monotonic() - t0:.0f} s"))
             return name
 
         self.run_bg(work, label=f"Serving {self.alias_of(path)}", group="serve",
@@ -808,8 +855,10 @@ class LlamaCtl(App):
                 raise ActionError(str(e)) from None
             self.ui(self.refresh_serving)
             t0 = time.monotonic()
-            actions.wait_server_ready(session, self.health, timeout, tick=lambda: self.ui(
-                self.say, f"Loading {session.name}... {time.monotonic() - t0:.0f} s"))
+            actions.wait_server_ready(session, self.health, timeout, learn=self._learn_log,
+                                      tick=lambda: self.ui(
+                                          self.say, f"Loading {session.name}... "
+                                          f"{time.monotonic() - t0:.0f} s"))
             return f"{session.name} is ready at {network.primary_url(session.urls)}", session
 
         def done(result: tuple[str, Session]) -> None:
@@ -899,6 +948,8 @@ class LlamaCtl(App):
         if not binary_found(self.cfg):
             return self.fail(f"llama-server not found in {self.cfg.bin_dir}; set the llama.cpp "
                              "folder in Settings")
+        if (s := self.support.check(info.architecture, self.build)).blocks:
+            return self.fail(f"cannot tune {Path(path).stem}: {s.reason()}")
         try:
             intent = actions.choose_intent(intent_key, self.cfg.default_intent, info)
         except LookupError as e:
@@ -923,7 +974,9 @@ class LlamaCtl(App):
             info = self.infos.get(key) or self.read_header(path)
             if info is None:
                 raise ActionError(f"cannot read the GGUF header of {path.name}")
-            return info, planner.plan_all(info, host, cfg.default_profile, cfg.headroom_pct, cal)
+            return info, planner.plan_all(info, host, cfg.default_profile, cfg.headroom_pct, cal,
+                                          support=self.support.check(info.architecture,
+                                                                     self.build))
 
         self.run_bg(work, label=f"Planning {path.stem}", group="new-model",
                     done=lambda result: self._pick_for_new_model(path, *result))

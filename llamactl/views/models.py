@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.timer import Timer
 from textual.widgets import DataTable, Static
 
-from .. import hf, planner
+from .. import hf, planner, support
 from ..command import build_command, command_string
 from ..config import Preset
 from ..fmt import FITS_STYLE, human, params_str
@@ -48,8 +48,11 @@ def best_text(plans: dict[str, Plan] | None, readable: bool,
     if plans is None:
         return Text("...", style="dim")
     b = best_for(plans)
-    v = (planner.verdict_label(b.verdict, plans[b.keys[0]].profile, info)
-         if b.keys and info else b.verdict)
+    first = plans[b.keys[0]] if b.keys else None
+    v = (planner.verdict_label(b.verdict, first.profile, info, first.support)
+         if first is not None and info else b.verdict)
+    if b.verdict == planner.VERDICT_UNSUPPORTED:
+        return Text(v, style=FITS_STYLE.get(v, "red"))
     return Text(b.text() if b.keys else "-", style=FITS_STYLE.get(v, ""))
 
 
@@ -103,6 +106,8 @@ class ModelsView(BaseView):
         Binding("delete", "delete_preset", "Delete preset"),
         Binding("D", "edit_default", "Defaults"),
         Binding("g", "guide", "MoE guide"),
+        Binding("c", "copy_rebuild", "Copy rebuild cmds", show=False),
+        Binding("w", "load_guide", "Won't load?"),
     ]
     # The -narrow rules key off a class of the screen (an ancestor), so this CSS has to
     # stay unscoped.
@@ -303,7 +308,9 @@ class ModelsView(BaseView):
             return
 
         def work() -> dict[str, dict[str, Plan]]:
-            return {p: planner.plan_all(i, host, base, pct, cal) for p, i in infos.items()}
+            return {p: planner.plan_all(i, host, base, pct, cal,
+                                        support=a.support.check(i.architecture, a.build))
+                    for p, i in infos.items()}
 
         a.run_bg(work, label="Planning models", group="plan", exclusive=True,
                  done=self._plans_ready, quiet=True)
@@ -403,7 +410,12 @@ class ModelsView(BaseView):
             ram = (f"; experts {human(sum(info.expert_bytes))} of {human(info.size)} "
                    "can live in RAM" if info.expert_bytes else "")
             t.append(f"\nMoE: {info.expert_count} experts{used}{ram}")
-        if ent is None or not ent.presets:
+        s = a.support.check(info.architecture, a.build)
+        if s.blocks:
+            t.append(f"\n{s.reason()}", style="red")
+            if s.status == support.Support.UPDATE:
+                t.append(f"\n{support.rebuild_commands(a.cfg.bin_dir)}  (c copies)", style="dim")
+        elif ent is None or not ent.presets:
             t.append("\nNo preset yet: Enter picks what it is for and serves it; t tunes it.",
                      style="yellow")
         return t
@@ -421,7 +433,8 @@ class ModelsView(BaseView):
         info = a.infos.get(model)
         panel.display = True
         panel.update_budget(plan.budget, a.host, a.cfg.headroom_pct, expert_ram=plan.expert_ram,
-                            verdict_text=(planner.verdict_label(plan.verdict, plan.profile, info)
+                            verdict_text=(planner.verdict_label(plan.verdict, plan.profile, info,
+                                                                plan.support)
                                           if info else plan.verdict))
         self.query_one("#m_warnings", Static).update(
             Text("\n".join(f"! {w}" for w in plan.warnings), style="yellow"))
@@ -522,7 +535,8 @@ class ModelsView(BaseView):
         model, info, key = got
         a = self.app
         screen = PlanScreen(a.cfg, model, a.alias_of(model), info, a.host, by_key[key],
-                            a.calibration)
+                            a.calibration,
+                            support=a.support.check(info.architecture, a.build))
 
         def done(result: str | None) -> None:
             if result == SAVED:
@@ -545,6 +559,24 @@ class ModelsView(BaseView):
     def action_guide(self) -> None:
         """Open the MoE guide."""
         self.app.push_screen(GuideScreen())
+
+    def action_load_guide(self) -> None:
+        """Open the "When a model will not load" help page."""
+        from ..guide import noload_guide
+        self.app.push_screen(GuideScreen(noload_guide(
+            support.rebuild_commands(self.app.cfg.bin_dir))))
+
+    def action_copy_rebuild(self) -> None:
+        """Copy the llama.cpp rebuild commands of the highlighted model (update llama.cpp)."""
+        model = self.selected_model()
+        info = self.app.infos.get(model or "")
+        s = (self.app.support.check(info.architecture, self.app.build)
+             if info is not None else None)
+        if s is None or s.status != support.Support.UPDATE:
+            return self.say("No rebuild commands for this model.")
+        cmds = support.rebuild_commands(self.app.cfg.bin_dir)
+        self.app.copy_to_clipboard(cmds)
+        self.say(f"Copied: {cmds}")
 
     def edit(self, model: str, key: str) -> None:
         """Open the preset editor for a model's preset named `key`.

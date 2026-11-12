@@ -12,6 +12,7 @@ from .config import ESTIMATED, Config
 from .gateway import GatewayStatus
 from .gguf import ModelInfo
 from .library import aliases_for
+from .support import ArchSupport, Support
 
 # What choosing a suggestion does (the app maps these to a view switch or a flow).
 ACT_SETTINGS, ACT_DISCOVER, ACT_MODELS = "settings", "discover", "models"
@@ -48,16 +49,17 @@ def binary_found(cfg: Config) -> bool:
 
 def next_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
                calibration: Calibration, status: GatewayStatus | None,
-               build: str) -> list[Suggestion]:
+               build: str, support: dict[str, ArchSupport] | None = None) -> list[Suggestion]:
     """What the user should probably do next, most urgent first.
 
     Rules, in this order: llama-server missing (Settings); no model files (Discover); models
-    without any preset (Models); estimated active presets of a MoE model with experts in
-    RAM (tune the split); other active presets that are only estimated, never tuned (tune);
-    tuned presets gone stale because the model file or the llama.cpp build changed (re-tune);
-    the gateway stopped while presets exist (start it). Tuning and starting are not suggested
-    while llama-server is missing. Models whose header could not be read are ignored by the
-    tuning rules.
+    needing a newer llama.cpp or one it cannot run (Models); models without any preset
+    (Models); estimated active presets of a MoE model with experts in RAM (tune the split);
+    other active presets that are only estimated, never tuned (tune); tuned presets gone
+    stale because the model file or the llama.cpp build changed (re-tune); the gateway
+    stopped while presets exist (start it). Tuning and starting are not suggested while
+    llama-server is missing. Models whose header could not be read are ignored by the tuning
+    rules, and blocked models are ignored by the tuning rules and the start-gateway count.
 
     Args:
         cfg: Config holding the presets.
@@ -66,6 +68,7 @@ def next_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
         calibration: Measured trials, used to tell whether a tuned preset is stale.
         status: Gateway status, or None before the first poll.
         build: The llama-server version string now, "" when unknown.
+        support: Architecture support check by model path, or None when not computed.
 
     Returns:
         The suggestions; empty when there is nothing to do.
@@ -82,13 +85,30 @@ def next_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
                               ACT_DISCOVER))
         return out
     aliases = aliases_for(models, cfg)
+    blocked: set[str] = set()
+    updates, refused = [], []
+    for m in models:
+        s = (support or {}).get(str(m))
+        if s is None or not s.blocks:
+            continue
+        blocked.add(str(m))
+        (updates if s.status == Support.UPDATE else refused).append((m, s))
+    if updates:
+        n = len(updates)
+        out.append(Suggestion(
+            "arch-update", f"{n} model{'s' * (n != 1)} need{'s' * (n == 1)} a newer llama.cpp: "
+            "see Models for the rebuild commands", ACT_MODELS, str(updates[0][0])))
+    for m, s in refused[:MAX_PER_RULE]:
+        text = (f"{aliases[m]} uses architecture '{s.arch}' that llama.cpp does not run"
+                if s.status == Support.UNSUPPORTED else f"{aliases[m]}: {s.reason()}")
+        out.append(Suggestion(f"arch-unsupported:{m}", text, ACT_MODELS, str(m)))
     bare = [m for m in models if not cfg.has_profile(str(m))]
     for m in bare[:MAX_PER_RULE]:
         out.append(Suggestion(f"no-presets:{m}", f"{aliases[m]} has no preset yet: pick what it "
                               "is for in Models (Enter)", ACT_MODELS, str(m)))
     if found:
-        out += _tuning_steps(cfg, models, infos, calibration, build, aliases)
-    configured = [m for m in models if cfg.has_profile(str(m))]
+        out += _tuning_steps(cfg, models, infos, calibration, build, aliases, blocked)
+    configured = [m for m in models if cfg.has_profile(str(m)) and str(m) not in blocked]
     if found and configured and status is not None and not status.running:
         n = len(configured)
         out.append(Suggestion(
@@ -98,15 +118,17 @@ def next_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
 
 
 def _tuning_steps(cfg: Config, models: list[Path], infos: dict[str, ModelInfo],
-                  calibration: Calibration, build: str, aliases: dict[Path, str]) -> list[Suggestion]:
+                  calibration: Calibration, build: str, aliases: dict[Path, str],
+                  blocked: set[str]) -> list[Suggestion]:
     """Tune suggestions: MoE expert splits first, then other estimated active presets, then
-    re-tune ones for stale tuned presets."""
+    re-tune ones for stale tuned presets. Blocked models are skipped: the build cannot load
+    them, so there is nothing to tune."""
     moe: list[Suggestion] = []
     untuned: list[Suggestion] = []
     stale: list[Suggestion] = []
     for m in models:
         ent = cfg.models.get(str(m))
-        if ent is None or str(m) not in infos:
+        if ent is None or str(m) not in infos or str(m) in blocked:
             continue
         info = infos[str(m)]
         active = ent.presets.get(ent.active)

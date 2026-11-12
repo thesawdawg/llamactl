@@ -14,12 +14,13 @@ from .config import ModelEntry, Preset
 from .gguf import ModelInfo
 from .hardware import Host
 from .intents import INTENTS, by_key
-from .planner import (VERDICT_CPU, VERDICT_GPU, VERDICT_NO, VERDICT_SPILL, Plan,
-                      verdict_label)
+from .planner import (VERDICT_CPU, VERDICT_GPU, VERDICT_NO, VERDICT_SPILL,
+                      VERDICT_UNSUPPORTED, Plan, verdict_label)
 
 NO_PRESET = "New"            # shown for a model with no preset at all
 MAX_BEST = 4                 # intents named in the "Best for" cell before "+N"
-_RANK = {VERDICT_GPU: 0, VERDICT_SPILL: 1, VERDICT_CPU: 2, VERDICT_NO: 3}
+_RANK = {VERDICT_GPU: 0, VERDICT_SPILL: 1, VERDICT_CPU: 2, VERDICT_NO: 3,
+         VERDICT_UNSUPPORTED: 4}
 
 
 @dataclass(frozen=True)
@@ -202,7 +203,7 @@ def intent_rows(plans: dict[str, Plan], info: ModelInfo, entry: ModelEntry | Non
                  if info.expert_count > 0 and m is not None and m.ok else "")
         rows.append(IntentRow(
             intent.key, intent.label, intent.description,
-            verdict_label(plan.verdict, plan.profile, info), plan.ctx_per_slot,
+            verdict_label(plan.verdict, plan.profile, info, plan.support), plan.ctx_per_slot,
             intent.slots, plan.profile.cache_type_k, plan.budget.total(), usable,
             speed_of(preset), top_reason(plan), plan.warnings, preset.source if preset else "",
             bool(entry and preset and entry.active == intent.key),

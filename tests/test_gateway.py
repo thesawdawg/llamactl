@@ -601,3 +601,15 @@ def test_write_presets_collects_problems(env) -> None:
     env.cfg.models[str(env.qwen)].presets["agent"].profile = Profile()
     env.gw.write_presets()
     assert env.gw.problems == []
+
+
+def test_render_presets_skips_a_blocked_model_with_the_reason(two_models) -> None:
+    """A blocked model gets a ``; skipped`` comment, no section, and a problem line."""
+    cfg, qwen, llama = two_models
+    why = "architecture 'clef' is not in your llama.cpp (b1) but is in llama.cpp master"
+    problems: list[str] = []
+    ini = render_presets(cfg, problems=problems, blocked={str(qwen): why})
+    sections = [ln for ln in ini.splitlines() if ln.startswith("[")]
+    assert "[qwen3-8b]" not in sections and "[llama-3.2-1b]" in sections
+    assert f"; skipped [qwen3-8b]: {why}" in ini
+    assert problems == [f"skipped [qwen3-8b]: {why}"]

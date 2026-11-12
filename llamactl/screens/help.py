@@ -52,7 +52,11 @@ class HelpPanel(ModalScreen[None]):
 
 
 class GuideScreen(ModalScreen[None]):
-    """Modal with the MoE guide: scrollable text, Esc closes."""
+    """Modal with a guide page (the MoE guide by default): scrollable text, Esc closes.
+
+    Args:
+        text: The guide text to show.
+    """
 
     BINDINGS = [Binding("escape", "close", "Close")]
     CSS = """
@@ -62,9 +66,13 @@ class GuideScreen(ModalScreen[None]):
     GuideScreen .meta { color: $text-muted; }
     """
 
+    def __init__(self, text: str = MOE_GUIDE) -> None:
+        super().__init__()
+        self.text = text
+
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="guide"):
-            yield Label(MOE_GUIDE)
+            yield Label(self.text)
             yield Label("Esc to close", classes="meta")
 
     def action_close(self) -> None:

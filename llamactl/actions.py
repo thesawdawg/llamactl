@@ -23,6 +23,7 @@ from .hardware import Host
 from .intents import Intent
 from .planner import Plan
 from .sessions import Session
+from .support import ArchSupport
 
 GATEWAY_START_TIMEOUT = 30.0     # seconds for a started router to answer /health
 POLL_INTERVAL = 1.0              # seconds between checks while waiting
@@ -66,7 +67,8 @@ def choose_intent(key: str | None, default: str, info: ModelInfo) -> Intent:
 
 
 def plan_for(cfg: Config, info: ModelInfo, host: Host, intent: Intent,
-             calibration: Calibration | None = None) -> Plan:
+             calibration: Calibration | None = None,
+             support: ArchSupport | None = None) -> Plan:
     """Plan an intent with the config's default profile, headroom and the measured calibration.
 
     Args:
@@ -75,11 +77,14 @@ def plan_for(cfg: Config, info: ModelInfo, host: Host, intent: Intent,
         host: Host snapshot.
         intent: What the model is for.
         calibration: Measured data, or None.
+        support: The architecture support check of the model; a blocking one gives
+            ``VERDICT_UNSUPPORTED``.
 
     Returns:
         The plan.
     """
-    return planner.plan(intent, info, host, cfg.default_profile, cfg.headroom_pct, calibration)
+    return planner.plan(intent, info, host, cfg.default_profile, cfg.headroom_pct, calibration,
+                        support)
 
 
 def store_plan(cfg: Config, model: str, plan: Plan, *, activate: bool = False,
@@ -257,7 +262,8 @@ def bind_conflict(gw: Gateway, host: str) -> str:
 
 def ensure_gateway(gw: Gateway, *, timeout: float = GATEWAY_START_TIMEOUT,
                    clock: Clock = time.monotonic, sleep: Sleep = time.sleep,
-                   tick: Tick | None = None, host: str | None = None) -> tuple[GatewayState, bool]:
+                   tick: Tick | None = None, host: str | None = None,
+                   learn: Callable[[Path], None] | None = None) -> tuple[GatewayState, bool]:
     """Make sure the gateway runs and answers ``/health``, starting it when needed.
 
     Args:
@@ -267,6 +273,8 @@ def ensure_gateway(gw: Gateway, *, timeout: float = GATEWAY_START_TIMEOUT,
         sleep: Sleep function.
         tick: Progress callback, called once per pause.
         host: Listen address for this start only (never saved); None uses the configured one.
+        learn: Called with the gateway's log file when it exits, so an
+            ``unknown model architecture`` line can be remembered (or None).
 
     Returns:
         (state, started): `started` is False when it was already running.
@@ -284,6 +292,8 @@ def ensure_gateway(gw: Gateway, *, timeout: float = GATEWAY_START_TIMEOUT,
 
     def healthy() -> bool:
         if not gw.running:
+            if learn is not None:
+                learn(Path(st.log))
             raise GatewayError(f"the gateway exited: {log_reason(Path(st.log))} (log: {st.log})")
         return gw.status().healthy
 
@@ -295,7 +305,8 @@ def ensure_gateway(gw: Gateway, *, timeout: float = GATEWAY_START_TIMEOUT,
 
 def serve_gateway(cfg: Config, gw: Gateway, model: str, preset_name: str, *,
                   clock: Clock = time.monotonic, sleep: Sleep = time.sleep,
-                  tick: Tick | None = None, host: str | None = None) -> str:
+                  tick: Tick | None = None, host: str | None = None,
+                  learn: Callable[[Path], None] | None = None) -> str:
     """Get a preset loading in the gateway: write the presets, start it if needed, reload, load.
 
     Returns as soon as the router accepted the load request; use `wait_loaded` to wait for it.
@@ -310,6 +321,7 @@ def serve_gateway(cfg: Config, gw: Gateway, model: str, preset_name: str, *,
         sleep: Sleep function.
         tick: Progress callback while the gateway starts.
         host: Listen address for this start only (see `ensure_gateway`).
+        learn: Called with the gateway's log file when it exits (see `ensure_gateway`).
 
     Returns:
         The model id to request (``alias`` or ``alias@preset``).
@@ -320,7 +332,7 @@ def serve_gateway(cfg: Config, gw: Gateway, model: str, preset_name: str, *,
             refuses the load.
     """
     name = served_name(cfg, model, preset_name)
-    ensure_gateway(gw, clock=clock, sleep=sleep, tick=tick, host=host)
+    ensure_gateway(gw, clock=clock, sleep=sleep, tick=tick, host=host, learn=learn)
     models = gw.reload()
     target = next((m for m in models if m.name == name), None)
     if target is None:
@@ -334,7 +346,8 @@ def serve_gateway(cfg: Config, gw: Gateway, model: str, preset_name: str, *,
 
 def wait_loaded(gw: Gateway, name: str, timeout: float, *, clock: Clock = time.monotonic,
                 sleep: Sleep = time.sleep, tick: Tick | None = None,
-                interval: float = POLL_INTERVAL) -> GatewayModel:
+                interval: float = POLL_INTERVAL,
+                learn: Callable[[Path], None] | None = None) -> GatewayModel:
     """Wait until the router reports a model as loaded (or sleeping, which wakes on a request).
 
     Args:
@@ -345,6 +358,8 @@ def wait_loaded(gw: Gateway, name: str, timeout: float, *, clock: Clock = time.m
         sleep: Sleep function.
         tick: Progress callback, called once per pause.
         interval: Seconds between checks.
+        learn: Called with the gateway's log file when the model fails, so an
+            ``unknown model architecture`` line can be remembered (or None).
 
     Returns:
         The model as the router last reported it.
@@ -364,6 +379,8 @@ def wait_loaded(gw: Gateway, name: str, timeout: float, *, clock: Clock = time.m
         if found.state == "failed":
             st = gw.state
             log = st.log if st else ""
+            if learn is not None and log:
+                learn(Path(log))
             code = f" (exit code {found.exit_code})" if found.exit_code is not None else ""
             why = log_reason(Path(log)) if log else "no log"
             raise GatewayError(f"'{name}' failed to load{code}: {why}"
@@ -410,7 +427,8 @@ def wait_unloaded(gw: Gateway, name: str, timeout: float, *, clock: Clock = time
 
 def wait_server_ready(session: Session, health: Callable[[str], str], timeout: float, *,
                       clock: Clock = time.monotonic, sleep: Sleep = time.sleep,
-                      tick: Tick | None = None, interval: float = 0.5) -> None:
+                      tick: Tick | None = None, interval: float = 0.5,
+                      learn: Callable[[Path], None] | None = None) -> None:
     """Wait until a standalone server answers ``/health`` with 200.
 
     Args:
@@ -421,6 +439,8 @@ def wait_server_ready(session: Session, health: Callable[[str], str], timeout: f
         sleep: Sleep function.
         tick: Progress callback, called once per pause.
         interval: Seconds between checks.
+        learn: Called with the server's log file when it exits, so an
+            ``unknown model architecture`` line can be remembered (or None).
 
     Raises:
         ActionError: When the process exits (with the last error line of its log) or
@@ -428,6 +448,8 @@ def wait_server_ready(session: Session, health: Callable[[str], str], timeout: f
     """
     def ready() -> bool:
         if not session.alive:
+            if learn is not None:
+                learn(Path(session.log))
             raise ActionError(f"the server exited: {log_reason(Path(session.log))} "
                               f"(log: {session.log})")
         return health(session.url) == "ready"

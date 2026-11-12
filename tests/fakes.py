@@ -14,6 +14,7 @@ from llamactl.gguf import ModelInfo
 from llamactl.hardware import Device, Host
 from llamactl.measure import Measurement
 from llamactl.sessions import Session
+from llamactl.support import ArchSupport, Support, unknown_arch
 
 URL = "http://127.0.0.1:8080"
 
@@ -328,3 +329,46 @@ async def wait_for(pilot, cond: Callable[[], bool], timeout: float = 10.0,
 def plain(widget) -> str:
     """The text a Static/Label currently shows."""
     return str(widget.render())
+
+
+class FakeSupport:
+    """Stands in for `SupportChecker` in tests: every architecture is OK unless scripted.
+
+    Args:
+        statuses: Architecture name -> `ArchSupport` to return for it (others check OK).
+    """
+
+    def __init__(self, statuses: dict[str, ArchSupport] | None = None) -> None:
+        self.statuses = statuses or {}
+        self.recorded: list[tuple[str, str]] = []
+        self.refreshed: list[bool] = []
+
+    def check(self, arch: str, build: str = "") -> ArchSupport:
+        """The scripted verdict of `arch`, or `ArchSupport(arch, OK, build)`."""
+        return self.statuses.get(arch, ArchSupport(arch, Support.OK, build))
+
+    def learned(self, build: str) -> frozenset[str]:
+        """No learned failures."""
+        return frozenset()
+
+    def record_failure(self, arch: str, build: str) -> None:
+        """Remember the call (no state file)."""
+        self.recorded.append((arch, build))
+
+    def learn(self, text: str, build: str) -> None:
+        """Record the architecture `text` names as unknown, like `SupportChecker.learn`."""
+        if arch := unknown_arch(text):
+            self.record_failure(arch, build)
+
+    def upstream_names(self) -> frozenset[str] | None:
+        """No upstream list."""
+        return None
+
+    def upstream_stale(self) -> bool:
+        """Always stale, so a refresh is tried when a check blocks."""
+        return True
+
+    def refresh_upstream(self, force: bool = False) -> bool:
+        """Pretend the upstream list is fresh (no network)."""
+        self.refreshed.append(force)
+        return True

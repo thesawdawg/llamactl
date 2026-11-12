@@ -22,6 +22,7 @@ from .intents import Intent, applicable
 from .measure import Measurement
 from .planner import Plan
 from .sessions import BASE_PORT, Session
+from .support import ArchSupport
 from .tuner import TrialEvent, TuneResult
 from .usage import Usage
 
@@ -121,7 +122,8 @@ def plan_summary(plan: Plan, slots: int, info: ModelInfo) -> dict:
         total bytes, warnings and MoE expert placement bytes.
     """
     return {"intent": plan.intent, "verdict": plan.verdict,
-            "verdict_label": planner.verdict_label(plan.verdict, plan.profile, info),
+            "verdict_label": planner.verdict_label(plan.verdict, plan.profile, info,
+                                                   plan.support),
             "ctx_per_slot": plan.ctx_per_slot,
             "slots": slots, "cache_type": plan.profile.cache_type_k,
             "needs": plan.budget.total(), "warnings": list(plan.warnings),
@@ -129,7 +131,8 @@ def plan_summary(plan: Plan, slots: int, info: ModelInfo) -> dict:
 
 
 def model_row(path: Path, alias: str, info: ModelInfo | None, error: str, cfg: Config,
-              host: Host, calibration: Calibration, build: str) -> dict:
+              host: Host, calibration: Calibration, build: str,
+              support: ArchSupport | None = None) -> dict:
     """One model of ``llamactl ls``.
 
     Args:
@@ -141,19 +144,23 @@ def model_row(path: Path, alias: str, info: ModelInfo | None, error: str, cfg: C
         host: Host snapshot.
         calibration: Measured data.
         build: Current llama-server build string.
+        support: The architecture support check of the model, or None.
 
     Returns:
         Dict with alias, path, size, quant, params, error, fits (one summary per applicable
-        intent) and presets.
+        intent), support (status/label/reason/arch of a blocking check, else None) and presets.
     """
     size = info.size if info else _size(path)
     fits: list[dict] = []
     if info is not None:
-        for intent, plan in _plans(cfg, info, host, calibration):
+        for intent, plan in _plans(cfg, info, host, calibration, support):
             fits.append(plan_summary(plan, intent.slots, info))
+    sup = ({"status": support.status.value, "label": support.label(),
+            "reason": support.reason(), "arch": support.arch}
+           if support is not None and support.blocks else None)
     return {"alias": alias, "path": str(path), "size": size, "quant": quant_of(path),
             "params": params_str(info.parameter_count) if info else "", "error": error,
-            "fits": fits,
+            "fits": fits, "support": sup,
             "presets": preset_rows(cfg.models.get(str(path)), path, calibration, build)}
 
 
@@ -165,15 +172,16 @@ def _size(path: Path) -> int:
         return 0
 
 
-def _plans(cfg: Config, info: ModelInfo, host: Host,
-           calibration: Calibration) -> list[tuple[Intent, Plan]]:
+def _plans(cfg: Config, info: ModelInfo, host: Host, calibration: Calibration,
+           support: ArchSupport | None = None) -> list[tuple[Intent, Plan]]:
     """Plans for every intent that applies to the model."""
-    return [(i, planner.plan(i, info, host, cfg.default_profile, cfg.headroom_pct, calibration))
+    return [(i, planner.plan(i, info, host, cfg.default_profile, cfg.headroom_pct, calibration,
+                             support))
             for i in applicable(info)]
 
 
 def plan_all_data(cfg: Config, path: Path, alias: str, info: ModelInfo, host: Host,
-                  calibration: Calibration) -> dict:
+                  calibration: Calibration, support: ArchSupport | None = None) -> dict:
     """Every applicable intent's plan side by side.
 
     Args:
@@ -183,13 +191,14 @@ def plan_all_data(cfg: Config, path: Path, alias: str, info: ModelInfo, host: Ho
         info: Model metadata.
         host: Host snapshot.
         calibration: Measured data.
+        support: The architecture support check of the model, or None.
 
     Returns:
         Dict with the model and a list of `plan_summary` dicts under "plans".
     """
     return {"model": _model(path, alias, info),
             "plans": [plan_summary(p, i.slots, info)
-                      for i, p in _plans(cfg, info, host, calibration)]}
+                      for i, p in _plans(cfg, info, host, calibration, support)]}
 
 
 def _model(path: Path, alias: str, info: ModelInfo) -> dict:
@@ -223,7 +232,7 @@ def plan_data(cfg: Config, path: Path, alias: str, info: ModelInfo, host: Host, 
         "intent": {"key": intent.key, "label": intent.label, "description": intent.description,
                    "ctx_min": planner.ctx_bounds(intent, info)[2], "slots": intent.slots},
         "verdict": plan.verdict,
-        "verdict_label": planner.verdict_label(plan.verdict, plan.profile, info),
+        "verdict_label": planner.verdict_label(plan.verdict, plan.profile, info, plan.support),
         "ctx_per_slot": plan.ctx_per_slot,
         "slots": intent.slots,
         "ctx_total": plan.profile.ctx_size,

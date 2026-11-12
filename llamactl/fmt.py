@@ -14,4 +14,5 @@ def params_str(n: int | None) -> str:
 
 # Rich style for Fits/verdict cells: GPU green, partial/CPU yellow, NO red.
 FITS_STYLE = {"GPU": "green", "GPU+CPU": "yellow", "GPU+experts": "cyan", "CPU": "yellow",
-              "NO": "red"}
+              "NO": "red", "update llama.cpp": "red", "unsupported": "red",
+              "not a text model": "red"}

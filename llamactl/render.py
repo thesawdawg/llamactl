@@ -15,7 +15,8 @@ GB = 1e9
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
 _VERDICT_COLOUR = {"GPU": "green", "GPU+CPU": "yellow", "GPU+experts": "cyan",
-                   "CPU": "yellow", "NO": "red"}
+                   "CPU": "yellow", "NO": "red", "update llama.cpp": "red",
+                   "unsupported": "red", "not a text model": "red"}
 _STATE_COLOUR = {"loaded": "green", "ready": "green", "sleeping": "cyan", "loading": "yellow",
                  "unloaded": "dim", "down": "red", "failed": "red"}
 
@@ -190,13 +191,13 @@ def render_hw(d: dict, style: Style) -> str:
 
 
 def _fit_cell(f: dict, style: Style) -> str:
-    """``chat GPU 16k`` for one intent summary (the verdict coloured)."""
-    return f"{f['intent']} {style.verdict(f['verdict'])} {ctx_str(f['ctx_per_slot'])}"
+    """``chat GPU 16k`` for one intent summary (the verdict label coloured)."""
+    return f"{f['intent']} {style.verdict(f['verdict_label'])} {ctx_str(f['ctx_per_slot'])}"
 
 
 def _fit_plain(f: dict) -> str:
     """Uncoloured `_fit_cell`, for width measuring."""
-    return f"{f['intent']} {f['verdict']} {ctx_str(f['ctx_per_slot'])}"
+    return f"{f['intent']} {f['verdict_label']} {ctx_str(f['ctx_per_slot'])}"
 
 
 def _preset_text(p: dict) -> str:
@@ -214,6 +215,14 @@ def render_ls(rows: list[dict], style: Style) -> str:
         size = gb(r["size"]) if r["size"] else "?"
         if r["error"]:
             body.append([r["alias"], size, r["quant"], "", (f"unreadable: {r['error']}", "red"), ""])
+            continue
+        if sup := r.get("support"):
+            # every fit is the same unsupported verdict: one cell says why, with the arch
+            plain = (f"{sup['label']} (architecture '{sup['arch']}')"
+                     if sup["status"] != "not_llm" else f"{sup['label']} ({sup['arch']})")
+            cell = _Painted(plain, style.verdict(plain)) if style.enabled else plain
+            body.append([r["alias"], size, r["quant"], r["params"], cell,
+                         ", ".join(_preset_text(p) for p in r["presets"]) or "-"])
             continue
         fits = "  ".join(_fit_plain(f) for f in r["fits"])
         cell: "str | tuple[str, str]" = fits

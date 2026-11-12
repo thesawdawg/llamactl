@@ -17,13 +17,13 @@ import sys
 import time
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable, Sequence, TextIO
+from typing import Any, Callable, Iterable, Sequence, TextIO
 
 from . import (actions, cfgedit, gateway as gateway_mod, hardware, intents, library, network,
-               render, report, tuner, usage as usage_mod)
+               render, report, support as support_mod, tuner, usage as usage_mod)
 from .usage import UsageProbe
 from .actions import ActionError
-from .calibration import TUNED, Calibration
+from .calibration import Calibration
 from .config import CONFIG_FILE, PRESET_SEP, Config
 from .gateway import Gateway, GatewayError
 from .gguf import GGUFError, ModelInfo, ModelInfoCache, read_model_info
@@ -74,6 +74,7 @@ class Services:
         runner_factory: Returns the `Runner` a tune measures with.
         build: Returns the llama-server version string.
         health: Returns "ready", "loading" or "down" for a server URL.
+        support: Architecture support checker for the configured build.
         probe: Process usage probe (for ``ps``).
         sleep: Sleep function.
         clock: Monotonic clock in seconds.
@@ -89,6 +90,7 @@ class Services:
                  runner_factory: Callable[[], Runner] | None = None,
                  build: Callable[[], str] | None = None,
                  health: Callable[[str], str] = http_health,
+                 support: support_mod.SupportChecker | None = None,
                  probe: UsageProbe | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic,
@@ -105,9 +107,10 @@ class Services:
         self._detect = detect or (lambda: hardware.detect(cfg.bin_dir))
         self._refresh = refresh or (lambda h: hardware.refresh(h, cfg.bin_dir))
         self._build_fn = build or (lambda: ServerRunner(cfg).build())
-        self._runner_factory = runner_factory or (lambda: ServerRunner(cfg))
+        self._runner_factory = runner_factory
         self._cache, self._calibration = cache, calibration
         self._gateway, self._store, self._probe = gateway, store, probe
+        self._support = support
         self._host: Host | None = None
         self._models: list[Path] | None = None
         self._build: str | None = None
@@ -132,8 +135,17 @@ class Services:
     def gateway(self) -> Gateway:
         """The gateway."""
         if self._gateway is None:
-            self._gateway = Gateway(self.cfg, read_only=self.read_only)
+            self._gateway = Gateway(self.cfg, read_only=self.read_only,
+                                    learn=self.learn_log, blocked=self.blocked_map)
         return self._gateway
+
+    @property
+    def support(self) -> support_mod.SupportChecker:
+        """The architecture support checker (never writes in read-only mode)."""
+        if self._support is None:
+            self._support = support_mod.SupportChecker(self.cfg.bin_dir,
+                                                       writable=not self.read_only)
+        return self._support
 
     @property
     def store(self) -> SessionStore:
@@ -151,6 +163,8 @@ class Services:
 
     def runner(self) -> Runner:
         """A new tune runner."""
+        if self._runner_factory is None:
+            return ServerRunner(self.cfg, support=self.support)
         return self._runner_factory()
 
     # -- hardware and models -----------------------------------------------------------
@@ -232,6 +246,35 @@ class Services:
         if self._build is None:
             self._build = self._build_fn() if self.binary_found() else ""
         return self._build
+
+    def learn_log(self, log: Path) -> None:
+        """Record an ``unknown model architecture`` failure from a log file (never raises).
+
+        Args:
+            log: Log of a failed llama.cpp process.
+        """
+        try:
+            text = log.read_text(errors="replace")
+        except OSError:
+            return
+        if arch := support_mod.unknown_arch(text):
+            self.support.record_failure(arch, self.build())
+
+    def blocked_map(self) -> dict[str, str]:
+        """Model path -> reason the configured build cannot load it (empty when all can).
+
+        Unreadable models are left out: their header holds the architecture name.
+        """
+        out: dict[str, str] = {}
+        for p in self.models():
+            try:
+                info = self.info(p)
+            except (GGUFError, OSError):
+                continue
+            s = self.support.check(info.architecture, self.build())
+            if s.blocks:
+                out[str(p)] = s.reason()
+        return out
 
     # -- output ------------------------------------------------------------------------
 
@@ -362,6 +405,24 @@ def _load_timeout(size: int) -> float:
     return tuner.health_timeout(size) if size else DEFAULT_LOAD_TIMEOUT
 
 
+def _blocked_reason(sv: Services, served: str) -> str:
+    """The reason the build cannot load the model behind a served name ("" when it can).
+
+    Args:
+        sv: Services.
+        served: Gateway model id (``alias`` or ``alias@preset``).
+    """
+    alias = served.split(PRESET_SEP, 1)[0]
+    path = next((p for p, ent in sv.cfg.models.items() if ent.alias == alias), None)
+    if path is None:
+        return ""
+    try:
+        info = sv.info(Path(path))
+    except (GGUFError, OSError):
+        return ""
+    return _support_check(sv, info).reason()
+
+
 def _serve_hint(sv: Services, urls: list[str], model: str | None, info: ModelInfo,
                 api_key: bool) -> None:
     """Print the endpoint(s), the model name to request and a curl example.
@@ -422,19 +483,55 @@ def cmd_hw(args: argparse.Namespace, sv: Services) -> int:
     return EXIT_OK
 
 
+def _support_check(sv: Services, info: ModelInfo) -> support_mod.ArchSupport:
+    """The architecture support verdict of a model for the configured build."""
+    return sv.support.check(info.architecture, sv.build())
+
+
+def _maybe_refresh(sv: Services, checks: Iterable[support_mod.ArchSupport]) -> bool:
+    """Fetch master's arch list when a check could change with it (never for all-ok runs).
+
+    A check only differs between ``update`` and ``unsupported`` (or is a learned failure);
+    when every model is OK/UNKNOWN the upstream list would not change anything, so a
+    read-only command stays offline. Best effort: a failed fetch keeps the cached list.
+
+    Args:
+        sv: Services.
+        checks: The support checks already made.
+
+    Returns:
+        True when a fetch was tried; callers re-check the non-ok models then.
+    """
+    if (any(s.status not in (support_mod.Support.OK, support_mod.Support.UNKNOWN)
+            for s in checks) and sv.support.upstream_stale()):
+        sv.support.refresh_upstream()
+        return True
+    return False
+
+
 def cmd_ls(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl ls``: every model with size, quant, plan per intent and presets."""
     cfg, host = sv.cfg, sv.host()
-    tuned = any(p.source == TUNED for e in cfg.models.values() for p in e.presets.values())
-    build = sv.build() if tuned else ""
+    build = sv.build()                      # one --version call: presets staleness and the check
     aliases, rows = sv.aliases(), []
+    infos: dict[Path, tuple[ModelInfo | None, str]] = {}
+    checks: dict[Path, support_mod.ArchSupport] = {}
     for path in sorted(sv.models(), key=lambda p: aliases[p]):
         try:
             info, error = sv.info(path), ""
         except GGUFError as e:
             info, error = None, str(e)
+        infos[path] = (info, error)
+        if info is not None:
+            checks[path] = _support_check(sv, info)
+    fetched = _maybe_refresh(sv, checks.values())
+    for path, (info, error) in infos.items():
+        s = checks.get(path)
+        if (fetched and s is not None
+                and s.status not in (support_mod.Support.OK, support_mod.Support.UNKNOWN)):
+            s = checks[path] = _support_check(sv, info)
         rows.append(report.model_row(path, aliases[path], info, error, cfg, host,
-                                     sv.calibration, build))
+                                     sv.calibration, build, s))
     if args.json:
         sv.emit(True, {"models": rows}, lambda d, s: "")
     else:
@@ -448,12 +545,15 @@ def cmd_plan(args: argparse.Namespace, sv: Services) -> int:
         raise UsageError("--save stores one intent's plan; combine it with --for, not --all")
     path, alias, info = _model_and_info(args, sv)
     cfg, host = sv.cfg, sv.host()
+    s = _support_check(sv, info)
+    if _maybe_refresh(sv, (s,)):
+        s = _support_check(sv, info)
     if args.all:
-        data = report.plan_all_data(cfg, path, alias, info, host, sv.calibration)
+        data = report.plan_all_data(cfg, path, alias, info, host, sv.calibration, support=s)
         sv.emit(args.json, data, render.render_plan_all)
         return EXIT_OK
     intent = _intent(args, sv, info)
-    plan = actions.plan_for(cfg, info, host, intent, sv.calibration)
+    plan = actions.plan_for(cfg, info, host, intent, sv.calibration, support=s)
     sv.emit(args.json, report.plan_data(cfg, path, alias, info, host, plan, intent),
             render.render_plan)
     if args.save:
@@ -465,6 +565,11 @@ def cmd_plan(args: argparse.Namespace, sv: Services) -> int:
 def cmd_tune(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl tune MODEL``: measured search, saves the tuned preset and reloads the gateway."""
     path, alias, info = _model_and_info(args, sv)
+    s = _support_check(sv, info)
+    if _maybe_refresh(sv, (s,)):
+        s = _support_check(sv, info)
+    if s.blocks:
+        raise CliError(f"cannot tune {alias}: {s.reason()}")
     intent = _intent(args, sv, info)
     if refusal := actions.tune_refusal(sv.cfg, str(path), intent.key):
         raise CliError(f"cannot tune {alias}: {refusal}")
@@ -490,6 +595,8 @@ def cmd_tune(args: argparse.Namespace, sv: Services) -> int:
 def cmd_serve(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl serve MODEL``: ensure a preset, then load it in the gateway or run standalone."""
     path, alias, info = _model_and_info(args, sv)
+    if (s := _support_check(sv, info)).blocks:
+        raise CliError(f"cannot serve {alias}: {s.reason()}")
     if args.intent is not None:
         _intent(args, sv, info)
     if args.port is not None and not args.standalone:
@@ -511,11 +618,12 @@ def cmd_serve(args: argparse.Namespace, sv: Services) -> int:
         return _serve_standalone(args, sv, path, chosen.name, info, timeout, host)
     with Waiting(sv, "starting the gateway") as w:
         name = actions.serve_gateway(cfg, sv.gateway, str(path), chosen.name, clock=sv.clock,
-                                     sleep=sv.sleep, tick=w.tick, host=host)
+                                     sleep=sv.sleep, tick=w.tick, host=host,
+                                     learn=sv.learn_log)
     if not args.no_wait:
         with Waiting(sv, f"loading {name}") as w:
             actions.wait_loaded(sv.gateway, name, timeout, clock=sv.clock, sleep=sv.sleep,
-                                tick=w.tick)
+                                tick=w.tick, learn=sv.learn_log)
     sv.say(f"{'serving' if not args.no_wait else 'loading'} {name}")
     _serve_hint(sv, actions.gateway_urls(sv.gateway, host), name, info, bool(cfg.gateway.api_key))
     _warn_exposed(sv, _gateway_host(sv), cfg.gateway.api_key)
@@ -532,7 +640,7 @@ def _serve_standalone(args: argparse.Namespace, sv: Services, path: Path, preset
     if not args.no_wait:
         with Waiting(sv, f"loading {sess.name}") as w:
             actions.wait_server_ready(sess, sv.health, timeout, clock=sv.clock, sleep=sv.sleep,
-                                      tick=w.tick)
+                                      tick=w.tick, learn=sv.learn_log)
     sv.say(f"{'serving' if not args.no_wait else 'started'} {sess.name} on its own port "
            f"(pid {sess.pid}, log {sess.log})")
     prof = sv.cfg.profile_for(str(path))
@@ -548,7 +656,7 @@ def cmd_up(args: argparse.Namespace, sv: Services) -> int:
     gw = sv.gateway
     with Waiting(sv, "starting the gateway") as w:
         st, started = actions.ensure_gateway(gw, clock=sv.clock, sleep=sv.sleep, tick=w.tick,
-                                             host=host)
+                                             host=host, learn=sv.learn_log)
     urls = ", ".join(actions.gateway_urls(gw, host))
     if not started:
         sv.say(f"gateway already running at {urls} (pid {st.pid})")
@@ -668,6 +776,8 @@ def _require_gateway(sv: Services) -> list[str]:
 def cmd_load(args: argparse.Namespace, sv: Services) -> int:
     """``llamactl load NAME``: ask the gateway to load a model and wait until it has."""
     name = _match(args.name, _require_gateway(sv), "gateway model")
+    if why := _blocked_reason(sv, name):
+        raise CliError(f"cannot load {name}: {why}")
     current = next(m for m in sv.gateway.models() if m.name == name)
     if current.state in (gateway_mod.LOADED, gateway_mod.SLEEPING):
         sv.say(f"{name} is already {current.state}")
@@ -677,7 +787,8 @@ def cmd_load(args: argparse.Namespace, sv: Services) -> int:
     if not args.no_wait:
         with Waiting(sv, f"loading {name}") as w:
             actions.wait_loaded(sv.gateway, name, _load_timeout(_model_size(sv, name)),
-                                clock=sv.clock, sleep=sv.sleep, tick=w.tick)
+                                clock=sv.clock, sleep=sv.sleep, tick=w.tick,
+                                learn=sv.learn_log)
     sv.say(f"{name} is {'loading' if args.no_wait else 'loaded'}")
     return EXIT_OK
 

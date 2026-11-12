@@ -252,7 +252,8 @@ class TuneScreen(ModalScreen[str | None]):
         def work() -> tuple[Host, Plan, str | None, list[str]]:
             host = (hardware.refresh(a.host, a.cfg.bin_dir) if a.host.ram_total
                     else hardware.detect(a.cfg.bin_dir))
-            plan = actions.plan_for(a.cfg, self.info, host, self.intent, a.calibration)
+            plan = actions.plan_for(a.cfg, self.info, host, self.intent, a.calibration,
+                                    support=a.support.check(self.info.architecture, a.build))
             refusal = tuner.preflight(plan, host)
             loaded: list[str] = []
             if refusal and a.gateway.running:

@@ -23,6 +23,7 @@ from .gguf import ModelInfo
 from .hardware import Host
 from .intents import INTENTS, Intent, resolve
 from .library import aliases_for
+from .support import SupportChecker
 
 BINARY = "llama-server"
 SRC_CONFIG, SRC_PATH, SRC_TYPED, SRC_NONE = "config", "PATH", "typed", "none"
@@ -298,7 +299,8 @@ class ModelChoice:
         path: Model file.
         alias: Name clients will use.
         size: File size in bytes.
-        verdict: Planner verdict ("GPU", "GPU+CPU", "GPU+experts", "CPU", "NO").
+        verdict: Planner verdict label ("GPU", "GPU+CPU", "GPU+experts", "CPU", "NO",
+            or a support label like "update llama.cpp").
         intent: Key of the intent the verdict is for (the default one, or the first that
             applies when the model is an embedding model).
         ctx: Planned context per slot.
@@ -313,7 +315,8 @@ class ModelChoice:
 
 
 def model_choices(models: list[Path], infos: dict[str, ModelInfo], host: Host, cfg: Config,
-                  calibration: Calibration | None, intent_key: str) -> list[ModelChoice]:
+                  calibration: Calibration | None, intent_key: str,
+                  support: SupportChecker | None = None, build: str = "") -> list[ModelChoice]:
     """Each readable model with its verdict for an intent.
 
     Args:
@@ -323,6 +326,8 @@ def model_choices(models: list[Path], infos: dict[str, ModelInfo], host: Host, c
         cfg: Config supplying the base profile, headroom and aliases.
         calibration: Measured data for the plans, or None.
         intent_key: The intent to judge by.
+        support: Architecture support checker, or None (all models judged normally).
+        build: The llama-server version string for `support`.
 
     Returns:
         Choices in model order.
@@ -334,9 +339,10 @@ def model_choices(models: list[Path], infos: dict[str, ModelInfo], host: Host, c
         if info is None:
             continue
         intent = resolve(intent_key, info)
-        plan = actions.plan_for(cfg, info, host, intent, calibration)
+        s = support.check(info.architecture, build) if support is not None else None
+        plan = actions.plan_for(cfg, info, host, intent, calibration, support=s)
         out.append(ModelChoice(str(p), aliases[p], info.size,
-                               planner.verdict_label(plan.verdict, plan.profile, info),
+                               planner.verdict_label(plan.verdict, plan.profile, info, plan.support),
                                intent.key, plan.ctx_per_slot))
     return out
 

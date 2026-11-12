@@ -39,6 +39,7 @@ from .measure import (ERR_ARGS, ERR_BENCH, ERR_CANCELLED, ERR_LOAD, ERR_OOM, ERR
                       Measurement)
 from .planner import F16, GB, Q8, VERDICT_CPU, VERDICT_GPU, VERDICT_NO, VERDICT_SPILL, Plan
 from .sessions import next_free_port, pid_alive
+from .support import SupportChecker, unknown_arch
 
 LOOPBACK = "127.0.0.1"
 SPEED_INTENT = "speed"
@@ -924,6 +925,8 @@ class ServerRunner:
         ram_free: Returns the available system RAM in bytes.
         clock: Monotonic clock in seconds.
         sleep: Sleep function.
+        support: Records a failed load's ``unknown model architecture`` for this build
+            (or None).
     """
 
     def __init__(self, cfg: Config, *, popen: Callable[..., Any] = subprocess.Popen,
@@ -932,7 +935,8 @@ class ServerRunner:
                  run: Callable[..., Any] = subprocess.run,
                  ram_free: Callable[[], int] | None = None,
                  clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 support: SupportChecker | None = None) -> None:
         self.cfg = cfg
         self._popen = popen
         self._http = http
@@ -941,6 +945,7 @@ class ServerRunner:
         self._ram_free = ram_free or (lambda: hardware.read_memory()[1])
         self._clock = clock
         self._sleep = sleep
+        self._support = support
         self._build: str | None = None
 
     # -- helpers ---------------------------------------------------------------------
@@ -1065,7 +1070,10 @@ class ServerRunner:
                     return failed(f"{ERR_CANCELLED}: stopped while the model was loading",
                                   self._clock() - start)
                 if not pid_alive(pid):
-                    return failed(classify_failure(self._tail(log)), self._clock() - start)
+                    tail = self._tail(log)
+                    if self._support is not None and (arch := unknown_arch(tail)):
+                        self._support.record_failure(arch, build)
+                    return failed(classify_failure(tail), self._clock() - start)
                 try:
                     if client.request("GET", "/health").status_code == 200:
                         break

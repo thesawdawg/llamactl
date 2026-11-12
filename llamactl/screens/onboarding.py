@@ -506,7 +506,8 @@ class OnboardingScreen(Screen[Dismissal]):
         intent = self.draft.default_intent
         if not infos or (not host.gpus and not host.ram_total):
             return self._fill_models([])
-        a.run_bg(lambda: (key, ob.model_choices(models, infos, host, a.cfg, a.calibration, intent)),
+        a.run_bg(lambda: (key, ob.model_choices(models, infos, host, a.cfg, a.calibration, intent,
+                                              support=a.support, build=a.build)),
                  label="Checking models", group="ob-choices", exclusive=True,
                  done=self._choices_ready, quiet=True)
 

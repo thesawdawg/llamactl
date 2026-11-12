@@ -576,3 +576,21 @@ def test_calibration_changes_verdict_and_budget(dense8b: ModelInfo, gpu_host: Ho
     assert scaled.budget.total() == round(scaled.budget.raw_total() * 1.5)
     assert scaled.budget.total() > plain.budget.total()
     assert math.isclose(scaled.budget.scale, 1.5)
+
+
+def test_blocking_support_makes_every_intent_unsupported(dense8b: ModelInfo,
+                                                       gpu_host: Host) -> None:
+    """plan_all with a blocking check returns VERDICT_UNSUPPORTED (never a fit) for every intent."""
+    from llamactl.planner import VERDICT_UNSUPPORTED
+    from llamactl.support import ArchSupport, Support
+
+    s = ArchSupport("clef", Support.UPDATE, "b1", upstream=True)
+    plans = plan_all(dense8b, gpu_host, Profile(), support=s)
+    assert plans                                                            # intents applied
+    for p in plans.values():
+        assert p.verdict == VERDICT_UNSUPPORTED
+        assert p.support is s and s.reason() in p.warnings and p.reasons == {}
+        assert p.profile == Profile()                                       # the base, untouched
+    ok = plan_all(dense8b, gpu_host, Profile(),
+                  support=ArchSupport("qwen35", Support.OK, "b1"))
+    assert all(p.verdict != VERDICT_UNSUPPORTED for p in ok.values())

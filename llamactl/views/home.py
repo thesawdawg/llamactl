@@ -359,8 +359,11 @@ class HomeView(BaseView):
             steps: list[Suggestion] = []
             self.query_one("#steps_empty", Static).update("Scanning models...")
         else:
-            steps = next_steps(a.cfg, a.models, a.infos, a.calibration,
-                               a.snapshot.status if a.snapshot else None, a.build)
+            steps = next_steps(
+                a.cfg, a.models, a.infos, a.calibration,
+                a.snapshot.status if a.snapshot else None, a.build,
+                support={p: a.support.check(i.architecture, a.build)
+                         for p, i in a.infos.items()})
             self.query_one("#steps_empty", Static).update("Nothing to do: everything is set up.")
         if [(s.key, s.text) for s in steps] != [(s.key, s.text) for s in self._steps]:
             self._steps = steps

@@ -38,3 +38,47 @@ because a long prompt touches almost every expert.
 - llamactl asks once how much RAM Windows has and suggests a memory= value that leaves
   room for Windows. Run wsl --shutdown after editing .wslconfig.
 """
+
+NOLOAD_GUIDE = """\
+[b]When a model will not load[/b]
+
+llamactl checks whether your llama.cpp build knows the architecture in a model's GGUF
+header before it plans or serves it.
+
+[b]What the marks mean[/b]
+- "update llama.cpp": the architecture exists in llama.cpp master but not in your build.
+  Rebuild llama.cpp (below); the mark goes away on its own once the new build knows the
+  architecture.
+- "unsupported": llama.cpp itself (master) does not run this architecture. The model may
+  be meant for another runtime such as vLLM, SGLang, TensorRT-LLM or MLX.
+  A failed load that logs 'unknown model architecture' is remembered for that build.
+- "not a text model": the file is a projector (clip/mmproj), draft or audio model; it
+  cannot be served as a text model.
+- In Discover, a warning mark on the architecture column means the same for the repo's
+  architecture as listed on Hugging Face.
+
+[b]Rebuilding llama.cpp[/b]
+@REBUILD@
+
+[b]This check is not all-inclusive[/b]
+Passing it does not guarantee a model loads or replies well:
+- models only meant for other runtimes (vLLM, SGLang, TensorRT-LLM, MLX) with unofficial
+  GGUF conversions may still fail;
+- a newer variant released under an old architecture name can fail on older builds;
+- chat template or tool-call format of a model may be unusable by this llama.cpp version;
+- a missing or incompatible mmproj file breaks vision models;
+- a broken or partial download fails regardless of the architecture;
+- a quant without kernels for your backend loads but is unusably slow or crashes.
+"""
+
+
+def noload_guide(rebuild: str) -> str:
+    """The "When a model will not load" guide page with the rebuild commands filled in.
+
+    Args:
+        rebuild: The one-line rebuild command block (`support.rebuild_commands`).
+
+    Returns:
+        The guide text.
+    """
+    return NOLOAD_GUIDE.replace("@REBUILD@", rebuild)

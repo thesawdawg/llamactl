@@ -18,6 +18,7 @@ from ..gguf import ModelInfo
 from ..hardware import Host
 from ..intents import Intent
 from ..planner import verdict_label
+from ..support import ArchSupport
 from ..widgets import layout
 from ..widgets.budget import BudgetPanel
 from ..widgets.buttonbar import ButtonBar
@@ -61,16 +62,17 @@ class PlanScreen(Screen[str | None]):
     """
 
     def __init__(self, cfg: Config, model: str, alias: str, info: ModelInfo, host: Host,
-                 intent: Intent, calibration: Calibration | None = None) -> None:
+                 intent: Intent, calibration: Calibration | None = None,
+                 support: ArchSupport | None = None) -> None:
         super().__init__()
         self.cfg, self.model, self.alias, self.host, self.intent = cfg, model, alias, host, intent
         self.info = info
-        self.plan = actions.plan_for(cfg, info, host, intent, calibration)
+        self.plan = actions.plan_for(cfg, info, host, intent, calibration, support=support)
 
     def compose(self) -> ComposeResult:
         """Verdict, budget, planned settings table, message line and action buttons."""
         yield Header()
-        v = verdict_label(self.plan.verdict, self.plan.profile, self.info)
+        v = verdict_label(self.plan.verdict, self.plan.profile, self.info, self.plan.support)
         with VerticalScroll(id="plan_body"):
             yield Label(Text.assemble(
                 (self.alias, "b"), (f"  -  {self.intent.label}: {self.intent.description}  -  ", ""),
@@ -105,7 +107,8 @@ class PlanScreen(Screen[str | None]):
         self.sub_title = f"Plan - {self.intent.label}"
         self.query_one(BudgetPanel).update_budget(
             self.plan.budget, self.host, self.cfg.headroom_pct, expert_ram=self.plan.expert_ram,
-            verdict_text=verdict_label(self.plan.verdict, self.plan.profile, self.info))
+            verdict_text=verdict_label(self.plan.verdict, self.plan.profile, self.info,
+                                       self.plan.support))
         t = self.query_one("#plan_table", DataTable)
         t.add_columns("Setting", "Base", "Planned", "Why")
         base = self.cfg.default_profile

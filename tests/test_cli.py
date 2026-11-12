@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from conftest import MINI_KVS, gguf_blob, kv_u32
+from fakes import FakeSupport
 from llamactl import cli, gateway, render, sessions
 from llamactl.calibration import Calibration
 from llamactl.config import Config, Preset, Profile
@@ -266,14 +267,14 @@ def world(isolated: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyP
     w = SimpleNamespace(cfg=cfg, gw=gw, store=store, clock=clock, alive=alive, qwen=qwen,
                         llama=llama, bin_dir=bin_dir, cfg_dir=isolated.cfg_dir,
                         model_dir=isolated.model_dir, host=isolated.host, runner=FakeRunner(good()),
-                        health="ready", build=BUILD, probe=FakeProbe())
+                        health="ready", build=BUILD, probe=FakeProbe(), support=FakeSupport())
 
     def services(**kw: Any) -> cli.Services:
         opts: dict[str, Any] = dict(
             colour=False, detect=lambda: w.host, refresh=lambda h: w.host,
             cache=None, calibration=Calibration(), gateway=w.gw, store=w.store,
             runner_factory=lambda: w.runner, build=lambda: w.build,
-            health=lambda url: w.health, probe=w.probe,
+            health=lambda url: w.health, probe=w.probe, support=w.support,
             sleep=clock.sleep, clock=clock, now=lambda: 1060.0)
         opts.update(kw)
         return cli.Services(w.cfg, **opts)
@@ -1352,3 +1353,19 @@ def test_config_show_is_read_only() -> None:
     assert cli.is_read_only(parse(["config"])) and cli.is_read_only(parse(["config", "--json"]))
     assert not cli.is_read_only(parse(["config", "gateway.port=1"]))
     assert not cli.is_read_only(parse(["config", "--new-api-key"]))
+
+
+def test_ls_blocked_cell_and_no_fetch_when_all_ok(world, capsys) -> None:
+    """ls collapses a blocked model's fits into one reason cell; all-ok runs never fetch."""
+    from llamactl.support import ArchSupport, Support
+
+    sup = FakeSupport({"testarch": ArchSupport("testarch", Support.UPDATE, BUILD, upstream=True)})
+    r = world.run(capsys, "ls", support=sup)
+    assert r.code == 0
+    assert sup.refreshed == [False]                             # a blocked check fetches once
+    assert r.out.count("update llama.cpp (architecture 'testarch')") == 2   # one cell per model
+    assert "chat update llama.cpp" not in r.out                 # not one cell per intent
+
+    sup = FakeSupport()
+    r = world.run(capsys, "ls", support=sup)
+    assert r.code == 0 and sup.refreshed == []                  # every model OK: stays offline
