@@ -847,8 +847,8 @@ model without the mark is not guaranteed to work.
     `not_llm` (see below) / `unknown` (nothing could be checked; treated as ok).
 - Not standalone text models (`not_llm`): a small table - `clip` (mmproj projectors),
   draft-only models (`eagle3`, `dflash`), audio and TTS decoders (`wavtokenizer-dec`,
-  `qwen3tts`, `pockettts`). Library skips `clip` files by architecture as well as by the
-  `mmproj` name.
+  `qwen3tts`, `pockettts`). Library still skips files by the `mmproj` name; a projector
+  without it in its name shows as `not a text model` instead of being planned.
 - Planner: `VERDICT_UNSUPPORTED` with the reason; `plan_all` returns it for every intent.
 - Serving: models whose support is `update`, `unsupported` or `not_llm` are left out of the
   router INI with a line in the gateway log; `serve`, `up`, `load` and `tune` refuse them with

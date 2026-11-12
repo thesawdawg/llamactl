@@ -133,7 +133,7 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 ## Phase 16 - Architecture support (SPEC 13.2)
 
 - [ ] `support.py`: build check on `libllama.so` (tail match), learned unknown-architecture failures per build, upstream `llama-arch.cpp` list cached 24 h
-- [ ] `not_llm` table (`clip`, draft-only, audio/TTS); Library skips `clip` by architecture
+- [ ] `not_llm` table (`clip`, draft-only, audio/TTS) shown as `not a text model`
 - [ ] Planner `VERDICT_UNSUPPORTED`; gateway INI leaves unsupported models out; `serve`/`up`/`load`/`tune` refuse with the reason
 - [ ] UI: Models verdict `update llama.cpp` / `unsupported`, detail with rebuild commands and Copy; Tune and Serve disabled with the reason
 - [ ] UI: Home next step "N models need a newer llama.cpp"; Discover marks repos and confirms before download; `ls`/`plan`/`tune` print the reason
