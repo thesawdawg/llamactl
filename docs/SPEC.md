@@ -561,12 +561,13 @@ As built (Phase 6; Phase 7 additions follow):
   a worker, refresh the rows.
 - **Keys.** `1`-`5` switch views; `r` rescans models; `q` quits.
   Home: `u` start gateway, `d` stop (confirms), `y` copy base URL (`.../v1`), `c` copy curl, Enter
-  on a next step. Models: Enter serve (IntentPicker when the model has no preset or several),
+  on a next step. Models: Enter opens the guided workspace, `v` explicitly serves,
   `s` standalone, `t` tune, `p` plan, `e` edit preset, `a` set active, `Delete` remove preset,
   `D` default profile. Serving: `l` load, `x` unload, `s` stop standalone (confirms), `u`/`d`
   gateway up/down, `a` attach, `o` full log, `y` copy URL, `c` copy curl. Settings: `Ctrl+S`.
   Inside editors the F-key / ctrl convention applies (`Ctrl+S`, `F1`, `F2`, `Ctrl+R`).
-- **Serve rules.** Enter on a model with exactly one preset serves it. Picking an intent in the
+- **Serve rules.** Model selection opens controls without serving. Explicit serving uses
+  the selected/active preset. Picking an intent in the
   picker plans and stores an `estimated` preset when missing; it only becomes active when the
   model had none, so an existing model's pick is served as `alias@intent` and its active preset
   does not change (`a` changes it).
@@ -574,9 +575,10 @@ As built (Phase 6; Phase 7 additions follow):
   presets, estimated active presets (tune), stale tuned presets (re-tune), gateway stopped while
   presets exist (start). At most three per rule.
 - **TuneScreen** runs `actions.run_tune(save=False)` (search only) in a worker that outlives the
-  screen; the result is applied on the UI thread (`actions.apply_tune`: trials, preset, saves) and the
-  gateway reload (`actions.reload_after_tune`) runs in a second worker under the gateway lock. When
-  the app is already quitting the worker applies the result itself. Cancel and closing
+  screen. Completed trials are recorded independently. The UI compares the saved preset
+  with the candidate and calls `actions.apply_tune` only on explicit acceptance.
+  Accepted settings are saved for the next load; running definitions are preserved.
+  When the app is quitting only trial history is saved. Cancel and closing
   set the cancel flag, which the tuner polls between trials and `ServerRunner.measure` polls
   while it waits for `/health` and before the benchmark: the trial in flight is stopped (its
   server too), later ones do not start, and the trials that finished are recorded.
@@ -812,37 +814,6 @@ Other llama.cpp builds (ik_llama.cpp, MoE hot-cache forks): capability detection
 `llama-server --help`, settings hidden when the build lacks the flag. Undecided; the gateway
 runs one router binary, so builds cannot be mixed there.
 
-## 14. Guided model configuration and constrained tuning
-
-The agreed UX requirements and rationale are recorded in
-[`app-design-output/recommendations.md`](../app-design-output/recommendations.md).
-Selecting a model opens its controls, without loading it. A guided flow presents
-purpose and goals, an optional advanced editor, tuning, a saved-versus-candidate
-comparison, explicit acceptance, and a separate Serve action.
-
-Each model preset stores a maximum context per request, minimum effective output
-TPS (default 20), optional prompt/generation TPS floors, and benchmark level.
-Effective output TPS is actual generated tokens divided by whole request wall time,
-including prompt processing and excluding server startup. Quick tests ~2k input;
-Normal tests Quick plus ~25k harness input; Full tests 5/25/50/75/95% occupancy with
-room reserved for output and harness compaction. Each required workload must pass.
-Increase context toward the maximum; on throughput failure reduce the failing
-context by 5% and retest until it passes. Report unmet goals and incomplete searches.
-
-Tuning never replaces the saved configuration before acceptance. Compare actual
-saved values with the candidate, label measured versus estimated values, show
-per-workload performance and explain the recommendation. Keeping current settings
-preserves the preset. Accepting saves for the next load, without unloading a running
-model. Maintain separate saved and effective gateway definitions across reloads and
-app restarts so unrelated changes cannot apply a pending preset prematurely.
-
-Implementation phases:
-
-18. Persist goals and workload measurements; implement constrained context search.
-19. Preserve running gateway configurations and apply saved changes on next load.
-20. Guided model workspace, explicit comparisons and candidate acceptance.
-21. Integrate CLI/core behavior, regression coverage and user documentation.
-
 ## 13. Model architectures
 
 A GGUF names its architecture in `general.architecture`. llama.cpp refuses a file whose
@@ -937,3 +908,49 @@ metadata keys present, with a small per-architecture table where llama.cpp hardc
   tokens").
 - Tests: a hybrid case with Ornith's real numbers (33 layers, interval 4, 4 KV heads,
   256/256 dims) and one sliding-window case.
+
+## 14. Guided model configuration and constrained tuning
+
+The agreed UX requirements and rationale are recorded in
+[`app-design-output/recommendations.md`](../app-design-output/recommendations.md).
+Selecting a model opens its controls, without loading it. A guided flow presents
+purpose and goals, an optional advanced editor, tuning, a saved-versus-candidate
+comparison, explicit acceptance, and a separate Serve action.
+
+Each model preset stores a maximum context per request, minimum effective output
+TPS (default 20), optional prompt/generation TPS floors, and benchmark level.
+Effective output TPS is measured per turn: generated tokens over the server-reported
+turn time — the turn's new input processing plus generation. Requests above the ~2k
+turn delta are primed first, so the prefix is served from the KV cache and only the
+delta is processed, matching how real clients behave. One discarded warmup request
+runs before measurement; a workload whose result lands within 15% of an enabled
+floor is sampled three times and the median counts. Quick tests a ~2k turn; Normal
+adds a turn at ~25k occupancy; Full tests 5/25/50/75/95% occupancy with room
+reserved for output and harness compaction. Each required workload must pass.
+Increase context toward the maximum; a failure bounds the search — memory failures
+first walk the placement ladder (more experts to RAM, q8_0 KV, llama.cpp placement),
+then the context is bisected against the largest proven pass until the open
+interval is within ~5%. Placement at each probed context is corrected with the VRAM
+earlier trials actually measured. Report unmet goals and incomplete searches.
+
+Tuning never replaces the saved configuration before acceptance. Compare actual
+saved values with the candidate, label measured versus estimated values, show
+per-workload performance and explain the recommendation. Keeping current settings
+preserves the preset. Accepting saves for the next load, without unloading a running
+model. Maintain separate saved and effective gateway definitions across reloads and
+app restarts so unrelated changes cannot apply a pending preset prematurely.
+
+New gateway launches use a detached request supervisor: a public HTTP endpoint and
+a private loopback llama.cpp router. The supervisor reconciles saved definitions and
+admits model loads before forwarding inference; active request leases prevent
+competing admissions from evicting a model before its request reaches the router.
+Responses stream outside the admission lock. Management operations use the same
+boundary, so the behavior persists when the TUI exits. Older direct-router processes
+continue running and need one explicit stop/start to enable supervision.
+
+Implementation phases:
+
+18. Persist goals and workload measurements; implement constrained context search.
+19. Preserve running gateway configurations and apply saved changes on next load.
+20. Guided model workspace, explicit comparisons and candidate acceptance.
+21. Integrate CLI/core behavior, regression coverage and user documentation.
