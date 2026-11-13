@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import configparser
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 import signal
 from pathlib import Path
 from types import SimpleNamespace
@@ -249,10 +252,11 @@ def env(isolated: SimpleNamespace, two_models, monkeypatch: pytest.MonkeyPatch) 
     cfg, qwen, llama = two_models
     FakePopen.calls = []
     http = FakeHttp()
+    http.routes[("GET", "/models")] = FakeResponse(200, {"data": []})
     alive: set[int] = set()
     monkeypatch.setattr(gateway, "pid_alive", lambda pid: pid in alive)
     monkeypatch.setattr(gateway, "port_free", lambda port, host="127.0.0.1": True)
-    gw = Gateway(cfg, popen=FakePopen, http=http, settle=0)
+    gw = Gateway(cfg, popen=FakePopen, http=http, settle=0, supervised=False)
     return SimpleNamespace(gw=gw, cfg=cfg, http=http, alive=alive, cfg_dir=isolated.cfg_dir,
                            qwen=qwen, llama=llama)
 
@@ -346,7 +350,7 @@ def testlog_reason_fallbacks(tmp_path: Path) -> None:
 def test_start_reports_a_launch_failure(env) -> None:
     def boom(argv: list[str], **kw: Any) -> None:
         raise FileNotFoundError(2, "No such file or directory")
-    gw = Gateway(env.cfg, popen=boom, http=env.http, settle=0)
+    gw = Gateway(env.cfg, popen=boom, http=env.http, settle=0, supervised=False)
     with pytest.raises(GatewayError, match="cannot start /opt/llama/bin/llama-server"):
         gw.start()
     assert GatewayState.load() is None
@@ -533,8 +537,10 @@ def test_load_and_unload_post_the_model_name(env) -> None:
     env.gw.load("qwen3-8b@agent")
     env.gw.unload("qwen3-8b")
     assert env.http.requests == [
+        {"method": "GET", "path": "/models"},
         {"method": "POST", "path": "/models/load", "json": {"model": "qwen3-8b@agent"}},
-        {"method": "POST", "path": "/models/unload", "json": {"model": "qwen3-8b"}}]
+        {"method": "POST", "path": "/models/unload", "json": {"model": "qwen3-8b"}},
+        {"method": "GET", "path": "/models"}]
 
 
 def test_api_key_is_sent_as_a_bearer_header(env) -> None:
@@ -586,7 +592,8 @@ def test_reload_rewrites_the_ini_then_asks_the_router(env) -> None:
         entry("qwen3-8b", {"value": "unloaded"})]})
     assert env.gw.reload() == [GatewayModel("qwen3-8b", "unloaded")]
     assert "ctx-size = 12345" in (env.cfg_dir / "gateway.ini").read_text()
-    assert env.http.requests == [{"method": "GET", "path": "/models?reload=1"}]
+    assert env.http.requests == [{"method": "GET", "path": "/models"},
+                                 {"method": "GET", "path": "/models?reload=1"}]
 
 
 def test_reload_when_stopped_only_rewrites_the_ini(env) -> None:
@@ -613,3 +620,259 @@ def test_render_presets_skips_a_blocked_model_with_the_reason(two_models) -> Non
     assert "[qwen3-8b]" not in sections and "[llama-3.2-1b]" in sections
     assert f"; skipped [qwen3-8b]: {why}" in ini
     assert problems == [f"skipped [qwen3-8b]: {why}"]
+
+
+class RouterHttp(FakeHttp):
+    """Router fake that unloads live models when their INI definition changes."""
+
+    def __init__(self, ini: Path) -> None:
+        """Capture the initial definitions and start with all models unloaded.
+
+        Args:
+            ini: Isolated router preset file.
+        """
+        super().__init__()
+        self.ini = ini
+        self.definitions = self.read_definitions()
+        self.states = {name: "unloaded" for name in self.definitions}
+        self.interruptions: list[str] = []
+
+    def read_definitions(self) -> dict[str, dict[str, str]]:
+        """Read INI definitions independently of llamactl's section handling.
+
+        Returns:
+            Each model's INI key/value pairs.
+        """
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read_string(self.ini.read_text().split("\n", 1)[1])
+        return {name: dict(parser[name]) for name in parser.sections() if name != "*"}
+
+    def request(self, method: str, path: str, **kwargs: Any) -> FakeResponse:
+        """Emulate reload interruption and synchronous unload completion.
+
+        Args:
+            method: HTTP method.
+            path: Router endpoint.
+            **kwargs: Request JSON and other HTTP arguments.
+
+        Returns:
+            A response describing the simulated router's current model states.
+        """
+        self.requests.append({"method": method, "path": path, **kwargs})
+        if path == "/models?reload=1":
+            updated = self.read_definitions()
+            for name, state in self.states.items():
+                if state in ("loaded", "loading", "sleeping") and (
+                        self.definitions.get(name) != updated.get(name)):
+                    self.interruptions.append(name)
+                    self.states[name] = "unloaded"
+            self.states = {name: self.states.get(name, "unloaded") for name in updated}
+            self.definitions = updated
+        elif path == "/models/unload":
+            self.states[kwargs["json"]["model"]] = "unloaded"
+        elif path == "/models/load":
+            self.states[kwargs["json"]["model"]] = "loading"
+        return FakeResponse(200, {"data": [entry(name, {"value": state})
+                                          for name, state in self.states.items()]})
+
+
+def router_started(env: SimpleNamespace) -> RouterHttp:
+    """Connect a started isolated gateway to a stateful router fake.
+
+    Args:
+        env: Gateway fixture with scratch state and fake process liveness.
+
+    Returns:
+        The router fake used by the gateway.
+    """
+    started(env)
+    router = RouterHttp(env.cfg_dir / "gateway.ini")
+    env.gw._http = router
+    return router
+
+
+@pytest.mark.parametrize("state", ["loaded", "loading", "sleeping"])
+def test_saved_changes_preserve_live_definition_through_unrelated_reload_and_restart(
+        env: SimpleNamespace, state: str) -> None:
+    """Saving and later unrelated refreshes never replace a live preset."""
+    router = router_started(env)
+    router.states["qwen3-8b"] = state
+    original = router.definitions["qwen3-8b"].copy()
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    env.gw.reload()
+    assert router.definitions["qwen3-8b"] == original
+    assert env.gw.pending_names == frozenset({"qwen3-8b"})
+    effective, saved = env.gw.pending_changes()["qwen3-8b"]
+    assert "ctx-size = 16384" in effective and "ctx-size = 32768" in saved
+
+    restarted = Gateway(env.cfg, http=router, settle=0)
+    assert restarted.pending_names == frozenset({"qwen3-8b"})
+    env.cfg.models[str(env.llama)].presets["speed"].profile.ctx_size = 2048
+    restarted.reload()
+    assert router.definitions["qwen3-8b"] == original
+    assert router.definitions["llama-3.2-1b"]["ctx-size"] == "2048"
+    assert router.states["qwen3-8b"] == state
+    assert router.interruptions == []
+
+
+def test_unload_promotes_saved_preset_before_router_on_demand_reload(env: SimpleNamespace) -> None:
+    """A completed unload installs saved settings for subsequent external loads."""
+    router = router_started(env)
+    router.states["qwen3-8b"] = "loaded"
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    env.gw.reload()
+    env.gw.unload("qwen3-8b")
+    assert router.definitions["qwen3-8b"]["ctx-size"] == "32768"
+    assert env.gw.pending_names == frozenset()
+    # A client request can now load the new definition without calling Gateway.load.
+    router.states["qwen3-8b"] = "loading"
+    assert GatewayState.load().effective["qwen3-8b"].find("ctx-size = 32768") > 0
+    assert router.interruptions == []
+
+
+@pytest.mark.parametrize("state", ["unloaded", "failed"])
+def test_poll_promotes_after_automatic_unload_or_failure(env: SimpleNamespace, state: str) -> None:
+    """The serving poll promotes changes after router eviction or model failure."""
+    router = router_started(env)
+    router.states["qwen3-8b"] = "sleeping"
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    env.gw.reload()
+    router.states["qwen3-8b"] = state
+    env.gw.models()
+    assert router.definitions["qwen3-8b"]["ctx-size"] == "32768"
+    assert env.gw.pending_names == frozenset()
+    assert router.interruptions == []
+
+
+def test_explicit_load_promotes_an_unobserved_unload_first(env: SimpleNamespace) -> None:
+    """A load between serving polls still uses the newly saved preset."""
+    router = router_started(env)
+    router.states["qwen3-8b"] = "loaded"
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    env.gw.reload()
+    router.states["qwen3-8b"] = "unloaded"
+    env.gw.load("qwen3-8b")
+    assert router.definitions["qwen3-8b"]["ctx-size"] == "32768"
+    assert router.states["qwen3-8b"] == "loading"
+
+
+def test_deleted_live_preset_remains_until_unloaded(env: SimpleNamespace) -> None:
+    """Deleting a saved preset preserves its already running served name."""
+    router = router_started(env)
+    router.states["qwen3-8b@agent"] = "loaded"
+    del env.cfg.models[str(env.qwen)].presets["agent"]
+    env.gw.reload()
+    assert "qwen3-8b@agent" in router.definitions
+    assert env.gw.pending_names == frozenset({"qwen3-8b@agent"})
+    env.gw.unload("qwen3-8b@agent")
+    assert "qwen3-8b@agent" not in router.definitions
+    assert env.gw.pending_names == frozenset()
+    assert router.interruptions == []
+
+
+def test_old_state_recovers_effective_definition_from_existing_ini(env: SimpleNamespace) -> None:
+    """A gateway started before runtime snapshots were added migrates safely."""
+    router = router_started(env)
+    router.states["qwen3-8b"] = "loaded"
+    state_path = env.cfg_dir / "gateway.json"
+    old_state = json.loads(state_path.read_text())
+    del old_state["effective"]
+    state_path.write_text(json.dumps(old_state))
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    Gateway(env.cfg, http=router).reload()
+    assert router.definitions["qwen3-8b"]["ctx-size"] == "16384"
+    assert GatewayState.load().effective
+    assert router.interruptions == []
+
+
+def test_read_only_poll_never_promotes_or_writes_runtime_files(env: SimpleNamespace) -> None:
+    """Inspecting an unloaded model does not mutate INI, state or lock files."""
+    router = router_started(env)
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    state_path = env.cfg_dir / "gateway.json"
+    before = state_path.read_bytes(), router.ini.read_bytes()
+    lock_path = state_path.with_suffix(".lock")
+    lock_path.unlink()
+    observer = Gateway(env.cfg, http=router, read_only=True)
+    observer.synchronize()
+    observer.models()
+    assert (state_path.read_bytes(), router.ini.read_bytes()) == before
+    assert not lock_path.exists()
+    assert all(request["path"] == "/models" for request in router.requests)
+
+
+def test_concurrent_reload_and_load_preserve_running_settings(
+        env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second Gateway cannot load midway through another instance's reload."""
+    router = router_started(env)
+    router.states["qwen3-8b"] = "loaded"
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    another_gateway = Gateway(env.cfg, http=router)
+    entered, release, attempted, concurrent_request = Event(), Event(), Event(), Event()
+    request = router.request
+
+    def blocking_request(method: str, path: str, **kwargs: Any) -> FakeResponse:
+        """Pause the first status request to expose unsafe operation interleaving.
+
+        Args:
+            method: HTTP method.
+            path: Router endpoint.
+            **kwargs: HTTP request arguments.
+
+        Returns:
+            The fake router's response after the test permits progress.
+        """
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(2)
+        elif not release.is_set():
+            concurrent_request.set()
+        return request(method, path, **kwargs)
+
+    def load_other() -> None:
+        """Attempt a load from another Gateway while the first one reloads."""
+        attempted.set()
+        another_gateway.load("qwen3-8b@agent")
+
+    monkeypatch.setattr(router, "request", blocking_request)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        reloading = workers.submit(env.gw.reload)
+        assert entered.wait(2)
+        loading = workers.submit(load_other)
+        assert attempted.wait(2)
+        try:
+            assert not concurrent_request.wait(0.05)
+        finally:
+            release.set()
+        reloading.result(timeout=2)
+        loading.result(timeout=2)
+    assert router.interruptions == []
+    assert router.definitions["qwen3-8b"]["ctx-size"] == "16384"
+    assert router.states["qwen3-8b@agent"] == "loading"
+
+
+def test_failed_status_query_does_not_write_saved_settings_over_live_ini(
+        env: SimpleNamespace) -> None:
+    """An unreachable router cannot safely change the effective preset file."""
+    started(env)
+    state_path, ini_path = env.cfg_dir / "gateway.json", env.cfg_dir / "gateway.ini"
+    before = state_path.read_bytes(), ini_path.read_bytes()
+    env.cfg.models[str(env.qwen)].presets["chat"].profile.ctx_size = 32768
+    env.http.routes[("GET", "/models")] = httpx.ConnectError("offline")
+    with pytest.raises(GatewayError, match="not reachable"):
+        env.gw.reload()
+    assert (state_path.read_bytes(), ini_path.read_bytes()) == before
+
+
+def test_missing_legacy_ini_fails_closed_before_reloading(env: SimpleNamespace) -> None:
+    """An unknown legacy effective configuration must not be replaced by saved data."""
+    started(env)
+    state_path, ini_path = env.cfg_dir / "gateway.json", env.cfg_dir / "gateway.ini"
+    raw = json.loads(state_path.read_text())
+    del raw["effective"]
+    state_path.write_text(json.dumps(raw))
+    ini_path.unlink()
+    restored = Gateway(env.cfg, http=env.http)
+    with pytest.raises(GatewayError, match="cannot recover running gateway settings"):
+        restored.reload()
+    assert not ini_path.exists()

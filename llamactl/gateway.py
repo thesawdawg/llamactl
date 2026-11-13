@@ -8,13 +8,19 @@ injectable, so tests never start llama.cpp or touch the network.
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import signal
 import subprocess
+import secrets
+import sys
 import time
 from dataclasses import asdict, dataclass, field
+from contextlib import contextmanager
+from functools import wraps
+from threading import RLock, local
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, ParamSpec, TypeVar
 
 import httpx
 
@@ -32,10 +38,80 @@ SETTLE_SECONDS = 1.0
 
 # Model states reported by `GatewayModel.state`.
 UNLOADED, LOADING, LOADED, SLEEPING, FAILED = "unloaded", "loading", "loaded", "sleeping", "failed"
+_LOCK = RLock()
+_LOCK_CONTEXT = local()
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+@contextmanager
+def _runtime_lock() -> Iterator[None]:
+    """Serialize runtime changes across threads and cooperating CLI processes.
+
+    Yields:
+        Control while the scratch/state-directory runtime lock is held.
+    """
+    with _LOCK:
+        if getattr(_LOCK_CONTEXT, "held", False):
+            yield
+            return
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with STATE_FILE.with_suffix(".lock").open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            _LOCK_CONTEXT.held = True
+            try:
+                yield
+            finally:
+                _LOCK_CONTEXT.held = False
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _serialized(method: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Run a mutation under the reentrant process/runtime lock.
+
+    Args:
+        method: Gateway mutation.
+
+    Returns:
+        The serialized method with its original signature preserved.
+    """
+    @wraps(method)
+    def locked(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        """Return the wrapped mutation's result while holding the runtime lock."""
+        instance = args[0] if args else None
+        if instance is not None and not getattr(instance, "_backend_mode", False):
+            state = getattr(instance, "state", None)
+            if state is not None and state.backend_url:
+                return method(*args, **kwargs)
+        with _runtime_lock():
+            return method(*args, **kwargs)
+    return locked
 
 
 class GatewayError(RuntimeError):
     """The gateway could not be started, stopped or reached, or it refused a request."""
+
+
+def _write_private_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically save runtime credentials with owner-only permissions.
+
+    Args:
+        path: Runtime JSON destination.
+        data: JSON-serializable runtime state.
+
+    Raises:
+        OSError: If the state cannot be saved.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(json.dumps(data, indent=2))
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- INI rendering
@@ -136,6 +212,56 @@ def render_presets(cfg: Config, models: list[Path] | None = None,
     return "\n".join(blocks)
 
 
+def _preset_sections(text: str) -> dict[str, str]:
+    """Extract canonical INI sections without comments or the version header.
+
+    Args:
+        text: Rendered or previously installed preset file.
+
+    Returns:
+        Section name to its complete INI definition.
+    """
+    sections: dict[str, str] = {}
+    name = ""
+    for line in text.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1]
+            sections[name] = line + "\n"
+        elif name and line.strip() and not line.lstrip().startswith((";", "#")):
+            sections[name] += line + "\n"
+    return sections
+
+
+def _replace_sections(text: str, preserved: dict[str, str]) -> str:
+    """Replace saved definitions with protected runtime definitions.
+
+    Args:
+        text: Newly rendered saved configuration, including diagnostic comments.
+        preserved: Running definitions that must remain unchanged.
+
+    Returns:
+        The effective INI, retaining removed running definitions until stopped.
+    """
+    if not preserved:
+        return text
+    blocks: list[str] = []
+    seen: set[str] = set()
+    current = ""
+    skip = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("[") and line.rstrip().endswith("]"):
+            current = line.strip()[1:-1]
+            skip = current in preserved
+            if skip:
+                blocks.append(preserved[current] + "\n")
+                seen.add(current)
+        if not skip or line.lstrip().startswith(";"):
+            blocks.append(line)
+    for name in sorted(preserved.keys() - seen):
+        blocks.append("\n" + preserved[name])
+    return "".join(blocks)
+
+
 # --------------------------------------------------------------------------- state and models
 
 @dataclass
@@ -150,6 +276,7 @@ class GatewayState:
         started: Unix time of the start.
         host: The listen address the router was started with ("" in a state file written
             before this was recorded).
+        effective: Exact installed INI sections, retained across application restarts.
     """
 
     pid: int
@@ -157,6 +284,10 @@ class GatewayState:
     log: str
     started: float = 0.0
     host: str = ""
+    effective: dict[str, str] = field(default_factory=dict)
+    backend_url: str = ""
+    runtime_api_key: str = ""
+    control_token: str = ""
 
     @classmethod
     def load(cls) -> "GatewayState | None":
@@ -167,15 +298,20 @@ class GatewayState:
         """
         try:
             raw = json.loads(STATE_FILE.read_text())
+            effective = raw.get("effective", {})
+            if not isinstance(effective, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in effective.items()):
+                return None
             return cls(int(raw["pid"]), str(raw["url"]), str(raw.get("log", "")),
-                       float(raw.get("started", 0.0)), str(raw.get("host", "")))
+                       float(raw.get("started", 0.0)), str(raw.get("host", "")), effective,
+                       str(raw.get("backend_url", "")), str(raw.get("runtime_api_key", "")),
+                       str(raw.get("control_token", "")))
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
     def save(self) -> None:
         """Write the state file, creating the config directory."""
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(asdict(self), indent=2))
+        _write_private_json(STATE_FILE, asdict(self))
 
     @staticmethod
     def clear() -> None:
@@ -324,17 +460,22 @@ class Gateway:
             ``unknown model architecture`` line can be remembered (or None).
         blocked: Returns model path -> reason the build cannot load it; those models are left
             out of the preset INI (or None).
+        supervised: Own the public endpoint through the detached admission supervisor.
+            False retains direct-router behavior for existing gateway compatibility/tests.
 
     Attributes:
         host_override: Listen address for the next `start` instead of the configured one (never
             saved); None uses ``cfg.gateway.host``.
+        pending_names: Cached served names whose saved settings differ from the router's
+            installed settings; refreshed by model polling and reloading without UI HTTP.
     """
 
     def __init__(self, cfg: Config, popen: Callable[..., Any] = subprocess.Popen,
                  http: Callable[..., Any] = httpx.Client, settle: float = SETTLE_SECONDS,
                  sleep: Callable[[float], None] = time.sleep, read_only: bool = False,
                  learn: Callable[[Path], None] | None = None,
-                 blocked: Callable[[], dict[str, str]] | None = None) -> None:
+                 blocked: Callable[[], dict[str, str]] | None = None,
+                 supervised: bool = True) -> None:
         self.read_only = read_only
         self.cfg = cfg
         self._popen = popen
@@ -343,8 +484,14 @@ class Gateway:
         self._sleep = sleep
         self._learn = learn
         self._blocked = blocked
+        self.supervised = supervised
         self.problems: list[str] = []
         self.host_override: str | None = None
+        self._backend_mode = False
+        try:
+            self.pending_names: frozenset[str] = frozenset(self.pending_changes())
+        except GatewayError:
+            self.pending_names = frozenset()
 
     # -- process -----------------------------------------------------------------------
 
@@ -392,6 +539,53 @@ class Gateway:
             argv += ["--api-key", g.api_key]
         return argv
 
+    def _saved_presets(self) -> str:
+        """Render saved settings and collect unsupported/invalid preset problems.
+
+        Returns:
+            The desired INI before protecting running definitions.
+        """
+        self.problems = []
+        return render_presets(self.cfg, problems=self.problems,
+                              blocked=self._blocked() if self._blocked else None)
+
+    def _effective_sections(self, state: GatewayState) -> dict[str, str]:
+        """Read effective definitions, including migration from older state files.
+
+        Args:
+            state: Running router's persisted state.
+
+        Returns:
+            Definitions installed in the router; never inferred from saved config.
+
+        Raises:
+            GatewayError: When an older router's effective INI is unavailable.
+        """
+        if state.effective:
+            return state.effective.copy()
+        try:
+            return _preset_sections(PRESETS_FILE.read_text())
+        except OSError as error:
+            raise GatewayError("cannot recover running gateway settings; keep its preset "
+                               "file until the gateway stops") from error
+
+    def pending_changes(self) -> dict[str, tuple[str | None, str | None]]:
+        """Compare effective running definitions with saved settings without HTTP.
+
+        Returns:
+            Served name to (effective INI, saved INI), omitting unchanged definitions.
+            A missing definition is None. The global wildcard is omitted.
+        """
+        state = self.state
+        if state is None:
+            return {}
+        effective = self._effective_sections(state)
+        saved = _preset_sections(render_presets(self.cfg))
+        return {name: (effective.get(name), saved.get(name))
+                for name in effective.keys() | saved.keys()
+                if name != "*" and effective.get(name) != saved.get(name)}
+
+    @_serialized
     def write_presets(self) -> Path:
         """Render the preset INI from the config and write it.
 
@@ -400,13 +594,15 @@ class Gateway:
         Returns:
             The path of the file.
         """
-        self.problems = []
-        text = render_presets(self.cfg, problems=self.problems,
-                              blocked=self._blocked() if self._blocked else None)
+        if self.running:
+            self.reload()
+            return PRESETS_FILE
+        text = self._saved_presets()
         PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
         PRESETS_FILE.write_text(text)
         return PRESETS_FILE
 
+    @_serialized
     def start(self) -> GatewayState:
         """Start the router as a detached process (it survives the TUI), unless it runs.
 
@@ -432,6 +628,13 @@ class Gateway:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         log = LOG_DIR / LOG_NAME
         argv = self.command()
+        launch = STATE_FILE.with_name("gateway-launch.json")
+        control_token = secrets.token_urlsafe(32) if self.supervised else ""
+        if self.supervised:
+            _write_private_json(launch, {"argv": argv, "config": self.cfg.to_dict(),
+                                      "host": self.host, "port": g.port,
+                                      "control_token": control_token})
+            argv = [sys.executable, "-m", "llamactl.gateway_supervisor", str(launch)]
         try:
             with log.open("ab") as fh:
                 proc = self._popen(argv, stdout=fh, stderr=subprocess.STDOUT,
@@ -446,10 +649,18 @@ class Gateway:
             if self._learn is not None:
                 self._learn(log)
             raise GatewayError(f"the gateway exited at once: {log_reason(log)} (log: {log})")
-        st = GatewayState(proc.pid, self.listen_url, str(log), time.time(), self.host)
+        st = GatewayState(proc.pid, self.listen_url, str(log), time.time(), self.host,
+                          _preset_sections(PRESETS_FILE.read_text()),
+                          "managed" if self.supervised else "", g.api_key,
+                          control_token)
+        existing = GatewayState.load()
+        if existing is not None and existing.pid == proc.pid and existing.backend_url:
+            st = existing
         st.save()
+        self.pending_names = frozenset()
         return st
 
+    @_serialized
     def stop(self) -> bool:
         """Stop the router and its model processes, and forget the state.
 
@@ -458,9 +669,11 @@ class Gateway:
         """
         st = self.state
         if st is None:
+            self.pending_names = frozenset()
             return False
         terminate_group(st.pid)
         GatewayState.clear()
+        self.pending_names = frozenset()
         return True
 
     def status(self) -> GatewayStatus:
@@ -499,7 +712,11 @@ class Gateway:
         st = self.state
         if st is None:
             raise GatewayError("the gateway is not running")
-        headers = {"Authorization": f"Bearer {self.cfg.gateway.api_key}"} if self.cfg.gateway.api_key else {}
+        key = st.runtime_api_key if st.backend_url else self.cfg.gateway.api_key
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        if path.startswith("/__llamactl/"):
+            headers["X-Llamactl-Control"] = st.control_token
+            kwargs.setdefault("timeout", 1850.0)
         try:
             with self._http(base_url=st.url, headers=headers, timeout=HTTP_TIMEOUT) as client:
                 return client.request(method, path, **kwargs)
@@ -540,7 +757,56 @@ class Gateway:
         Raises:
             GatewayError: When the gateway is not running, unreachable or answers badly.
         """
-        return self._parse(self._call("GET", "/models"))
+        if self.read_only:
+            return self._parse(self._call("GET", "/models"))
+        return self.synchronize()
+
+    def synchronize(self) -> list[GatewayModel]:
+        """Promote pending definitions after observing a model actually stopped.
+
+        Polling this method also covers models unloaded automatically by the router.
+        Router HTTP endpoints do not provide an atomic unload/reload transaction; an
+        external on-demand request racing this poll can still use the old definition.
+
+        Returns:
+            The current router model snapshot, after any required promotion.
+
+        Raises:
+            GatewayError: When the router cannot be queried or safely refreshed.
+        """
+        state = self.state
+        if state is not None and state.backend_url and not self._backend_mode:
+            result = self._parse(self._call("POST", "/__llamactl/control", json={"action": "sync"}))
+            self.pending_names = frozenset(self.pending_changes())
+            return result
+        if self.read_only:
+            return self._parse(self._call("GET", "/models"))
+        return self._synchronize()
+
+    @_serialized
+    def _synchronize(self) -> list[GatewayModel]:
+        """Query the router and promote any stopped definitions under the runtime lock.
+
+        Returns:
+            Router model snapshot after any promotion.
+
+        Raises:
+            GatewayError: When querying or refreshing the router fails.
+        """
+        models = self._parse(self._call("GET", "/models"))
+        state = self.state
+        if state is None:
+            return models
+        effective = self._effective_sections(state)
+        saved = _preset_sections(self._saved_presets())
+        live = {model.name for model in models if model.state not in (UNLOADED, FAILED)}
+        stopped = (effective.keys() | saved.keys()) - live
+        if live:
+            stopped.discard("*")
+        if any(effective.get(name) != saved.get(name) for name in stopped):
+            return self._reload(models)
+        self.pending_names = frozenset(self.pending_changes())
+        return models
 
     @staticmethod
     def _parse(payload: Any) -> list[GatewayModel]:
@@ -550,6 +816,7 @@ class Gateway:
         except ValueError as e:
             raise GatewayError(f"unexpected answer from the gateway's /models: {e}") from None
 
+    @_serialized
     def load(self, name: str) -> None:
         """Ask the router to load a model (``POST /models/load``); it returns before it is ready.
 
@@ -560,10 +827,16 @@ class Gateway:
             GatewayError: When the model is unknown or already running, or the call fails.
         """
         try:
+            state = self.state
+            if state is not None and state.backend_url and not self._backend_mode:
+                self._call("POST", "/__llamactl/control", json={"action": "load", "model": name})
+                return
+            self.synchronize()
             self._call("POST", "/models/load", json={"model": name})
         except GatewayError as e:
             raise GatewayError(f"cannot load '{name}': {e}") from None
 
+    @_serialized
     def unload(self, name: str) -> None:
         """Ask the router to unload a model (``POST /models/unload``).
 
@@ -574,14 +847,21 @@ class Gateway:
             GatewayError: When the model is unknown or not running, or the call fails.
         """
         try:
+            state = self.state
+            if state is not None and state.backend_url and not self._backend_mode:
+                self._call("POST", "/__llamactl/control", json={"action": "unload", "model": name})
+                return
             self._call("POST", "/models/unload", json={"model": name})
+            self.synchronize()
         except GatewayError as e:
             raise GatewayError(f"cannot unload '{name}': {e}") from None
 
+    @_serialized
     def reload(self) -> list[GatewayModel]:
         """Rewrite the preset INI and, when the gateway runs, make it re-read the file.
 
-        Running models whose preset changed or vanished are unloaded by the router.
+        Loaded, loading and sleeping models retain their installed definition. Their
+        saved changes become effective after a stopped state is observed.
 
         Returns:
             The router's models after the reload; empty when the gateway is not running.
@@ -589,7 +869,47 @@ class Gateway:
         Raises:
             GatewayError: When the running gateway cannot be reached.
         """
-        self.write_presets()
+        state = self.state
+        if state is not None and state.backend_url and not self._backend_mode:
+            result = self._parse(self._call("POST", "/__llamactl/control", json={
+                "action": "reload", "presets": self._saved_presets()}))
+            self.pending_names = frozenset(self.pending_changes())
+            return result
         if not self.running:
+            self.write_presets()
+            self.pending_names = frozenset()
             return []
-        return self._parse(self._call("GET", "/models?reload=1"))
+        models = self._parse(self._call("GET", "/models"))
+        return self._reload(models)
+
+    def _reload(self, models: list[GatewayModel]) -> list[GatewayModel]:
+        """Install saved definitions while keeping every observed live section.
+
+        Args:
+            models: Fresh model snapshot obtained while holding the runtime lock.
+
+        Returns:
+            Router models after reloading the merged definitions.
+
+        Raises:
+            GatewayError: When the gateway disappears or rejects the refresh.
+        """
+        state = self.state
+        if state is None:
+            raise GatewayError("the gateway is not running")
+        effective = self._effective_sections(state)
+        live = {model.name for model in models if model.state not in (UNLOADED, FAILED)}
+        if live - effective.keys():
+            raise GatewayError("cannot recover effective settings for running models: "
+                               + ", ".join(sorted(live - effective.keys())))
+        protected = {name: text for name, text in effective.items() if name in live}
+        # A changed wildcard is inherited by every model; keep it while any model lives.
+        if live:
+            protected["*"] = effective.get("*", "")
+        text = _replace_sections(self._saved_presets(), protected)
+        PRESETS_FILE.write_text(text)
+        result = self._parse(self._call("GET", "/models?reload=1"))
+        state.effective = _preset_sections(text)
+        state.save()
+        self.pending_names = frozenset(self.pending_changes())
+        return result
