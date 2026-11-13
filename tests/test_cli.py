@@ -210,6 +210,8 @@ class FakeRunner:
 
 def good(vram: float = 4.0, gen: float = 60.0) -> Measurement:
     return Measurement(ok=True, vram_used=int(vram * GB), gen_tps=gen, prompt_tps=900.0,
+                       effective_tps=128 / (120 / 900 + 128 / gen),
+                       request_s=120 / 900 + 128 / gen, prompt_tokens=120, generated_tokens=128,
                        load_s=4.0, at="2026-11-09T10:00:00+00:00", build=BUILD)
 
 
@@ -554,11 +556,12 @@ def test_use_colour_rules() -> None:
 def test_tune_saves_the_tuned_preset_and_records_trials(world, capsys) -> None:
     world.gw.is_running = True
     world.gw.write_presets()
-    r = world.run(capsys, "tune", "qwen3", "--for", "chat")
+    r = world.run(capsys, "tune", "qwen3", "--for", "chat", "--yes")
     assert r.code == 0
-    assert "tuned: qwen3-8b-q4_k_m for chat" in r.out and "saved as the 'chat' preset" in r.out
-    assert "gateway reloaded" in r.out and "reload" in world.gw.calls
-    assert "[1/6] trying" in r.err and "[1/6] ok" in r.err and "60.0 tok/s" in r.err
+    assert "tuned: qwen3-8b-q4_k_m for chat" in r.out
+    assert "candidate only; saved preset unchanged" in r.out and "Candidate saved" in r.err
+    assert "applies on next load" in r.err and "reload" in world.gw.calls
+    assert "[1/32] trying" in r.err and "[1/32] ok" in r.err and "60.0 tok/s" in r.err
     assert preset_names(world, world.qwen) == {"chat": "tuned"}
     trials = json.loads((world.cfg_dir / "tuning.json").read_text())["trials"]
     assert len(trials) == 1 and trials[0]["measurement"]["ok"] and trials[0]["intent"] == "chat"
@@ -570,7 +573,8 @@ def test_tune_json_is_pure(world, capsys) -> None:
     d = json.loads(r.out)
     assert r.code == 0 and d["ok"] and d["intent"] == "chat" and not d["cancelled"]
     assert d["best"]["measurement"]["gen_tps"] == 60.0 and len(d["trials"]) == 1
-    assert d["gateway_reloaded"] is False and "[1/6]" in r.err
+    assert d["gateway_reloaded"] is False and "[1/32]" in r.err
+    assert d["saved"] is False and not (world.cfg_dir / "config.json").exists()
 
 
 def test_tune_without_a_running_gateway_does_not_reload(world, capsys) -> None:
@@ -578,11 +582,49 @@ def test_tune_without_a_running_gateway_does_not_reload(world, capsys) -> None:
     assert "reload" not in world.gw.calls
 
 
+def test_tune_goals_only_persist_after_explicit_acceptance(world, capsys) -> None:
+    """Comparing a candidate preserves the existing profile and its task goals."""
+    old = Preset("chat", Profile(ctx_size=777, temp=0.3), "edited")
+    world.cfg.set_preset(str(world.qwen), old)
+    world.cfg.save()
+    args = ("tune", "qwen3", "--json", "--max-context", "4096",
+            "--min-effective-tps", "25", "--benchmark", "quick")
+    candidate = world.run(capsys, *args)
+    assert candidate.code == 0
+    assert json.loads(candidate.out)["saved"] is False
+    assert world.cfg.preset(str(world.qwen), "chat") is old
+    accepted = world.run(capsys, *args, "--yes")
+    assert accepted.code == 0 and json.loads(accepted.out)["saved"] is True
+    saved = Config.load().preset(str(world.qwen), "chat")
+    assert saved.goals.max_context == 4096 and saved.goals.min_effective_tps == 25
+    assert saved.goals.benchmark == "quick"
+    assert saved.profile.ctx_size <= 4096 and saved.profile.temp == 0.3
+    planned = json.loads(world.run(capsys, "plan", "qwen3", "--all", "--json").out)
+    chat = next(p for p in planned["plans"] if p["intent"] == "chat")
+    assert chat["ctx_per_slot"] <= 4096
+
+
+def test_tune_text_comparison_masks_inherited_api_key(world, capsys) -> None:
+    """Showing a new candidate must not print the standalone API credential."""
+    world.cfg.default_profile.api_key = "private-test-credential"
+    result = world.run(capsys, "tune", "qwen3")
+    assert result.code == 0
+    assert "private-test-credential" not in result.out
+    assert "api_key: Empty -> Set" in result.out
+
+
+@pytest.mark.parametrize("speed", ["nan", "inf", "-1"])
+def test_tune_invalid_goal_does_not_launch(world, capsys, speed: str) -> None:
+    """Reject malformed throughput constraints before starting a benchmark."""
+    result = world.run(capsys, "tune", "qwen3", "--min-effective-tps", speed)
+    assert result.code == 2 and world.runner.profiles == []
+
+
 def test_tune_steps_down_and_respects_trials(world, capsys) -> None:
     world.runner = FakeRunner(oom(), oom(), good())
     r = world.run(capsys, "tune", "qwen3", "--trials", "2")
     assert len(world.runner.profiles) == 2 and r.code == 1
-    assert "nothing loaded after 2 trials" in r.out and "out of memory" in r.err
+    assert "trial budget reached; goals unmet" in r.out and "out of memory" in r.err
     trials = json.loads((world.cfg_dir / "tuning.json").read_text())["trials"]
     assert len(trials) == 2                                  # failed trials are recorded too
     assert not (world.cfg_dir / "config.json").exists()      # no winner, no preset
@@ -598,7 +640,7 @@ def test_tune_preflight_refuses_and_force_overrides(world, capsys) -> None:
     assert world.runner.profiles == []
     assert world.run(capsys, "tune", "qwen3", "--force").code == 0
     # the full GPU fails the headroom guard: the tune steps down to a GPU+CPU plan
-    assert len(world.runner.profiles) == 4
+    assert world.runner.profiles[-1].gpu_layers == "auto"
 
 
 def test_tune_ctrl_c_stops_cleanly_and_records_the_trials_so_far(world, capsys) -> None:
@@ -614,7 +656,7 @@ def test_cancelled_tune_text_does_not_repeat_itself(world, capsys) -> None:
     world.runner = FakeRunner(KeyboardInterrupt())
     r = world.run(capsys, "tune", "qwen3")
     assert r.code == 1
-    assert r.out.splitlines()[0] == "qwen3-8b-q4_k_m for chat: cancelled before any trial ran"
+    assert r.out.splitlines()[0] == "qwen3-8b-q4_k_m for chat: cancelled; goals unmet: no passing trial"
 
 
 def test_tune_needs_the_binary(world, capsys) -> None:

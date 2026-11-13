@@ -29,6 +29,41 @@ def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+def test_failed_atomic_save_preserves_previous_config(
+        cfg_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serving readers retain a complete prior config if replacement fails.
+
+    Args:
+        cfg_dir: Scratch configuration directory.
+        monkeypatch: Isolated filesystem failure injection.
+
+    Returns:
+        None.
+    """
+    cfg = Config(default_intent="chat")
+    cfg.save()
+    previous = (cfg_dir / "config.json").read_bytes()
+    cfg.default_intent = "agent"
+
+    def fail_replace(self: Path, target: Path) -> Path:
+        """Simulate a failed atomic replacement.
+
+        Args:
+            self: Temporary file path.
+            target: Destination file path.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="replacement failed"):
+        cfg.save()
+    assert (cfg_dir / "config.json").read_bytes() == previous
+    assert not list(cfg_dir.glob(".config-*.tmp"))
+
+
 def _v2(cfg_dir: Path, **extra: object) -> str:
     text = json.dumps({"version": 2, **LEGACY, "headroom_pct": 15, **extra}, indent=2)
     (cfg_dir / "config.json").write_text(text)

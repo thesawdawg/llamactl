@@ -12,6 +12,7 @@ import pytest
 
 from llamactl import gateway, tuner
 from llamactl.config import Config, Profile
+from llamactl.goals import TuningGoals
 from llamactl.hardware import Device
 from llamactl.measure import ERR_ARGS, ERR_BENCH, ERR_LOAD, ERR_OOM, ERR_TIMEOUT
 from llamactl.tuner import ServerRunner, classify_failure, health_timeout, parse_build
@@ -138,6 +139,32 @@ def make(world: World, **kw: Any) -> ServerRunner:
 
 def completion_ok(world: World, body: Any = None) -> None:
     world.routes[("POST", "/completion")] = Resp(200, body or TIMINGS)
+
+
+def kv_slot(world: World, gen: int = 100, pp: float = 5000.0, tg: float = 50.0,
+            advance: float = 4.0, change: dict[str, Any] | None = None) -> None:
+    """Fake ``POST /completion`` emulating the llama-server slot prompt cache.
+
+    Tracks the slot-0 sequence and reports ``cache_n`` as the prompt's longest prefix
+    already there (``prompt_n`` gets the rest), so cached-prefix and cold turns can be
+    told apart. Every request advances the clock by `advance` seconds; `change` merges
+    extra or malformed fields into each response's timings.
+    """
+    state: list[int] = []
+
+    def complete(kwargs: dict[str, Any]) -> Resp:
+        nonlocal state
+        prompt = list(kwargs["json"]["prompt"])
+        matched = next((i for i, (a, b) in enumerate(zip(prompt, state)) if a != b),
+                       min(len(prompt), len(state)))
+        world.now += advance
+        state = prompt + [-1] * int(kwargs["json"].get("n_predict", 1))
+        timings = {"prompt_n": len(prompt) - matched, "cache_n": matched,
+                   "predicted_n": min(int(kwargs["json"]["n_predict"]), gen),
+                   "prompt_per_second": pp, "predicted_per_second": tg, **(change or {})}
+        return Resp(200, {"timings": timings})
+
+    world.routes[("POST", "/completion")] = complete
 
 
 # --------------------------------------------------------------------------- happy path
@@ -503,3 +530,106 @@ def test_cancel_after_load_skips_the_benchmark(world: World, model: Path) -> Non
 def test_a_cancel_that_never_fires_changes_nothing(world: World, model: Path) -> None:
     completion_ok(world)
     assert make(world).measure(model, Profile(), cancel=lambda: False).ok
+
+
+# --------------------------------------------------------------------------- goal workloads
+
+def test_large_workloads_are_cached_prefix_turns_not_cold_prefills(
+        world: World, model: Path) -> None:
+    """Above the turn size a workload is a primed prefix plus a delta, like a real turn."""
+    world.routes[("POST", "/tokenize")] = Resp(200, {"tokens": list(range(40000))})
+    kv_slot(world, gen=100)
+    m = make(world, goals=TuningGoals(benchmark="normal")).measure(
+        model, Profile(ctx_size=32768))
+    assert m.ok, m.error
+    posts = [r["json"] for r in world.requests if r["path"] == "/completion"]
+    # First request is the discarded warmup; the 2k workload is evicted, then cold.
+    assert posts[0]["n_predict"] == tuner.WARMUP_PREDICT and posts[0]["cache_prompt"] is True
+    cold = posts[2]
+    assert cold["cache_prompt"] is False and len(cold["prompt"]) == 2048
+    quick = m.workloads[0]
+    assert quick.cached_tokens == 0 and quick.prompt_tokens == 2048 and quick.samples == 1
+    # The 25k workload is a prime of the prefix, then the measured turn over it.
+    prime, turn = posts[-2], posts[-1]
+    assert prime["cache_prompt"] is True and len(prime["prompt"]) == 25000 - tuner.TURN_TOKENS
+    assert turn["cache_prompt"] is True and len(turn["prompt"]) == 25000
+    big = m.workloads[1]
+    assert big.cached_tokens == 25000 - tuner.TURN_TOKENS
+    assert big.prompt_tokens == tuner.TURN_TOKENS and big.occupancy_tokens == 25000
+    assert m.cached_tokens == big.cached_tokens
+
+
+def test_the_warmup_is_not_charged_to_a_workload(world: World, model: Path) -> None:
+    """First-inference cost (kernel init, clock ramp) must not land in a measured turn."""
+    world.routes[("POST", "/tokenize")] = Resp(200, {"tokens": list(range(10000))})
+    kv_slot(world, gen=100, advance=4)
+    first = {"done": False}
+    orig = world.routes[("POST", "/completion")]
+
+    def slow_first(kwargs: dict[str, Any]) -> Resp:
+        if not first["done"]:
+            first["done"] = True
+            world.now += 60                              # one-off cold-start cost
+        return orig(kwargs)
+
+    world.routes[("POST", "/completion")] = slow_first
+    m = make(world, goals=TuningGoals(benchmark="quick")).measure(
+        model, Profile(ctx_size=8192))
+    assert m.ok and m.workloads[0].request_s == 4        # not 64
+
+
+def test_a_sample_near_the_floor_is_retested_and_the_median_stands(
+        world: World, model: Path) -> None:
+    """One noisy request cannot pass or fail a near-floor candidate by itself."""
+    world.routes[("POST", "/tokenize")] = Resp(200, {"tokens": list(range(10000))})
+    state: list[int] = []
+    effective = iter([18.0, 24.0, 22.0])                 # effective tps of each measured turn
+
+    def complete(kwargs: dict[str, Any]) -> Resp:
+        nonlocal state
+        prompt = list(kwargs["json"]["prompt"])
+        matched = next((i for i, (a, b) in enumerate(zip(prompt, state)) if a != b),
+                       min(len(prompt), len(state)))
+        n = int(kwargs["json"]["n_predict"])
+        state = prompt + [-1] * n
+        if n <= tuner.WARMUP_PREDICT:
+            return Resp(200, {"timings": {}})            # warmup and primes are never measured
+        tps = next(effective, 24.0)
+        return Resp(200, {"timings": {"prompt_n": len(prompt) - matched, "cache_n": matched,
+                                      "predicted_n": 100, "prompt_ms": 0.0,
+                                      "predicted_ms": 100_000.0 / tps,
+                                      "prompt_per_second": 3000.0,
+                                      "predicted_per_second": tps}})
+
+    world.routes[("POST", "/completion")] = complete
+    m = make(world, goals=TuningGoals(benchmark="quick")).measure(
+        model, Profile(ctx_size=8192))
+    assert m.ok, m.error
+    assert m.workloads[0].samples == 3 and m.effective_tps == pytest.approx(22.0)
+    assert m.effective_tps >= 20.0                       # the median passes, the dip does not
+
+
+def test_a_cancel_between_workload_requests_stops_the_trial(world: World, model: Path) -> None:
+    world.routes[("POST", "/tokenize")] = Resp(200, {"tokens": list(range(40000))})
+    kv_slot(world, gen=100)
+
+    def cancel() -> bool:
+        """Fire once the first measured turn has completed (n_predict > the warmup's)."""
+        turns = [r for r in world.requests if r["path"] == "/completion"
+                 and r["json"]["n_predict"] > tuner.WARMUP_PREDICT]
+        return len(turns) >= 1
+
+    m = make(world, goals=TuningGoals(benchmark="normal")).measure(
+        model, Profile(ctx_size=32768), cancel=cancel)
+    assert m.cancelled and not m.ok
+    assert "stopped between workloads" in m.error
+
+
+def test_the_runner_waits_for_device_memory_to_settle(world: World, model: Path) -> None:
+    """After a stop, the next trial's baseline must not see released VRAM as still gone."""
+    completion_ok(world)
+    world.free_seq = [16 * GB, 7 * GB, 6.5 * GB, 8 * GB, 12 * GB, 16 * GB]
+    before = world.sleeps
+    make(world).measure(model, Profile())
+    assert world.free_seq == [16 * GB]                 # polled until the free total returned
+    assert world.sleeps > before                       # settle polls actually slept

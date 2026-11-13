@@ -313,11 +313,24 @@ def render_tune(d: dict, style: Style) -> str:
         lines.append(kv([
             ("context", f"{best['ctx_per_slot']} per slot, {best['cache_type']} KV, {best['verdict']}"),
             ("speed", f"{m['gen_tps']:.1f} tok/s generation, {m['prompt_tps']:.1f} tok/s prompt"),
+            ("effective output", f"{m.get('effective_tps', 0):.1f} tok/s per turn "
+             "(new input + generation)"),
             ("memory", f"{gb(m['vram_used'])} VRAM, {gb(m['ram_used'])} RAM"),
         ], "  "))
         if d["why"]:
             lines.append(f"  {d['why']}")
-        lines.append(f"  saved as the '{d['intent']}' preset (tuned)")
+        for change in d.get("changes", ()):
+            before = "not saved" if change["saved"] is None else str(change["saved"])
+            lines.append(f"  {change['setting']}: {before} -> {change['candidate']}")
+        for workload in m.get("workloads", ()):
+            elapsed = workload.get("request_s", 0)
+            speed = workload.get("generated_tokens", 0) / elapsed if elapsed > 0 else 0
+            cached = f" + {workload['cached_tokens']} cached" if workload.get("cached_tokens") else ""
+            samples = f" (median of {workload['samples']})" if workload.get("samples", 1) > 1 else ""
+            lines.append(f"  {workload['label']}: {workload['prompt_tokens']} new input{cached} "
+                         f"tokens, {speed:.1f} effective tok/s per turn{samples}")
+        lines.append(f"  saved as the '{d['intent']}' preset; applies on next load"
+                     if d.get("saved", True) else "  candidate only; saved preset unchanged")
     lines.append(f"  calibration factor now x{d['calibration_factor']:.2f}")
     if d["gateway_reloaded"]:
         lines.append("  gateway reloaded")

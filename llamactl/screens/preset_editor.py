@@ -130,7 +130,8 @@ class PresetEditor(Screen[Profile | None]):
                 yield BudgetPanel()
                 yield Static("", id="preview")
         with ButtonBar(id="buttons", classes="-docked"):
-            yield Button("Save", id="save", variant="primary")
+            yield Button("Review changes" if self.info is not None else "Save",
+                         id="save", variant="primary")
             yield Button("Apply plan", id="plan")
             yield Button("Cancel", id="cancel")
         yield Label("", id="ed_status")

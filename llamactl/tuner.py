@@ -15,12 +15,13 @@ injectable so tests never start llama.cpp.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -33,10 +34,11 @@ from .command import build_command
 from .config import LOG_DIR, Config, Preset, Profile
 from .gateway import terminate_group
 from .gguf import ModelInfo
+from .goals import TuningGoals
 from .hardware import Device, Host
 from .intents import KV_NEVER, Intent
 from .measure import (ERR_ARGS, ERR_BENCH, ERR_CANCELLED, ERR_LOAD, ERR_OOM, ERR_TIMEOUT,
-                      Measurement)
+                      Measurement, WorkloadMeasurement)
 from .planner import F16, GB, Q8, VERDICT_CPU, VERDICT_GPU, VERDICT_NO, VERDICT_SPILL, Plan
 from .sessions import next_free_port, pid_alive
 from .support import SupportChecker, unknown_arch
@@ -48,6 +50,7 @@ SPEED_INTENT = "speed"
 HOW_PLAN, HOW_CTX_DOWN, HOW_KV_Q8, HOW_SPILL = "plan", "ctx down", "q8_0 KV", "spill"
 HOW_ALL_GPU, HOW_CTX_UP, HOW_THREADS = "all GPU", "ctx up", "threads"
 HOW_MORE_RAM, HOW_MOE_BACK = "more experts to RAM", "experts back to GPU"
+HOW_BISECT = "ctx bisect"
 
 CTX_STEP = 4096             # context probes are multiples of this
 SPEED_TOLERANCE = 0.05      # extra context beyond the target may cost at most ~5% speed
@@ -67,6 +70,17 @@ GONE_WAIT = 10.0          # after SIGKILL, how long to wait for the process to d
 VERSION_TIMEOUT = 20.0
 LOG_TAIL_BYTES = 65536
 PREFLIGHT_MARGIN = 0.9    # refuse only when free memory is below 90% of the budget
+
+# Constrained-tune workload model: a turn is its new input (delta) plus generation over
+# a prefix already in the KV cache — how chat and coding harnesses actually behave.
+TURN_TOKENS = 2048        # turn delta over a cached prefix; at/below it a turn is cold
+WARMUP_TOKENS = 2048      # one discarded request so kernel init and clock ramp stay out
+WARMUP_PREDICT = 8
+PRIME_PREDICT = 1         # prefix priming/eviction generates one token to settle the slot
+NEAR_FLOOR = 1.15         # within 15% of an enabled floor: retest, keep the median of 3
+SETTLE_MAX = 4.0          # seconds to wait for device memory release after a stop
+SETTLE_POLL = 0.25
+CTX_BISECT_TOL = 0.05     # stop bisecting once the open interval is within ~5% of hi
 
 BENCH_PROMPT_TOKENS = 2048  # benchmark prompt length cap; shorter contexts get half of theirs
 _BENCH_PARA = (
@@ -696,7 +710,8 @@ def _why(space: SearchSpace, best: Candidate, m: Measurement,
 def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Runner, *,
          headroom_pct: float = 10, calibration: Calibration | None = None, max_trials: int = 6,
          progress: Callable[[TrialEvent], None] | None = None,
-         cancel: Callable[[], bool] | None = None) -> TuneResult:
+         cancel: Callable[[], bool] | None = None,
+         goals: TuningGoals | None = None) -> TuneResult:
     """Find the best measured profile for an intent by launching real candidates.
 
     Starts from `planner.plan` and follows `next_candidate` until it has nothing left to try,
@@ -722,6 +737,10 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
     Returns:
         The result; ``trials`` holds every launch, ``best`` the winner (None if nothing loaded).
     """
+    if goals is not None:
+        return tune_goals(intent, info, host, base, runner, goals, headroom_pct=headroom_pct,
+                          calibration=calibration, max_trials=max_trials, progress=progress,
+                          cancel=cancel)
     space = SearchSpace(intent, info, host, headroom_pct)
     plan = planner.plan(intent, info, host, base, headroom_pct, calibration)
     if plan.verdict == VERDICT_NO:
@@ -775,6 +794,268 @@ def tune(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Run
                       notes, _why(space, best[0], best[1], history))
 
 
+def goal_failure(goals: TuningGoals, measurement: Measurement) -> str:
+    """Explain a failed throughput constraint without averaging distinct workloads.
+
+    Args:
+        goals: Preset throughput floors.
+        measurement: Measured trial, possibly with individual workload results.
+
+    Returns:
+        First violated workload/floor, or an empty string when every floor passes.
+    """
+    if not measurement.ok:
+        return measurement.error
+    workloads = measurement.workloads or (measurement,)
+    for workload in workloads:
+        label = getattr(workload, "label", "benchmark")
+        for name, value, floor in (("effective", workload.effective_tps, goals.min_effective_tps),
+                                   ("input", workload.prompt_tps, goals.min_prompt_tps),
+                                   ("generation", workload.gen_tps, goals.min_gen_tps)):
+            if floor and (not math.isfinite(value) or value < floor):
+                return f"{label}: {name} {value:.1f} TPS below {floor:g} minimum"
+    return ""
+
+
+def _bisect_next(lo: int, hi: int) -> int | None:
+    """Next context probe between a proven pass and a proven failure, or None.
+
+    Args:
+        lo: Largest context per slot that passed every floor (0 for none yet).
+        hi: Smallest context that provably failed.
+
+    Returns:
+        The interval midpoint aligned down to a `CTX_STEP` multiple (the raw midpoint
+        when the aligned one would not advance), or None when the open interval is
+        within ~`CTX_BISECT_TOL` of `hi` or `hi` is at the 256-token minimum.
+    """
+    if hi <= 256 or hi - lo <= max(1024, int(hi * CTX_BISECT_TOL)):
+        return None
+    mid = (lo + hi) // 2
+    aligned = mid // CTX_STEP * CTX_STEP
+    return aligned if lo < aligned < hi else mid
+
+
+def tune_goals(intent: Intent, info: ModelInfo, host: Host, base: Profile, runner: Runner,
+               goals: TuningGoals, *, headroom_pct: float = 10,
+               calibration: Calibration | None = None, max_trials: int = 6,
+               progress: Callable[[TrialEvent], None] | None = None,
+               cancel: Callable[[], bool] | None = None) -> TuneResult:
+    """Search for the largest tested context whose measured turns satisfy every floor.
+
+    Candidates grow toward the ceiling while they pass. A failure bounds the search:
+    memory failures first try the placement ladder at the same context (more experts
+    to RAM, q8_0 KV, llama.cpp placement), then the context is bisected against the
+    largest proven pass until the open interval is within ~5%. Placement at each
+    probed context is corrected with measured VRAM: a measured slack that proves the
+    model fits fully on the GPU overrides a plan that chose a spill, and measured
+    bytes that prove an all-GPU plan cannot hold the context step straight to a MoE
+    expert split or llama.cpp's own placement instead of spending a launch on an OOM.
+
+    Args:
+        intent: Purpose inherited by the preset.
+        info: Parsed model metadata.
+        host: Available hardware before tuning.
+        base: Base launch settings.
+        runner: Injectable measurement implementation.
+        goals: Persistent speed floors, context ceiling and benchmark suite.
+        headroom_pct: Device memory reserve.
+        calibration: Existing memory calibration.
+        max_trials: Maximum candidate launches before reporting incomplete search.
+        progress: Optional trial event callback.
+        cancel: Optional cancellation predicate.
+
+    Returns:
+        Best passing candidate, or an unmet-goal outcome; no configuration is saved.
+    """
+    intent = goals.resolve_intent(intent)
+    if info.is_embedding:
+        goals = replace(goals, min_effective_tps=0, min_gen_tps=0)
+    space = SearchSpace(intent, info, host, headroom_pct)
+    plan = planner.plan(intent, info, host, base, headroom_pct, calibration)
+    if plan.verdict == VERDICT_NO:
+        return TuneResult(intent.key, None, None, message="goals unmet: model does not fit available memory")
+    if isinstance(runner, ServerRunner):
+        runner.goals = goals
+    ceiling = planner.ctx_ceiling(intent, info)
+    history: History = []
+    trials: list[Trial] = []
+    notes: list[str] = []
+    passing: list[tuple[Candidate, Measurement]] = []
+    seen: set[tuple] = set()
+    lo = 0                      # largest context per slot that passed every floor
+    hi: int | None = None       # smallest context that provably failed
+    cancelled = complete = False
+    last_failure = ""
+    budget = trial_budget(info, max_trials)
+
+    def predicted_gpu_bytes(prof: Profile, context: int) -> int | None:
+        """Measured-VRAM prediction for an all-GPU launch of `prof` at `context`.
+
+        Anchored on the largest matching all-GPU trial (same KV cache types and slot
+        count, no experts in RAM); the bytes-per-token slope is measured between the
+        two largest such points, else the planner's KV estimate.
+
+        Returns:
+            Predicted device bytes used, or None without a measured anchor.
+        """
+        pts = sorted({c.ctx_per_slot: m.vram_used for c, m in history
+                      if m.ok and c.profile.gpu_layers == "all" and c.profile.n_cpu_moe == 0
+                      and c.profile.cache_type_k == prof.cache_type_k
+                      and c.profile.cache_type_v == prof.cache_type_v
+                      and c.profile.parallel == prof.parallel and m.vram_used > 0}.items())
+        if not pts:
+            return None
+        slope = 0.0
+        if len(pts) >= 2 and pts[-1][0] > pts[-2][0]:
+            slope = (pts[-1][1] - pts[-2][1]) / (pts[-1][0] - pts[-2][0])
+        if slope <= 0:
+            slope = (planner.kv_per_token(info, prof.cache_type_k, prof.cache_type_v)
+                     * max(1, prof.parallel))
+        if slope <= 0:
+            return None
+        return pts[-1][1] + int(slope * (context - pts[-1][0]))
+
+    def degrade(cand: Candidate, need: int, how: str) -> Candidate:
+        """Placement for a context measured not to fit all-GPU: more experts to RAM on a
+        MoE model, else llama.cpp's own placement (``fit`` on).
+
+        Args:
+            cand: The all-GPU candidate predicted not to fit.
+            need: Its predicted device bytes.
+            how: Reason for the probe.
+
+        Returns:
+            The replacement candidate, or `cand` unchanged when no alternative exists
+            (it will then fail honestly) or it was already tried.
+        """
+        p = cand.profile
+        out = cand
+        if space._moe():
+            overflow = need - (host.vram_free - space._headroom())
+            target = planner.expert_ram_bytes(info, p) + max(overflow, 1)
+            split = planner.moe_split(info, target)
+            n = min(info.n_layer, max(p.n_cpu_moe + 1, split[0] if split else info.n_layer))
+            out = space.candidate(p.merged(n_cpu_moe=n, fit="off"), how)
+        elif host.gpus and not host.unified:
+            mib = max(planner.headroom_bytes(g.total, headroom_pct)
+                      for g in host.gpus) // planner.MiB
+            out = space.candidate(p.merged(gpu_layers="auto", fit="on", fit_target=mib), how)
+        return cand if profile_key(out.profile) in seen else out
+
+    def at_context(context: int, how: str) -> Candidate:
+        """Replan placement for the candidate's actual context, keeping unrelated edits,
+        then correct it with measured VRAM where the estimate disagrees.
+
+        Args:
+            context: Requested context per slot for this trial.
+            how: Human-readable reason for the next trial.
+
+        Returns:
+            A candidate with placement chosen at this context, rather than at the ceiling.
+        """
+        fixed = replace(intent, ctx_min=context, ctx_target=context, ctx_max=context)
+        proposed = planner.plan(fixed, info, host, base, headroom_pct, calibration)
+        cand = space.with_ctx(space.from_plan(proposed), context, how)
+        p = cand.profile
+        if cand.verdict == VERDICT_SPILL:
+            upgrade = p.merged(gpu_layers="all", fit="off", fit_target=0, n_cpu_moe=0)
+            need = predicted_gpu_bytes(upgrade, context)
+            if (need is not None and host.vram_free - need >= space._headroom()
+                    and profile_key(upgrade) not in seen):
+                cand = space.candidate(upgrade, how)
+        elif p.gpu_layers == "all" and p.n_cpu_moe == 0:
+            need = predicted_gpu_bytes(p, context)
+            if need is not None and host.vram_free - need < space._headroom():
+                cand = degrade(cand, need, how)
+        return cand
+
+    candidate = at_context(min(plan.ctx_per_slot, 32768, ceiling), HOW_PLAN)
+    while len(trials) < budget:
+        if cancel and cancel():
+            cancelled = True
+            break
+        index = len(trials) + 1
+        if progress:
+            progress(TrialEvent(index, budget, "start", candidate.summary,
+                                n_cpu_moe=candidate.profile.n_cpu_moe))
+        try:
+            measurement = runner.measure(info.path, candidate.profile, cancel)
+        except KeyboardInterrupt:
+            cancelled = True
+            break
+        if measurement.cancelled:
+            cancelled = True
+            if progress:
+                progress(TrialEvent(index, budget, "done", candidate.summary, measurement,
+                                    n_cpu_moe=candidate.profile.n_cpu_moe))
+            break
+        history.append((candidate, measurement))
+        seen.add(profile_key(candidate.profile))
+        reject = space.reject_reason(candidate, measurement, history) if measurement.ok else ""
+        failure = (reject if measurement.ok else measurement.error) or goal_failure(goals, measurement)
+        last_failure = failure
+        notes.append(failure)
+        trials.append(Trial(model=str(info.path), mtime=_mtime(info.path), intent=intent.key,
+                            profile=candidate.profile.to_dict(),
+                            estimated_total=planner.estimate_budget(info, candidate.profile,
+                                                                    host).raw_total(),
+                            verdict=candidate.verdict, backend=_backend(host),
+                            measurement=measurement))
+        if progress:
+            progress(TrialEvent(index, budget, "done", candidate.summary, measurement,
+                                failure, candidate.profile.n_cpu_moe))
+        if not failure:
+            passing.append((candidate, measurement))
+            lo = candidate.ctx_per_slot
+            if lo >= ceiling:
+                complete = True
+                break
+            nxt = (min(ceiling, max(lo + 1, lo * 2)) if hi is None
+                   else _bisect_next(lo, hi))
+            if nxt is None or nxt <= lo:
+                complete = True
+                break
+            candidate = at_context(nxt, HOW_CTX_UP if hi is None else HOW_BISECT)
+            continue
+        # Memory failures get the placement ladder first (same context); anything else
+        # that cannot be retried at this context bounds the bisection.
+        resource = (not measurement.ok and measurement.resource_failure) or bool(reject)
+        if not measurement.ok and not resource:
+            complete = True            # e.g. unknown argument: more trials will not help
+            break
+        if resource:
+            smaller = space.down(candidate, measurement)
+            if (smaller is not None and profile_key(smaller.profile) not in seen
+                    and smaller.ctx_per_slot > lo):
+                if smaller.ctx_per_slot < candidate.ctx_per_slot:
+                    hi = min(hi, candidate.ctx_per_slot) if hi is not None \
+                        else candidate.ctx_per_slot
+                candidate = smaller
+                continue
+        hi = min(hi, candidate.ctx_per_slot) if hi is not None else candidate.ctx_per_slot
+        nxt = _bisect_next(lo, hi)
+        if nxt is None:
+            complete = True
+            break
+        candidate = at_context(nxt, HOW_BISECT)
+    status = "cancelled; " if cancelled else "" if complete else "trial budget reached; "
+    if not passing:
+        return TuneResult(intent.key, None, None, trials=trials, ok=False,
+                          message=f"{status}goals unmet: {last_failure or 'no passing trial'}",
+                          cancelled=cancelled, notes=tuple(notes))
+    best, measurement = max(passing, key=lambda cm: cm[0].ctx_per_slot)
+    why = (f"Largest tested context meeting every enabled speed floor: {best.ctx_per_slot} "
+           f"tokens/request; {measurement.effective_tps:.1f} effective output TPS per turn "
+           f"(cached prefix + new input). {goals.benchmark.capitalize()} workload suite.")
+    reduced = [w.label for w in measurement.workloads if "reduced" in w.label]
+    if reduced:
+        why += " Reduced workload coverage: " + "; ".join(reduced) + "."
+    message = f"{status}{why}"
+    return TuneResult(intent.key, best, measurement, trials, True, message, cancelled,
+                      tuple(notes), why)
+
+
 def save_result(cfg: Config, model: str | Path, result: TuneResult, calibration: Calibration,
                 *, activate: bool = False) -> None:
     """Persist a tune: every trial to tuning.json, and the winner as the model's preset.
@@ -799,8 +1080,10 @@ def save_result(cfg: Config, model: str | Path, result: TuneResult, calibration:
     calibration.save()
     if not result.ok or result.best is None or result.measurement is None:
         return
+    previous = cfg.preset(str(model), result.intent)
     cfg.set_preset(str(model), Preset(result.intent, result.best.profile, TUNED,
-                                      result.measurement), activate=activate)
+                                      result.measurement, previous.goals if previous else TuningGoals()),
+                   activate=activate)
     cfg.save()
 
 
@@ -927,6 +1210,7 @@ class ServerRunner:
         sleep: Sleep function.
         support: Records a failed load's ``unknown model architecture`` for this build
             (or None).
+        goals: Optional workload suite and goals for measured requests.
     """
 
     def __init__(self, cfg: Config, *, popen: Callable[..., Any] = subprocess.Popen,
@@ -936,8 +1220,10 @@ class ServerRunner:
                  ram_free: Callable[[], int] | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
-                 support: SupportChecker | None = None) -> None:
+                 support: SupportChecker | None = None,
+                 goals: TuningGoals | None = None) -> None:
         self.cfg = cfg
+        self.goals = goals
         self._popen = popen
         self._http = http
         self._devices = devices or (lambda: live_devices(cfg.bin_dir))
@@ -1002,6 +1288,28 @@ class ServerRunner:
             self._sleep(0.1)
             waited += 0.1
 
+    def _settle(self, baseline: int) -> None:
+        """Wait for the stopped server's device memory to come back.
+
+        Drivers (WDDM in particular) release device memory lazily; the next trial's
+        pre-launch snapshot would otherwise see less free memory than it really has,
+        and a ``fit`` placement would under-offload. Polls until the free total is back
+        at `baseline` (free bytes before the launch), stops changing, or `SETTLE_MAX`
+        passes; never raises.
+        """
+        last, stable = -1, 0
+        deadline = self._clock() + SETTLE_MAX
+        while self._clock() < deadline and stable < 2:
+            try:
+                free = sum(d.free for d in self._devices())
+            except Exception:
+                return
+            if free >= baseline:
+                return
+            stable = stable + 1 if 0 <= last and free <= last else 0
+            last = free
+            self._sleep(SETTLE_POLL)
+
     # -- measuring -------------------------------------------------------------------
 
     def measure(self, model: Path, profile: Profile,
@@ -1046,6 +1354,7 @@ class ServerRunner:
                                       ram_before, build, cancel)
         finally:
             self._stop(proc.pid)
+            self._settle(vram_before)
         if m.ok or m.cancelled:
             log.unlink(missing_ok=True)
         return m
@@ -1088,16 +1397,213 @@ class ServerRunner:
                 return failed(f"{ERR_CANCELLED}: stopped before the benchmark", load_s)
             vram_load, ram_load = self._snapshot()
             try:
-                prompt_tps, gen_tps = (self._embed(client) if prof.embedding else
-                                       self._complete(client, (prof.ctx_size or 4096) //
-                                                       max(1, prof.parallel)))
-            except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
-                return failed(f"{ERR_BENCH}: {e}", load_s)
+                workloads: tuple[WorkloadMeasurement, ...] = ()
+                if self.goals is not None and not prof.embedding:
+                    workloads = self._workloads(client, (prof.ctx_size or 4096) //
+                                                max(1, prof.parallel), cancel)
+                    prompt_tps = min(w.prompt_tps for w in workloads)
+                    gen_tps = min(w.gen_tps for w in workloads)
+                else:
+                    prompt_tps, gen_tps = (self._embed(client) if prof.embedding else
+                                           self._complete(client, (prof.ctx_size or 4096) //
+                                                           max(1, prof.parallel)))
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, OverflowError) as e:
+                error = str(e)
+                return failed(error if error.startswith(ERR_CANCELLED)
+                              else f"{ERR_BENCH}: {error}", load_s)
             vram_end, ram_end = self._snapshot()
         return Measurement(
             ok=True, load_s=load_s, vram_used=max(0, vram_before - min(vram_load, vram_end)),
             ram_used=max(0, ram_before - min(ram_load, ram_end)), prompt_tps=prompt_tps,
-            gen_tps=gen_tps, at=_now(), build=build)
+            gen_tps=gen_tps, at=_now(), build=build,
+            effective_tps=min((w.effective_tps for w in workloads), default=0.0),
+            request_s=sum(w.request_s for w in workloads),
+            prompt_tokens=sum(w.prompt_tokens for w in workloads),
+            generated_tokens=sum(w.generated_tokens for w in workloads),
+            cached_tokens=sum(w.cached_tokens for w in workloads), workloads=workloads)
+
+    def _completion(self, client: Any, prompt: list[int], n_predict: int,
+                    cache_prompt: bool, timeout: float) -> tuple[dict, float]:
+        """One ``POST /completion`` pinned to slot 0; returns (body, wall seconds).
+
+        Args:
+            client: Trial server HTTP client.
+            prompt: Prompt as token IDs.
+            n_predict: Tokens to generate.
+            cache_prompt: Keep the prompt in the KV cache for reuse (the realistic
+                setting); False only marks the cold turns.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            (response JSON, request wall time).
+
+        Raises:
+            ValueError: On a non-200 status.
+        """
+        started = self._clock()
+        response = client.request("POST", "/completion", timeout=timeout, json={
+            "id_slot": 0, "prompt": prompt, "n_predict": n_predict,
+            "cache_prompt": cache_prompt, "seed": 42, "temperature": 0, "stream": False,
+            "ignore_eos": True})
+        elapsed = self._clock() - started
+        if response.status_code != 200:
+            raise ValueError(f"completion HTTP {response.status_code}")
+        return response.json(), elapsed
+
+    def _prime(self, client: Any, prompt: list[int], n_predict: int = PRIME_PREDICT) -> None:
+        """Seed slot 0's KV cache with `prompt` without measuring it.
+
+        Used for the discarded warmup (which also generates a few tokens to warm the
+        decode path) and to place the cached prefix — or evict the previous sequence —
+        before a turn request. Only the HTTP status is checked.
+
+        Raises:
+            ValueError: On a non-200 status.
+        """
+        self._completion(client, prompt, n_predict, True,
+                         max(BENCH_TIMEOUT, len(prompt) / 20 + 30))
+
+    def _turn(self, client: Any, label: str, prompt: list[int], output: int,
+              cache_prefix: int) -> WorkloadMeasurement:
+        """One measured turn at `cache_prefix` expected cached tokens.
+
+        `cache_prefix` 0 is a cold turn (no cache coverage allowed); larger values
+        require the server to report that prefix served from the cache (up to one
+        turn's worth of boundary loss). Turn duration is the server's own prompt +
+        predicted time when reported, else the request's wall time — serializing and
+        transporting the prompt is client cost, not turn time.
+
+        Args:
+            client: Trial server HTTP client.
+            label: Workload label for error messages and reports.
+            prompt: Turn prompt as token IDs (prefix + delta).
+            output: ``n_predict`` for the turn.
+            cache_prefix: Tokens of `prompt`'s head expected already in the KV cache.
+
+        Returns:
+            The measured workload.
+
+        Raises:
+            ValueError: On truncation, unverified cache coverage, or invalid timings.
+        """
+        body, elapsed = self._completion(client, prompt, output, cache_prefix > 0,
+                                         max(BENCH_TIMEOUT, len(prompt) / 20 + 30))
+        if body.get("truncated"):
+            raise ValueError(f"{label}: server truncated benchmark context")
+        timings = body["timings"]
+        generated = int(timings["predicted_n"])
+        processed = int(timings["prompt_n"])
+        cached = int(timings.get("cache_n", 0))
+        prompt_rate = float(timings["prompt_per_second"])
+        gen_rate = float(timings["predicted_per_second"])
+        prompt_ms, predicted_ms = timings.get("prompt_ms"), timings.get("predicted_ms")
+        server_s = ((float(prompt_ms) + float(predicted_ms)) / 1000
+                    if isinstance(prompt_ms, (int, float))
+                    and isinstance(predicted_ms, (int, float)) else elapsed)
+        count = len(prompt)
+        if (generated <= 0 or generated > output or not math.isfinite(server_s)
+                or server_s <= 0):
+            raise ValueError(f"{label}: invalid output count or request duration")
+        # The measured turn must be the turn it claims: every prompt token accounted
+        # for, nothing cached on a cold turn, and a cached-prefix turn must actually
+        # have reused its prefix (a little boundary loss is tolerated).
+        if (cached + processed != count or processed <= 0
+                or (cache_prefix == 0 and cached != 0)
+                or cached < max(0, cache_prefix - TURN_TOKENS)):
+            raise ValueError(f"{label}: cached-prefix coverage not verified "
+                             f"({cached} cached + {processed} processed of {count})")
+        if any(not math.isfinite(rate) or rate <= 0 for rate in (prompt_rate, gen_rate)):
+            raise ValueError(f"{label}: invalid prompt/generation speed")
+        return WorkloadMeasurement(label, processed, generated, server_s,
+                                   prompt_rate, gen_rate, cached)
+
+    def _near_floor(self, w: WorkloadMeasurement) -> bool:
+        """True when the sample is not comfortably above every enabled floor.
+
+        A sample within `NEAR_FLOOR` of any floor is measured twice more and the
+        median stands, so one noisy request cannot pass or fail a candidate alone.
+        """
+        goals = self.goals
+        assert goals is not None
+        return any(floor > 0 and value < floor * NEAR_FLOOR
+                   for value, floor in ((w.effective_tps, goals.min_effective_tps),
+                                        (w.prompt_tps, goals.min_prompt_tps),
+                                        (w.gen_tps, goals.min_gen_tps)))
+
+    def _workloads(self, client: Any, context: int,
+                   cancel: Callable[[], bool] | None = None) -> tuple[WorkloadMeasurement, ...]:
+        """Measure practical turns at increasing context occupancy.
+
+        A workload is the interaction a real client produces: a prefix already in the
+        KV cache plus a turn's new input and generation (`TURN_TOKENS` delta + the
+        generated answer). Occupancies at or under `TURN_TOKENS` have no prefix to
+        reuse and are measured cold. One warmup request runs first so kernel
+        initialization and clock ramp are not charged to the first workload.
+
+        Args:
+            client: Trial server HTTP client.
+            context: Actual context per request.
+            cancel: Cancellation check between workload requests.
+
+        Returns:
+            Individual workloads, each including actual tokens and turn duration.
+
+        Raises:
+            ValueError: If tokenization or completion fails or no tokens are generated.
+        """
+        assert self.goals is not None
+        output = min(128, max(1, context // 20))
+        available = max(1, int(context * 0.95) - output - 8)
+        if self.goals.benchmark == "full":
+            requested = [(f"{pct}% context", int(context * pct / 100))
+                         for pct in (5, 25, 50, 75, 95)]
+        else:
+            requested = [("Quick 2k", 2048)]
+            if self.goals.benchmark == "normal":
+                requested.append(("Harness 25k", 25000))
+        maximum = max(min(tokens, available) for _, tokens in requested)
+        # Tokenize once for all workloads, then send token IDs to avoid character estimates
+        # being mistaken for the model's actual input occupancy.
+        paragraph = _BENCH_PARA.format(n=1)
+        text = " ".join(paragraph for _ in range(maximum // 60 + 1))
+        tokens: list[int] = []
+        for _ in range(8):
+            response = client.request("POST", "/tokenize", json={
+                "content": text, "add_special": True})
+            if response.status_code != 200:
+                raise ValueError(f"tokenization HTTP {response.status_code}")
+            tokens = response.json()["tokens"]
+            if not isinstance(tokens, list) or any(type(t) is not int for t in tokens):
+                raise ValueError("tokenizer did not return token IDs")
+            if len(tokens) >= maximum:
+                break
+            text += " " + text
+        if len(tokens) < maximum:
+            raise ValueError("tokenizer returned too few tokens for requested workloads")
+        evict = next(([t] for t in tokens if t != tokens[0]), tokens[:1])
+        # Warmup: the first inference pays kernel/graph init, clock ramp and page-in;
+        # its result is discarded so those costs land outside the measured turns.
+        self._prime(client, tokens[:min(WARMUP_TOKENS, maximum)], WARMUP_PREDICT)
+        results: list[WorkloadMeasurement] = []
+        for label, wanted in requested:
+            count = min(max(1, wanted), available)
+            if count < wanted:
+                label += f" (reduced to {count} input tokens for this context)"
+            prefix = max(0, count - TURN_TOKENS)
+            samples: list[WorkloadMeasurement] = []
+            for attempt in range(3):
+                if attempt and not self._near_floor(samples[0]):
+                    break               # comfortably above every floor: one sample is enough
+                if cancel and cancel():
+                    raise ValueError(f"{ERR_CANCELLED}: stopped between workloads")
+                if prefix:
+                    self._prime(client, tokens[:prefix])        # cached-prefix turn
+                else:
+                    self._prime(client, evict)                  # make the next turn cold
+                samples.append(self._turn(client, label, tokens[:count], output, prefix))
+            keep = sorted(samples, key=lambda w: w.effective_tps)[len(samples) // 2]
+            results.append(replace(keep, samples=len(samples)))
+        return tuple(results)
 
     @staticmethod
     def _complete(client: Any, ctx_per_slot: int) -> tuple[float, float]:

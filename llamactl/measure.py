@@ -5,7 +5,7 @@ Kept in its own module so both ``config`` (presets remember their measurement) a
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from typing import Any
 
 # Failure kinds: `Measurement.error` starts with one of these, then ": detail".
@@ -28,6 +28,69 @@ def _number(value: Any, kind: type, default: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class WorkloadMeasurement:
+    """Measured throughput of one turn at a given context occupancy.
+
+    Attributes:
+        label: Requested workload description.
+        prompt_tokens: Actually processed input tokens (the turn delta; the cached
+            prefix is not counted).
+        generated_tokens: Actual generated output tokens.
+        request_s: Measured turn duration (server timings when reported, else the
+            request's wall time), excluding server startup.
+        prompt_tps: Server input-processing speed over the processed delta.
+        gen_tps: Server output-generation speed.
+        cached_tokens: Prefix tokens served from the KV cache instead of processed.
+        samples: Measured requests folded into this result; >1 means a noisy
+            near-floor result was retested and this is the median.
+    """
+
+    label: str = ""
+    prompt_tokens: int = 0
+    generated_tokens: int = 0
+    request_s: float = 0.0
+    prompt_tps: float = 0.0
+    gen_tps: float = 0.0
+    cached_tokens: int = 0
+    samples: int = 1
+
+    @property
+    def effective_tps(self) -> float:
+        """Return delivered output tokens per second including the turn input wait."""
+        return self.generated_tokens / self.request_s if self.request_s > 0 else 0.0
+
+    @property
+    def occupancy_tokens(self) -> int:
+        """Context tokens the turn occupied: processed delta plus cached prefix."""
+        return self.prompt_tokens + self.cached_tokens
+
+    @classmethod
+    def from_dict(cls, data: Any) -> WorkloadMeasurement:
+        """Read a stored workload.
+
+        Args:
+            data: JSON object.
+
+        Returns:
+            Workload with unknown fields ignored and missing new fields defaulted.
+        """
+        if not isinstance(data, dict):
+            return cls()
+        return cls(str(data.get("label", "")),
+                   _number(data.get("prompt_tokens", 0), int, 0),
+                   _number(data.get("generated_tokens", 0), int, 0),
+                   _number(data.get("request_s", 0), float, 0.0),
+                   _number(data.get("prompt_tps", 0), float, 0.0),
+                   _number(data.get("gen_tps", 0), float, 0.0),
+                   _number(data.get("cached_tokens", 0), int, 0),
+                   _number(data.get("samples", 1), int, 1))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the workload's JSON-compatible measured values."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Measurement:
     """What one launch of llama-server showed (all memory in bytes).
 
@@ -43,6 +106,12 @@ class Measurement:
             embedding models.
         at: ISO timestamp of the measurement.
         build: llama-server version string the measurement was taken with.
+        effective_tps: Lowest workload effective output TPS; zero if unavailable.
+        request_s: Sum of measured turn durations, excluding model startup.
+        prompt_tokens: Total actually processed input tokens across workloads.
+        generated_tokens: Total actual generated tokens across workloads.
+        cached_tokens: Total prefix tokens served from the KV cache across workloads.
+        workloads: Individual benchmark results; empty for legacy measurements.
     """
 
     ok: bool = False
@@ -54,6 +123,12 @@ class Measurement:
     gen_tps: float = 0.0
     at: str = ""
     build: str = ""
+    effective_tps: float = 0.0
+    request_s: float = 0.0
+    prompt_tokens: int = 0
+    generated_tokens: int = 0
+    cached_tokens: int = 0
+    workloads: tuple[WorkloadMeasurement, ...] = ()
 
     @classmethod
     def from_dict(cls, data: Any) -> "Measurement":
@@ -79,7 +154,10 @@ class Measurement:
             if f.name not in data:
                 continue
             v, default = data[f.name], getattr(base, f.name)
-            if isinstance(default, bool):
+            if f.name == "workloads":
+                out[f.name] = (tuple(WorkloadMeasurement.from_dict(w) for w in v)
+                               if isinstance(v, (list, tuple)) else ())
+            elif isinstance(default, bool):
                 out[f.name] = v if isinstance(v, bool) else default
             elif isinstance(default, str):
                 out[f.name] = v if isinstance(v, str) else default
@@ -89,7 +167,8 @@ class Measurement:
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-able dict."""
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        return {f.name: ([w.to_dict() for w in self.workloads] if f.name == "workloads"
+                         else getattr(self, f.name)) for f in fields(self)}
 
     @property
     def resource_failure(self) -> bool:

@@ -4,27 +4,28 @@ Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that compl
 
 ## Phase 18 - Preset tuning goals and workloads
 
-- [ ] Persist per-preset context ceiling, effective TPS floor (20 default), optional input/output floors and benchmark level
-- [ ] Measure effective output TPS and Quick/Normal/Full workloads with token-aware occupancy
-- [ ] Search increasing context and back off failing context by 5%; verify all workload constraints
+- [x] Persist per-preset context ceiling, effective TPS floor (20 default), optional input/output floors and benchmark level
+- [x] Measure effective output TPS and Quick/Normal/Full workloads with token-aware occupancy
+- [x] Measure practical turns: cached prefix + ~2k delta above the turn size, discarded warmup, server-side turn timing, near-floor median-of-3 retests, post-stop VRAM settle
+- [x] Search increasing context; bound the search on a failure, then bisect against the largest proven pass (~5%); placement at each probe corrected with measured VRAM; verify all workload constraints
 
 ## Phase 19 - Deferred preset application
 
-- [ ] Preserve effective running gateway definitions across unrelated reloads and app restarts
-- [ ] Promote accepted saved settings after unload for the next explicit or on-demand load
+- [x] Preserve effective running gateway definitions across unrelated reloads and app restarts
+- [x] Promote accepted saved settings after unload for the next explicit or on-demand load
 
 ## Phase 20 - Guided model workspace
 
-- [ ] Model selection opens controls; explicit serving and advanced settings
-- [ ] Editable per-preset goals, saved/proposed comparison and per-workload results
-- [ ] Explicit candidate acceptance; keeping current never changes configuration
-- [ ] Consistent saved/estimated/running summaries and pending-next-load indication
+- [x] Model selection opens controls; explicit serving and advanced settings
+- [x] Editable per-preset goals, saved/proposed comparison and per-workload results
+- [x] Explicit candidate acceptance; keeping current never changes configuration
+- [x] Consistent saved/estimated/running summaries and pending-next-load indication
 
 ## Phase 21 - Integration and validation
 
-- [ ] Shared planning/tuning goals and CLI integration
-- [ ] Regression tests for goals, workloads, backoff, acceptance and deferred reloads
-- [ ] README/help updates and full test suite
+- [x] Shared planning/tuning goals and CLI integration
+- [x] Regression tests for goals, workloads, backoff, acceptance and deferred reloads
+- [x] README/help updates and full test suite
 
 ## Phase 0 - Plan
 

@@ -18,6 +18,9 @@ from .. import actions, hardware, tuner
 from ..actions import ActionError, TuneOutcome
 from ..gateway import LOADED, LOADING, SLEEPING, GatewayError
 from ..gguf import ModelInfo
+from ..goals import TuningGoals
+from ..config import Preset
+from .model_workspace import goal_changes, profile_changes
 from ..hardware import Host
 from ..intents import Intent
 from ..measure import Measurement
@@ -30,7 +33,7 @@ COLUMNS = (("#", "n"), ("change", "how"), ("ctx", "ctx"), ("CPU MoE", "moe"),
            ("prompt tok/s", "pp"), ("gen tok/s", "tg"), ("outcome", "out"))
 SUMMARY_RE = re.compile(r"^(?P<how>[^:]+): (?P<ctx>\d+) ctx, (?P<kv>\S+) KV, (?P<verdict>[^,]+)"
                         r"(?:, (?P<threads>\d+) threads)?$")
-DEFAULT_TRIALS = 6
+DEFAULT_TRIALS = 32
 ERRORS = (GatewayError, ActionError, LookupError, ValueError, OSError)
 ELAPSED_EVERY = 1.0          # seconds between progress line refreshes while running
 OUTCOME_WIDTH = 60           # characters of an error shown in the outcome column
@@ -102,7 +105,7 @@ def summary_text(plan: Plan, outcome: TuneOutcome, active: bool) -> Text:
         t.append(r.message or "nothing loaded", style="red")
         return t
     best, m = r.best, r.measurement
-    t.append("Winner  ", style="bold")
+    t.append("Candidate  ", style="bold")
     t.append(f"{best.ctx_per_slot} ctx per slot, {best.profile.cache_type_k} KV, {best.verdict}, "
              + (f"{m.gen_tps:.1f} tok/s" if m.gen_tps else f"{m.prompt_tps:.0f} prompt tok/s")
              + f", {m.vram_used / GB:.1f} GB VRAM, loads in {m.load_s:.0f} s\n")
@@ -115,30 +118,29 @@ def summary_text(plan: Plan, outcome: TuneOutcome, active: bool) -> Text:
     t.append(f"{plan.ctx_per_slot} ctx per slot, {plan.profile.cache_type_k} KV, {plan.verdict}, "
              f"needs {est / GB:.1f} GB{ratio}\n")
     t.append(r.message + "\n", style="dim")
-    t.append("This preset is active: it is served as plain alias." if active else
-             "Not active yet: Use makes it the preset served as plain alias.",
-             style="green" if active else "yellow")
-    if outcome.reload_error:
-        t.append(f"\nThe gateway was not reloaded: {outcome.reload_error}", style="yellow")
-    elif outcome.reloaded:
-        t.append("\nThe running gateway re-read the presets.", style="dim")
+    effective = getattr(m, "effective_tps", 0.0)
+    if effective:
+        t.append(f"Effective output: {effective:.1f} tok/s per turn "
+                 "(new input + generation over a reused prefix).\n")
+    t.append("Candidate only — no saved settings have changed.\n", style="bold yellow")
+    t.append("Save candidate replaces this preset for its next load. Running models and "
+             "the client default are unchanged. Keep current settings discards the candidate.")
     return t
 
 
 class TuneScreen(ModalScreen[str | None]):
-    """Tune a model for an intent: pre-flight, live trial table, summary.
+    """Measure candidates and compare them before changing a preset.
 
-    The search runs in a worker that outlives the screen: closing while it runs cancels it (the
-    trial in flight is stopped too) and the trials that finished are still recorded and the app
-    refreshed. The worker only searches; the config and tuning.json are written on the UI
-    thread when it returns (`actions.apply_tune`), and the gateway reload that follows runs in a
-    second worker. Dismisses with "used" (made active), "kept" or None.
+    Completed trials are recorded independently of candidate acceptance. Closing or
+    keeping current settings never replaces a saved configuration; acceptance saves
+    the chosen candidate for its next load without changing the client default.
 
     Args:
         model: Model path.
         info: Model metadata.
-        intent: What to tune for.
-        trials: Most launches the search may make.
+        intent: Purpose to tune for.
+        trials: Maximum candidate launches.
+        goals: Optional draft goals; otherwise use saved preset goals.
     """
 
     BINDINGS = [Binding("escape", "close", "Close (cancels a running tune)")]
@@ -151,6 +153,7 @@ class TuneScreen(ModalScreen[str | None]):
     TuneScreen #t_title { text-style: bold; margin-top: 1; }
     TuneScreen .t_scroll { height: auto; max-height: 30%; margin: 1 0; }
     TuneScreen #t_trials { height: 1fr; min-height: 4; }
+    TuneScreen #t_comparison, TuneScreen #t_workloads { height: auto; max-height: 12; }
     TuneScreen #t_progress { height: auto; color: $text-muted; }
     TuneScreen #t_buttons { margin-top: 1; }
     TuneScreen.-short #t_title { margin-top: 0; }
@@ -160,9 +163,11 @@ class TuneScreen(ModalScreen[str | None]):
     """
 
     def __init__(self, model: str, info: ModelInfo, intent: Intent,
-                 trials: int = DEFAULT_TRIALS) -> None:
+                 trials: int = DEFAULT_TRIALS, *, goals: TuningGoals | None = None) -> None:
         super().__init__()
         self.model, self.info, self.intent, self.trials = model, info, intent, trials
+        self.goals = goals
+        self._saved: Preset | None = None
         self.state = CHECKING
         self.plan: Plan | None = None
         self.host: Host | None = None
@@ -185,17 +190,28 @@ class TuneScreen(ModalScreen[str | None]):
             yield Label("", id="t_progress")
             with VerticalScroll(classes="t_scroll"):
                 yield Static("", id="t_summary")
+                yield DataTable(id="t_comparison")
+                yield DataTable(id="t_workloads")
             with ButtonBar(id="t_buttons", classes="-docked"):
                 yield Button("Cancel tune", id="cancel", variant="warning")
                 yield Button("Unload gateway models and retry", id="unload", variant="primary")
                 yield Button("Tune anyway", id="anyway", variant="error")
-                yield Button("Use (make active)", id="use", variant="success")
-                yield Button("Keep as is", id="keep")
+                yield Button("Save candidate for next load", id="use", variant="success")
+                yield Button("Keep current settings", id="keep")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
         """Fill the title and columns, then run the pre-flight check."""
         a = self.app
+        self._saved = a.cfg.preset(self.model, self.intent.key)
+        self.goals = self.goals or (self._saved.goals if self._saved else TuningGoals())
+        comparison = self.query_one("#t_comparison", DataTable)
+        comparison.add_columns("Setting", "Saved", "Candidate")
+        comparison.display = False
+        workloads = self.query_one("#t_workloads", DataTable)
+        workloads.add_columns("Workload", "New input", "Cached", "Output", "Turn s",
+                              "Turn TPS", "In TPS", "Out TPS", "Samples")
+        workloads.display = False
         self.query_one("#t_title", Label).update(
             f"Tune {a.alias_of(self.model)} for {self.intent.label}  "
             f"({Path(self.model).name}, up to "
@@ -222,15 +238,19 @@ class TuneScreen(ModalScreen[str | None]):
         for bid, visible in show.items():
             self.query_one(f"#{bid}", Button).display = visible
         self.query_one("#t_buttons", ButtonBar).reflow()
-        focus = next((b for b in ("use", "unload", "close") if show[b]), None)
+        focus = next((b for b in ("keep", "unload", "close") if show[b]), None)
         if focus:
             self.query_one(f"#{focus}", Button).focus()
 
     def _can_use(self) -> bool:
-        """True when the tuned preset exists and is not yet the active one."""
-        ent = self.app.cfg.models.get(self.model)
-        return bool(self.outcome and self.outcome.result.ok and
-                    (ent is None or ent.active != self.intent.key))
+        """Whether a successful candidate is available for explicit acceptance.
+
+        Returns:
+            True when tuning produced a candidate that met its goals.
+        """
+        return bool(self.outcome and not self.error and self.outcome.result.ok
+                    and not self.outcome.result.cancelled and self.outcome.result.best
+                    and self.outcome.result.measurement is not None)
 
     def _say_pre(self, text: Text | str) -> None:
         """Set the pre-flight text."""
@@ -253,7 +273,7 @@ class TuneScreen(ModalScreen[str | None]):
             host = (hardware.refresh(a.host, a.cfg.bin_dir) if a.host.ram_total
                     else hardware.detect(a.cfg.bin_dir))
             plan = actions.plan_for(a.cfg, self.info, host, self.intent, a.calibration,
-                                    support=a.support.check(self.info.architecture, a.build))
+                                    support=a.support.check(self.info.architecture, a.build), goals=self.goals)
             refusal = tuner.preflight(plan, host)
             loaded: list[str] = []
             if refusal and a.gateway.running:
@@ -322,12 +342,12 @@ class TuneScreen(ModalScreen[str | None]):
                 outcome = actions.run_tune(
                     a.cfg, self.info, host, self.intent, a.runner_factory(), a.calibration,
                     a.gateway, trials=self.trials, force=force,
-                    progress=lambda e: a.ui(self._event, e), cancel=cancel.is_set, save=False)
+                    progress=lambda e: a.ui(self._event, e), cancel=cancel.is_set, save=False, goals=self.goals)
             except ERRORS as e:
                 return None, str(e)
             if not a.alive():          # quitting: nobody is editing the config any more, so keep
                 try:                   # the finished trials now; `done` will not run
-                    actions.apply_tune(a.cfg, self.info, outcome.result, a.calibration)
+                    actions.record_tune(outcome.result, a.calibration)
                 except OSError:
                     pass
             return outcome, ""
@@ -343,47 +363,24 @@ class TuneScreen(ModalScreen[str | None]):
         a.run_bg(work, label=f"Tuning {a.alias_of(path)}", group="tune", done=done, always=always)
 
     def _searched(self, outcome: TuneOutcome | None, error: str) -> None:
-        """The search ended (UI thread): save its result, refresh the app, reload the gateway.
+        """Record measurements while leaving the saved configuration untouched.
 
         Args:
-            outcome: What the worker returned, None when it failed.
-            error: Why it failed, "".
+            outcome: Completed candidate search, or None on error.
+            error: Failure description.
+
+        Returns:
+            None.
         """
-        a, path = self.app, self.model
         if outcome is not None:
             try:
-                actions.apply_tune(a.cfg, self.info, outcome.result, a.calibration)
-            except OSError as e:
-                error = f"cannot save the tune: {e}"
-            a.presets_changed(path, save=False, reload=False)     # trials and winner are in
+                actions.record_tune(outcome.result, self.app.calibration)
+            except OSError as exc:
+                error = f"cannot save measurements: {exc}"
         if error:
-            a.fail(f"Tune {a.alias_of(path)}: {error}")
-        if outcome is not None and not error and outcome.result.ok and a.gateway.running:
-            return self._reload(outcome)
+            self.app.fail(f"Tune {self.app.alias_of(self.model)}: {error}")
         if self.is_attached:
             self._finished(outcome, error)
-
-    def _reload(self, outcome: TuneOutcome) -> None:
-        """Have a running gateway re-read the presets in a worker, then show the summary."""
-        a = self.app
-        self.state = SAVING
-        self._buttons()
-
-        def work() -> TuneOutcome:
-            with a._gw_lock:
-                return actions.reload_after_tune(a.gateway, outcome.result)
-
-        def done(reloaded: TuneOutcome) -> None:
-            if self.is_attached:
-                self._finished(reloaded, "")
-
-        def always() -> None:
-            a.refresh_serving()
-            if self.is_attached and self.state == SAVING:         # the reload worker died
-                self._finished(outcome, "")
-
-        a.run_bg(work, label="Updating the gateway presets", group="reload", done=done,
-                 always=always)
 
     def _event(self, e: tuner.TrialEvent) -> None:
         """A trial started or finished: update its row and the progress line."""
@@ -422,7 +419,38 @@ class TuneScreen(ModalScreen[str | None]):
             ent = self.app.cfg.models.get(self.model)
             active = bool(ent and ent.active == self.intent.key)
             assert self.plan is not None
-            summary.update(summary_text(self.plan, outcome, active))
+            text = summary_text(self.plan, outcome, active)
+            if error:
+                text.append(f"\n{error}. Candidate cannot be saved.", style="bold red")
+            if outcome.result.cancelled:
+                text.append("\nTuning cancelled; saved configuration unchanged.", style="yellow")
+            summary.update(text)
+            result = outcome.result
+            if result.ok and result.best is not None and result.measurement is not None:
+                comparison = self.query_one("#t_comparison", DataTable)
+                comparison.clear()
+                for row in profile_changes(self._saved.profile if self._saved else None,
+                                           result.best.profile):
+                    comparison.add_row(*row)
+                if self.goals is not None:
+                    for row in goal_changes(self._saved.goals if self._saved else None, self.goals):
+                        comparison.add_row(*row)
+                old_measurement = self._saved.measured if self._saved else None
+                comparison.add_row("Effective output TPS (measured turns)",
+                                   f"{old_measurement.effective_tps:.1f}" if old_measurement and old_measurement.effective_tps else "Not measured",
+                                   f"{result.measurement.effective_tps:.1f}")
+                if comparison.row_count == 0:
+                    comparison.add_row("Launch settings", "Current", "Unchanged")
+                comparison.display = True
+                workloads = self.query_one("#t_workloads", DataTable)
+                workloads.clear()
+                for item in result.measurement.workloads:
+                    workloads.add_row(item.label, str(item.prompt_tokens),
+                                      str(item.cached_tokens), str(item.generated_tokens),
+                                      f"{item.request_s:.2f}", f"{item.effective_tps:.1f}",
+                                      f"{item.prompt_tps:.1f}", f"{item.gen_tps:.1f}",
+                                      str(item.samples))
+                workloads.display = bool(workloads.row_count)
         self._buttons()
 
     def _final_notes(self, outcome: TuneOutcome) -> None:
@@ -467,13 +495,27 @@ class TuneScreen(ModalScreen[str | None]):
 
     @on(Button.Pressed, "#use")
     def _use_pressed(self) -> None:
-        """Use: make the tuned preset the active one and close."""
-        if self.app.activate_preset(self.model, self.intent.key):
-            self.dismiss("used")
+        """Save the reviewed candidate for its next load without selecting a client default.
+
+        Returns:
+            None.
+        """
+        if not self._can_use() or self.outcome is None:
+            return
+        try:
+            actions.apply_tune(self.app.cfg, self.info, self.outcome.result,
+                               self.app.calibration, goals=self.goals, record=False)
+        except OSError as exc:
+            self.app.fail(f"Cannot save candidate: {exc}")
+            return
+        self.app.presets_changed(self.model, save=False)
+        self.app.say(f"Saved {self.app.alias_of(self.model)} / {self.intent.key}; "
+                     "applies on next load. Running settings unchanged.")
+        self.dismiss("saved")
 
     @on(Button.Pressed, "#keep")
     def _keep_pressed(self) -> None:
-        """Keep as is: close, leaving the active preset alone."""
+        """Keep the saved configuration unchanged and close."""
         self.dismiss("kept")
 
     @on(Button.Pressed, "#close")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -19,6 +20,7 @@ from .config import ESTIMATED, PRESET_SEP, Config, Preset
 from .gateway import (LOADED, LOADING, SLEEPING, Gateway, GatewayError, GatewayModel,
                       GatewayState, log_reason)
 from .gguf import ModelInfo
+from .goals import TuningGoals
 from .hardware import Host
 from .intents import Intent
 from .planner import Plan
@@ -68,7 +70,7 @@ def choose_intent(key: str | None, default: str, info: ModelInfo) -> Intent:
 
 def plan_for(cfg: Config, info: ModelInfo, host: Host, intent: Intent,
              calibration: Calibration | None = None,
-             support: ArchSupport | None = None) -> Plan:
+             support: ArchSupport | None = None, *, goals: TuningGoals | None = None) -> Plan:
     """Plan an intent with the config's default profile, headroom and the measured calibration.
 
     Args:
@@ -79,12 +81,31 @@ def plan_for(cfg: Config, info: ModelInfo, host: Host, intent: Intent,
         calibration: Measured data, or None.
         support: The architecture support check of the model; a blocking one gives
             ``VERDICT_UNSUPPORTED``.
+        goals: Unsaved goals to preview; otherwise use the preset's stored goals.
 
     Returns:
         The plan.
     """
-    return planner.plan(intent, info, host, cfg.default_profile, cfg.headroom_pct, calibration,
+    resolved = tuning_goals(cfg, str(info.path), intent.key, goals)
+    return planner.plan(resolved.resolve_intent(intent), info, host, cfg.default_profile, cfg.headroom_pct, calibration,
                         support)
+
+
+def tuning_goals(cfg: Config, model: str, key: str,
+                 goals: TuningGoals | None = None) -> TuningGoals:
+    """Resolve draft, saved, or inherited tuning constraints.
+
+    Args:
+        cfg: Configuration holding model presets.
+        model: Model file path.
+        key: Preset name.
+        goals: Explicit draft goals, if provided.
+
+    Returns:
+        Validated goals without mutating configuration.
+    """
+    preset = cfg.preset(model, key)
+    return goals if goals is not None else preset.goals if preset else TuningGoals()
 
 
 def store_plan(cfg: Config, model: str, plan: Plan, *, activate: bool = False,
@@ -114,11 +135,37 @@ def store_plan(cfg: Config, model: str, plan: Plan, *, activate: bool = False,
     if old is not None and old.source != ESTIMATED and not overwrite:
         raise ActionError(f"the '{plan.intent}' preset is {old.source}; it would be replaced "
                           "by an estimate (use --force to do that)")
-    preset = Preset(plan.intent, plan.profile, ESTIMATED)
-    cfg.set_preset(model, preset, activate=activate)
+    preset = Preset(plan.intent, plan.profile, ESTIMATED,
+                    goals=old.goals if old else TuningGoals())
     if save:
-        cfg.save()
+        save_preset(cfg, model, preset, activate=activate)
+    else:
+        cfg.set_preset(model, preset, activate=activate)
     return preset
+
+
+def save_preset(cfg: Config, model: str, preset: Preset, *, activate: bool = False) -> None:
+    """Persist an accepted preset, rolling back memory if the write fails.
+
+    Args:
+        cfg: Configuration to update.
+        model: Model file path.
+        preset: Explicitly accepted settings and goals.
+        activate: Also select it as the default for clients.
+
+    Raises:
+        OSError: If the configuration cannot be saved.
+    """
+    previous = deepcopy(cfg.models.get(model))
+    cfg.set_preset(model, preset, activate=activate)
+    try:
+        cfg.save()
+    except OSError:
+        if previous is None:
+            cfg.models.pop(model, None)
+        else:
+            cfg.models[model] = previous
+        raise
 
 
 @dataclass(frozen=True)
@@ -501,11 +548,12 @@ def tune_refusal(cfg: Config, model: str, intent_key: str) -> str | None:
 def search_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: tuner.Runner,
                 calibration: Calibration, *, trials: int = 6, force: bool = False,
                 progress: Callable[[tuner.TrialEvent], None] | None = None,
-                cancel: Callable[[], bool] | None = None) -> tuner.TuneResult:
+                cancel: Callable[[], bool] | None = None,
+                goals: TuningGoals | None = None) -> tuner.TuneResult:
     """Preflight and search: the part of a tune that needs no write access to the config.
 
-    It only reads ``cfg.default_profile`` and ``cfg.headroom_pct``, so it may run on a worker
-    thread while the UI thread edits other parts of the config.
+    The saved preset supplies the base settings when present. The search returns
+    candidates without changing that preset.
 
     Args:
         cfg: Config supplying the base profile and headroom.
@@ -518,6 +566,7 @@ def search_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner
         force: Skip the preflight memory check.
         progress: Called with every trial event.
         cancel: Polled between trials and by the runner during one; True stops the search.
+        goals: Draft goals or None to use the saved preset's constraints.
 
     Returns:
         The tuner's result (nothing is saved).
@@ -525,16 +574,21 @@ def search_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner
     Raises:
         ActionError: When the preflight refuses (and `force` is off).
     """
-    plan = plan_for(cfg, info, host, intent, calibration)
+    resolved = tuning_goals(cfg, str(info.path), intent.key, goals)
+    preset = cfg.preset(str(info.path), intent.key)
+    base = preset.profile if preset else cfg.default_profile
+    plan = planner.plan(resolved.resolve_intent(intent), info, host, base,
+                        cfg.headroom_pct, calibration)
     if not force and (refusal := tuner.preflight(plan, host)):
         raise ActionError(refusal)
-    return tuner.tune(intent, info, host, cfg.default_profile, runner,
+    return tuner.tune(intent, info, host, base, runner,
                       headroom_pct=cfg.headroom_pct, calibration=calibration,
-                      max_trials=trials, progress=progress, cancel=cancel)
+                      max_trials=trials, progress=progress, cancel=cancel, goals=resolved)
 
 
 def apply_tune(cfg: Config, info: ModelInfo, result: tuner.TuneResult,
-               calibration: Calibration) -> None:
+               calibration: Calibration, *, goals: TuningGoals | None = None,
+               record: bool = True) -> None:
     """Record a tune's trials and store its winner as the model's tuned preset; save both files.
 
     This is the step that writes ``tuning.json``, mutates the config and saves it. A front end
@@ -545,12 +599,34 @@ def apply_tune(cfg: Config, info: ModelInfo, result: tuner.TuneResult,
         info: Model metadata.
         result: What `search_tune` returned.
         calibration: Store receiving the trials.
+        goals: Accepted draft goals or None to preserve stored goals.
+        record: Record trials unless the review screen already recorded them.
 
     Raises:
         OSError: When tuning.json or the config cannot be written.
     """
-    if result.trials or result.ok:
-        tuner.save_result(cfg, info.path, result, calibration)
+    if record:
+        record_tune(result, calibration)
+    if result.ok and not result.cancelled and result.best is not None and result.measurement is not None:
+        accepted = tuning_goals(cfg, str(info.path), result.intent, goals)
+        save_preset(cfg, str(info.path), Preset(result.intent, result.best.profile, "tuned",
+                                               result.measurement, accepted))
+
+
+def record_tune(result: tuner.TuneResult, calibration: Calibration) -> None:
+    """Retain benchmark history without accepting a candidate configuration.
+
+    Args:
+        result: Completed or cancelled search.
+        calibration: Trial history to update and persist.
+
+    Raises:
+        OSError: If benchmark history cannot be saved.
+    """
+    if result.trials:
+        for trial in result.trials:
+            calibration.record(trial)
+        calibration.save()
 
 
 def reload_after_tune(gw: Gateway, result: tuner.TuneResult) -> TuneOutcome:
@@ -575,7 +651,8 @@ def reload_after_tune(gw: Gateway, result: tuner.TuneResult) -> TuneOutcome:
 def run_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: tuner.Runner,
              calibration: Calibration, gw: Gateway, *, trials: int = 6, force: bool = False,
              progress: Callable[[tuner.TrialEvent], None] | None = None,
-             cancel: Callable[[], bool] | None = None, save: bool = True) -> TuneOutcome:
+             cancel: Callable[[], bool] | None = None, save: bool = True,
+             goals: TuningGoals | None = None) -> TuneOutcome:
     """Tune a model for an intent end to end: preflight, search, save, reload the gateway.
 
     Trials are recorded in ``tuning.json`` even when the tune failed or was cancelled; a
@@ -596,6 +673,7 @@ def run_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: t
         progress: Called with every trial event.
         cancel: Polled between trials and by the runner during one; True stops the search.
         save: Save the result and reload the gateway (the CLI); off for the TUI worker.
+        goals: Draft constraints or None for the stored preset's goals.
 
     Returns:
         The outcome.
@@ -605,10 +683,10 @@ def run_tune(cfg: Config, info: ModelInfo, host: Host, intent: Intent, runner: t
         OSError: When tuning.json or the config cannot be written (only with `save`).
     """
     result = search_tune(cfg, info, host, intent, runner, calibration, trials=trials,
-                         force=force, progress=progress, cancel=cancel)
+                         force=force, progress=progress, cancel=cancel, goals=goals)
     if not save:
         return TuneOutcome(result)
-    apply_tune(cfg, info, result, calibration)
+    apply_tune(cfg, info, result, calibration, goals=goals)
     return reload_after_tune(gw, result)
 
 

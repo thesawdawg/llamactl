@@ -14,10 +14,10 @@ How it works:
    estimates context size, KV cache type, GPU offload and threads from the model's GGUF header
    and the devices llama.cpp reports (`llama-server --list-devices`, so any backend it
    supports). Each setting comes with a one-line reason.
-2. **Tune (optional).** `tune` launches the model with candidate settings, measures memory and
-   tokens per second, keeps the best result and uses the measurements to correct later
-   estimates on this machine. It also probes the largest context that still fits fully on the
-   GPU, with a headroom guard against drivers that silently spill to system memory.
+2. **Tune (optional).** Guided tuning tests candidates against goals saved for that model and
+   purpose. It compares the best candidate with the saved preset before offering to save it;
+   saved settings apply on the next load. Measurements also correct later estimates on this
+   machine.
 3. **Serve.** Models are served by one `llama-server` in router mode (the gateway). Each model
    loads on demand. Standalone servers on their own port are also available.
 
@@ -84,6 +84,36 @@ An intent states what the model is for. Context sizes are per slot.
 only to models that do not. A model can hold several presets (one per intent, plus edited
 ones); one is active.
 
+## Guided tuning
+
+Each model/purpose preset can have its own context ceiling and throughput goals. The default
+minimum is 20 effective output tokens/s; optional input-processing and output-generation
+floors can be set as well. Effective output speed is measured per turn: the generated tokens
+over the time a real turn takes — its new input processing plus generation, with the
+conversation prefix served from the KV cache like a real client's. A warmup request runs
+before measuring, and a workload whose result lands near a floor is sampled three times; the
+median counts.
+
+Tuning searches for the largest context that meets the enabled goals. It increases context;
+a failing trial bounds the search — memory failures first try more modest memory layouts at
+the same context, then the context is bisected against the largest proven pass until the gap
+is within ~5%. Placement at each probed context uses the VRAM the earlier trials actually
+measured. Every required workload must pass; if the trial budget ends first, the result is
+reported as the best tested candidate, not a proven maximum. Benchmark levels are:
+
+- **Quick:** a ~2k cold turn.
+- **Normal:** Quick plus a turn at ~25k occupancy: a cached ~23k prefix plus ~2k of new
+  input. If the context is too small, the reduced workload is labelled in the results.
+- **Full:** 5%, 25%, 50%, 75% and 95% context occupancy, with the final 5% reserved for
+  harness compaction. An occupancy above ~2k is measured as a cached prefix plus a ~2k
+  turn delta.
+
+Results show the saved preset beside the candidate. Saving queues the candidate for the next
+load. A running model keeps its current launch settings and is not interrupted; the UI reports
+the current running snapshot separately from saved changes pending the next load. The gateway
+polls router state to detect when a model has stopped before applying pending settings. An
+external on-demand load racing that poll can still use the old definition.
+
 ## Command line
 
 Models are named by alias, file stem or unique substring. The alias is the lower-cased file
@@ -95,7 +125,7 @@ stem. Commands that print data accept `--json`. Exit codes: 0 success, 1 runtime
 | `llamactl hw` | devices, RAM, CPU, calibration and the llama.cpp build |
 | `llamactl ls` | models with the plan per intent and their presets |
 | `llamactl plan MODEL [--for INTENT] [--all] [--save [--force]]` | show the plan and reasons; changes nothing unless `--save` |
-| `llamactl tune MODEL [--for INTENT] [--trials N] [--force]` | measure candidates and save the best as the preset |
+| `llamactl tune MODEL [--for INTENT] [--trials N] [--force] [--min-effective-tps TPS] [--min-prompt-tps TPS] [--min-gen-tps TPS] [--max-context TOKENS] [--benchmark {quick,normal,full}] [--yes]` | measure and compare a candidate; save it after acceptance |
 | `llamactl serve MODEL [--for INTENT] [--standalone [--port P]] [--lan \| --host ADDR] [--no-wait] [--no-activate]` | create a preset if missing, then serve it |
 | `llamactl up [--lan \| --host ADDR]` / `llamactl down` | start / stop the gateway |
 | `llamactl config [KEY=VALUE ...] [--new-api-key]` | show or change the gateway and planning settings |
@@ -112,7 +142,9 @@ llamactl hw                           # what llama.cpp can offload to
 llamactl ls                           # what fits, per intent
 llamactl plan qwen3-8b --for agent    # settings and the reason for each
 llamactl plan qwen3-8b --all          # compare every applicable intent
-llamactl tune qwen3-8b --for agent    # launch, measure, save the best preset
+llamactl tune qwen3-8b --for agent    # measure and compare a candidate
+llamactl tune qwen3-8b --for agent --max-context 65536 --benchmark normal
+llamactl tune qwen3-8b --for agent --yes  # accept the candidate for the next load
 llamactl serve qwen3-8b --for agent   # start the gateway if needed, load the model
 llamactl serve qwen3-8b --for speed --no-activate   # also served as qwen3-8b@speed
 llamactl serve qwen3-8b --standalone --port 8090    # own server, not the gateway
@@ -126,8 +158,9 @@ llamactl down
 `hw`, `ls`, `plan` (without `--save`), `ps`, `logs` and `config` without arguments never write
 state. `ps` samples CPU over half a second and shows each server's RAM and VRAM; a `~` marks
 memory the GPU driver does not report per process (a tuned measurement or an estimate instead).
-`tune` prints one line per trial to stderr; Ctrl-C stops the running trial and keeps the
-trials so far.
+`tune` runs up to 32 trials by default, prints one line per trial to stderr, and compares the
+candidate with the saved preset before saving. In a noninteractive run it does not save unless
+`--yes` is supplied. Ctrl-C stops the running trial and keeps the trials so far.
 
 ## Connecting a client
 
@@ -210,7 +243,7 @@ Five views in a sidebar. `1` to `5` switch views, `r` rescans models, `q` quits.
 | View | Shows | Keys |
 |------|-------|------|
 | 1 Home | devices, gateway state and endpoint URLs, what is loaded, next steps | `u` start gateway, `d` stop it, `y` copy base URL, `c` copy `curl` |
-| 2 Models | models with size, quant, best intent, active preset, measurements; per-intent detail | Enter serve, `s` standalone, `t` tune, `p` plan, `e` edit preset, `a` set active, Delete remove preset, `D` default profile |
+| 2 Models | models with size, quant, best intent, active preset, measurements; per-intent detail | Enter opens model workspace, `v` serve, `s` standalone, `t` tune, `p` plan, `e` edit preset, `a` set active, Delete remove preset, `D` default profile |
 | 3 Serving | gateway models and standalone or attached servers, with a log tail | `l` load, `x` unload, `s` stop standalone, `u`/`d` gateway up/down, `a` attach a URL, `o` full log, `y` copy URL, `c` copy `curl` |
 | 4 Discover | Hugging Face search and download; GGUF files marked by whether the weights fit | `/` search, Enter search / list files / download, `k` set token, `x` cancel download |
 | 5 Settings | llama.cpp folder, model folders, default intent, gateway, headroom, Hugging Face token | Ctrl+S save |
@@ -218,9 +251,15 @@ Five views in a sidebar. `1` to `5` switch views, `r` rescans models, `q` quits.
 In the preset editor: Ctrl+S saves, Esc cancels, F1 explains the field, F2 applies the plan,
 Ctrl+R resets the field.
 
-Enter on a model with one preset serves it; with none or several it opens an intent picker.
-A picked intent that is not the model's active preset is served as `alias@intent`.
-After a download, the intent picker opens for the new model.
+Selecting a model opens its workspace and does not load it into the gateway. Choose a purpose
+there to review or edit its preset, set tuning goals, tune, or serve. Tuning shows the saved
+preset and candidate side by side; accepting saves for the next load, while keeping the current
+choice leaves the preset unchanged. A running instance retains its launch settings. Its running
+snapshot and any saved changes pending the next load are shown separately. New gateways use
+a detached request supervisor to apply saved definitions before an external on-demand load,
+even after the TUI closes. Running models retain their existing settings. Gateways started
+before this update keep their direct-router behavior; stop and start the gateway once to
+enable supervised loading. After a download, choose a purpose and optionally tune or serve.
 
 ## Where state lives
 

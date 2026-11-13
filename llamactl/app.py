@@ -34,6 +34,7 @@ from .calibration import Calibration
 from .config import Config
 from .gateway import Gateway, GatewayError
 from .gguf import GGUFError, ModelInfo, ModelInfoCache, read_model_info
+from .goals import TuningGoals
 from .onboarding import Dismissal, FinishResult
 from .serving import (GW_STARTING, GW_STOPPING, Health, ServingSnapshot, gateway_state, gather,
                       http_health)
@@ -933,12 +934,13 @@ class LlamaCtl(App):
 
     # ------------------------------------------------------------------ screens and suggestions
 
-    def open_tune(self, path: str, intent_key: str) -> None:
+    def open_tune(self, path: str, intent_key: str, *, goals: TuningGoals | None = None) -> None:
         """Open the tune screen for a model and an intent.
 
         Args:
             path: Model path.
             intent_key: Intent to tune for.
+            goals: Unsaved preset goals to use for this candidate search.
         """
         from .screens.tune import TuneScreen
 
@@ -954,7 +956,7 @@ class LlamaCtl(App):
             intent = actions.choose_intent(intent_key, self.cfg.default_intent, info)
         except LookupError as e:
             return self.fail(str(e))
-        self.push_screen(TuneScreen(path, info, intent))
+        self.push_screen(TuneScreen(path, info, intent, goals=goals))
 
     def offer_new_model(self, path: Path) -> None:
         """A model file just arrived (a download): ask what it is for, store the preset, then offer next steps.

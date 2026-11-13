@@ -227,7 +227,10 @@ async def test_done_keeps_the_preset_and_tune_opens_the_tune_screen(
         await pilot.press("t")
         assert await wait_for(pilot, lambda: isinstance(app.screen, TuneScreen))
         assert await wait_for(pilot, lambda: app.screen.state == "done")
-        assert app.cfg.preset(str(ui_env.model_dir / "other.gguf"), "chat").source == "tuned"
+        assert app.cfg.preset(str(ui_env.model_dir / "other.gguf"), "chat").source == "estimated"
+        app.screen.query_one("#use").press()
+        assert await wait_for(pilot, lambda: app.cfg.preset(
+            str(ui_env.model_dir / "other.gguf"), "chat").source == "tuned")
 
 
 async def test_a_download_that_fails_opens_no_picker(

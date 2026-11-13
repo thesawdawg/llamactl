@@ -90,13 +90,15 @@ class PlanScreen(Screen[str | None]):
                 yield Label(f"one more layer on the GPU needs {human(self.plan.layer_gain)} "
                             "more VRAM; fewer layers in RAM is faster")
             yield DataTable(id="plan_table")
-            yield Label("The plan changes nothing from the base profile.", id="plan_none")
+            yield Label("The plan changes nothing from the saved profile.", id="plan_none")
         yield Label("", id="plan_msg")
         with ButtonBar(id="plan_buttons", classes="-docked"):
             yield Button("Save as preset (s)", id="save", variant="success")
-            yield Button("Edit (e)", id="edit")
+            yield Button("Edit saved preset (e)" if self.cfg.preset(self.model, self.intent.key)
+                         else "Edit plan (e)", id="edit")
             yield Button("Tune (t)", id="tune")
-            yield Button("Serve (v)", id="serve", variant="primary")
+            yield Button("Serve saved preset (v)" if self.cfg.preset(self.model, self.intent.key)
+                         else "Serve plan (v)", id="serve", variant="primary")
             if self.plan.expert_ram:
                 yield Button("MoE guide", id="guide")
             yield Button("Cancel (Esc)", id="cancel")
@@ -110,13 +112,21 @@ class PlanScreen(Screen[str | None]):
             verdict_text=verdict_label(self.plan.verdict, self.plan.profile, self.info,
                                        self.plan.support))
         t = self.query_one("#plan_table", DataTable)
-        t.add_columns("Setting", "Base", "Planned", "Why")
-        base = self.cfg.default_profile
-        for key, reason in self.plan.reasons.items():
-            t.add_row(schema.by_key[key].label, str(getattr(base, key)),
-                      str(getattr(self.plan.profile, key)), reason)
-        t.display = bool(self.plan.reasons)
-        self.query_one("#plan_none").display = not self.plan.reasons
+        preset = self.cfg.preset(self.model, self.intent.key)
+        t.add_columns("Setting", "Saved" if preset else "Default", "Planned", "Why")
+        base = preset.profile if preset else self.cfg.default_profile
+        for setting in schema.SETTINGS:
+            key = setting.key
+            if getattr(base, key) == getattr(self.plan.profile, key):
+                continue
+            old = str(getattr(base, key))
+            new = str(getattr(self.plan.profile, key))
+            if key == "api_key":
+                old, new = ("Set" if old else "Empty"), ("Set" if new else "Empty")
+            t.add_row(setting.label, old, new,
+                      self.plan.reasons.get(key, "Purpose/default launch setting"))
+        t.display = bool(t.row_count)
+        self.query_one("#plan_none").display = not t.row_count
         self.query_one("#save", Button).focus()
 
     def _say(self, text: str, style: str = "") -> None:

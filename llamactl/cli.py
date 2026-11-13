@@ -16,6 +16,7 @@ import json
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence, TextIO
@@ -29,6 +30,7 @@ from .calibration import Calibration
 from .config import CONFIG_FILE, PRESET_SEP, Config
 from .gateway import Gateway, GatewayError
 from .gguf import GGUFError, ModelInfo, ModelInfoCache, read_model_info
+from .goals import TuningGoals
 from .hardware import Host
 from .render import Style
 from .serving import http_health
@@ -578,7 +580,7 @@ def cmd_plan(args: argparse.Namespace, sv: Services) -> int:
 
 
 def cmd_tune(args: argparse.Namespace, sv: Services) -> int:
-    """``llamactl tune MODEL``: measured search, saves the tuned preset and reloads the gateway."""
+    """Measure a candidate, compare it, and save only with explicit acceptance."""
     path, alias, info = _model_and_info(args, sv)
     s = _support_check(sv, info)
     if _maybe_refresh(sv, (s,)):
@@ -590,20 +592,56 @@ def cmd_tune(args: argparse.Namespace, sv: Services) -> int:
         raise CliError(f"cannot tune {alias}: {refusal}")
     sv.require_binary()
     host = sv.fresh_host()
+    overrides = {key: getattr(args, key) for key in (
+        "min_effective_tps", "min_prompt_tps", "min_gen_tps", "max_context", "benchmark")
+                 if getattr(args, key) is not None}
+    try:
+        goals = replace(actions.tuning_goals(sv.cfg, str(path), intent.key), **overrides)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+    old = sv.cfg.preset(str(path), intent.key)
     sv.note(f"tuning {alias} for {intent.key}: up to {args.trials} trials, each launches "
             "llama-server (Ctrl-C cancels)")
     try:
         outcome = actions.run_tune(sv.cfg, info, host, intent, sv.runner(), sv.calibration,
                                    sv.gateway, trials=args.trials, force=args.force,
-                                   progress=lambda e: sv.note(report.event_line(e)))
+                                   progress=lambda e: sv.note(report.event_line(e)),
+                                   goals=goals, save=False)
     except ActionError as e:
         raise CliError(f"cannot tune {alias}: {e}; --force tries anyway") from None
-    if outcome.reload_error:
-        sv.note(f"warning: the gateway was not reloaded: {outcome.reload_error}")
     backend = host.gpus[0].backend if host.gpus else "cpu"
     result = outcome.result
-    sv.emit(args.json, report.tune_data(alias, result, outcome.reloaded,
-                                        sv.calibration.factor(backend)), render.render_tune)
+    actions.record_tune(result, sv.calibration)
+    changes = []
+    if result.best is not None:
+        before = old.profile.to_dict() if old else {}
+        for key, value in result.best.profile.to_dict().items():
+            if before.get(key) != value:
+                previous = before.get(key)
+                if key == "api_key":
+                    previous = "Set" if previous else "Empty"
+                    value = "Set" if value else "Empty"
+                changes.append({"setting": key, "saved": previous, "candidate": value})
+    data = report.tune_data(alias, result, False, sv.calibration.factor(backend))
+    data.update(saved=False, changes=changes, goals=goals.to_dict())
+    if result.ok and not result.cancelled:
+        if not args.json:
+            sv.say(render.render_tune(data, sv.style))
+        accepted = args.yes or (not args.json and sv.tty() and sv.confirm(
+            f"Save the '{intent.key}' candidate? It applies on next load; running models keep their settings."))
+        if accepted:
+            actions.apply_tune(sv.cfg, info, result, sv.calibration, goals=goals, record=False)
+            synchronized = actions.reload_after_tune(sv.gateway, result)
+            data["gateway_reloaded"] = synchronized.reloaded
+            if synchronized.reload_error:
+                sv.note(f"Saved, but gateway synchronization failed: {synchronized.reload_error}")
+            data["saved"] = True
+            if not args.json:
+                sv.note("Candidate saved; applies on next load. Running models keep their settings.")
+        elif not args.json:
+            sv.note("Current preset kept. Use --yes to accept a candidate in noninteractive runs.")
+    if args.json or not result.ok or result.cancelled:
+        sv.emit(args.json, data, render.render_tune)
     return EXIT_OK if result.ok and not result.cancelled else EXIT_FAILURE
 
 
@@ -1055,10 +1093,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--save", action="store_true", help="store the plan as an estimated preset")
     sp.add_argument("--force", action="store_true",
                     help="with --save: replace a tuned or edited preset")
-    sp = add("tune", cmd_tune, "measure candidate settings by launching the model and save the best",
+    sp = add("tune", cmd_tune, "measure and compare a candidate; save after acceptance",
              json_out=True, model=True, intent=True)
-    sp.add_argument("--trials", type=_positive, default=6, metavar="N", help="most launches (default 6)")
+    sp.add_argument("--trials", type=_positive, default=32, metavar="N", help="most launches (default 32)")
     sp.add_argument("--force", action="store_true", help="skip the free-memory check")
+    sp.add_argument("-y", "--yes", action="store_true", help="accept the candidate for the next load")
+    sp.add_argument("--min-effective-tps", type=float, help="minimum effective output tokens/s (default 20)")
+    sp.add_argument("--min-prompt-tps", type=float, help="optional input-processing floor")
+    sp.add_argument("--min-gen-tps", type=float, help="optional output-generation floor")
+    sp.add_argument("--max-context", type=_positive, help="maximum context tokens per request")
+    sp.add_argument("--benchmark", choices=("quick", "normal", "full"), help="benchmark workload level")
     sp = add("serve", cmd_serve, "make sure a preset exists, then serve it",
              model=True, intent=True)
     sp.add_argument("--standalone", action="store_true",

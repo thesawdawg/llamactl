@@ -5,12 +5,14 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 from . import schema
 from .measure import Measurement
+from .goals import TuningGoals
 
 STATE_ENV = "LLAMACTL_HOME"
 
@@ -201,12 +203,14 @@ class Preset:
         profile: The concrete settings.
         source: "estimated", "tuned" or "edited".
         measured: Measurement of the tuned run, or None.
+        goals: Preset-specific throughput floors, context ceiling and benchmark suite.
     """
 
     intent: str = CUSTOM
     profile: Profile = field(default_factory=Profile)
     source: str = "edited"
     measured: Measurement | None = None
+    goals: TuningGoals = field(default_factory=TuningGoals)
 
     @classmethod
     def from_dict(cls, data: dict, name: str = CUSTOM) -> "Preset":
@@ -223,12 +227,14 @@ class Preset:
         measured = Measurement.from_dict(raw) if isinstance(raw, dict) else None
         return cls(intent=str(data.get("intent") or name),
                    profile=Profile.from_dict(data.get("profile") or {}),
-                   source=str(data.get("source") or "edited"), measured=measured)
+                   source=str(data.get("source") or "edited"), measured=measured,
+                   goals=TuningGoals.from_dict(data.get("goals")))
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-able dict."""
         return {"intent": self.intent, "profile": self.profile.to_dict(), "source": self.source,
-                "measured": self.measured.to_dict() if self.measured else None}
+                "measured": self.measured.to_dict() if self.measured else None,
+                "goals": self.goals.to_dict()}
 
 
 @dataclass
@@ -417,10 +423,23 @@ class Config:
             shutil.copy2(CONFIG_FILE, backup)
 
     def save(self) -> None:
-        """Write config to disk as v3, backing up a v2 file first (once)."""
+        """Atomically save configuration so serving readers never see partial JSON.
+
+        Raises:
+            OSError: If the directory, backup or atomic replacement cannot be written.
+        """
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         self._backup_v2()
-        CONFIG_FILE.write_text(json.dumps(self.to_dict(), indent=2))
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("w", dir=CONFIG_DIR, prefix=".config-",
+                                             suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump(self.to_dict(), stream, indent=2)
+            temporary.replace(CONFIG_FILE)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def entry(self, model: str) -> ModelEntry:
         """The model's entry, created (with a unique derived alias) when missing.

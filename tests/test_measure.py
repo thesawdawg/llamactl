@@ -15,7 +15,9 @@ FULL = Measurement(ok=True, error="", load_s=12.5, vram_used=9_500_000_000, ram_
 def test_round_trip_through_json() -> None:
     assert Measurement.from_dict(json.loads(json.dumps(FULL.to_dict()))) == FULL
     assert list(FULL.to_dict()) == ["ok", "error", "load_s", "vram_used", "ram_used",
-                                    "prompt_tps", "gen_tps", "at", "build"]
+                                    "prompt_tps", "gen_tps", "at", "build", "effective_tps",
+                                    "request_s", "prompt_tokens", "generated_tokens",
+                                    "cached_tokens", "workloads"]
 
 
 def test_unknown_keys_and_missing_keys() -> None:

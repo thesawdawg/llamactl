@@ -12,13 +12,14 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.timer import Timer
 from textual.widgets import DataTable, Static
 
-from .. import hf, planner, support
+from .. import actions, hf, planner, support
 from ..command import build_command, command_string
-from ..config import Preset
+from ..config import Preset, Profile
 from ..fmt import FITS_STYLE, human, params_str
 from ..gguf import ModelInfo
+from ..goals import TuningGoals
 from ..hardware import Host
-from ..intents import by_key
+from ..intents import applicable, by_key
 from ..modelrows import (IntentRow, PresetState, best_for, default_intent_key, intent_rows,
                          preset_state)
 from ..planner import Plan
@@ -83,21 +84,22 @@ def intent_cells(r: IntentRow) -> tuple:
 
 
 class ModelTable(DataTable):
-    """The model table; Enter serves (the footer says so, which a bare DataTable would hide)."""
+    """Model selection opens controls; serving has a separate explicit action."""
 
-    BINDINGS = [Binding("enter", "select_cursor", "Serve")]
+    BINDINGS = [Binding("enter", "select_cursor", "Open model")]
 
 
 class IntentTable(DataTable):
-    """The per-intent table; Enter serves that intent."""
+    """Preset selection opens its controls without serving."""
 
-    BINDINGS = [Binding("enter", "select_cursor", "Serve intent")]
+    BINDINGS = [Binding("enter", "select_cursor", "Open preset")]
 
 
 class ModelsView(BaseView):
     """Model table (left); metadata, per-intent rows, budget and command (right)."""
 
     BINDINGS = [
+        Binding("v", "serve", "Serve preset"),
         Binding("s", "serve_standalone", "Standalone"),
         Binding("t", "tune", "Tune"),
         Binding("p", "plan", "Plan"),
@@ -302,15 +304,16 @@ class ModelsView(BaseView):
     def plan_async(self) -> None:
         """Plan every readable model for every applicable intent in a worker."""
         a = self.app
-        infos, host, base = dict(a.infos), a.host, a.cfg.default_profile
-        pct, cal = a.cfg.headroom_pct, a.calibration
+        infos, host = dict(a.infos), a.host
+        cal = a.calibration
         if not infos or (not host.gpus and not host.ram_total):
             return
 
         def work() -> dict[str, dict[str, Plan]]:
-            return {p: planner.plan_all(i, host, base, pct, cal,
-                                        support=a.support.check(i.architecture, a.build))
-                    for p, i in infos.items()}
+            return {p: {intent.key: actions.plan_for(
+                        a.cfg, i, host, intent, cal,
+                        support=a.support.check(i.architecture, a.build))
+                        for intent in applicable(i)} for p, i in infos.items()}
 
         a.run_bg(work, label="Planning models", group="plan", exclusive=True,
                  done=self._plans_ready, quiet=True)
@@ -432,14 +435,22 @@ class ModelsView(BaseView):
         plan = plans[key]
         info = a.infos.get(model)
         panel.display = True
-        panel.update_budget(plan.budget, a.host, a.cfg.headroom_pct, expert_ram=plan.expert_ram,
-                            verdict_text=(planner.verdict_label(plan.verdict, plan.profile, info,
+        existing = a.cfg.preset(model, key)
+        prof = existing.profile if existing else plan.profile
+        budget = (planner.estimate_budget(info, prof, a.host, a.calibration)
+                  if existing and info else plan.budget)
+        expert_ram = planner.expert_ram_bytes(info, prof) if existing and info else plan.expert_ram
+        current_verdict = (planner.verdict(budget, a.host, a.cfg.headroom_pct)
+                           if existing and not (plan.support and plan.support.blocks) else plan.verdict)
+        panel.update_budget(budget, a.host, a.cfg.headroom_pct, expert_ram=expert_ram,
+                            verdict_text=(planner.verdict_label(current_verdict, prof, info,
                                                                 plan.support)
                                           if info else plan.verdict))
         self.query_one("#m_warnings", Static).update(
-            Text("\n".join(f"! {w}" for w in plan.warnings), style="yellow"))
-        existing = a.cfg.preset(model, key)
-        prof = existing.profile if existing else plan.profile
+            Text("\n".join(f"! {w}" for w in plan.warnings) if not existing else
+                 "Saved preset settings; memory is estimated. Enter opens model setup." +
+                 ("\n" + "\n".join(plan.warnings) if plan.support and plan.support.blocks else ""),
+                 style="yellow" if not existing else "dim"))
         argv = build_command(a.cfg, model, prof, prof.port or 0)
         cmd = command_string(argv).replace("--port 0", "--port <auto>")
         self.query_one("#m_command", Static).update(
@@ -473,15 +484,25 @@ class ModelsView(BaseView):
 
     @on(DataTable.RowSelected, "#model_table")
     def _row_selected(self) -> None:
-        """Enter on a model: serve it."""
-        self.action_serve()
+        """Open model controls without launching a server."""
+        self.action_open_workspace()
 
     @on(DataTable.RowSelected, "#intent_table")
     def _intent_selected(self) -> None:
-        """Enter on an intent row: serve that intent."""
+        """Open the selected preset without launching a server."""
+        self.action_open_workspace()
+
+    def action_open_workspace(self) -> None:
+        """Open the guided controls for the selected model and preset.
+
+        Returns:
+            None.
+        """
+        from ..screens.model_workspace import ModelWorkspace
+
         got = self._need_intent()
         if got:
-            self.app.serve_model(got[0], got[2])
+            self.app.push_screen(ModelWorkspace(got[0], got[1], got[2]))
 
     def _pick_intent(self, model: str, then) -> None:
         """Ask what the model is for, then call `then(intent_key)`."""
@@ -499,27 +520,24 @@ class ModelsView(BaseView):
                                           else (ent.active or self.selected_intent())), done)
 
     def action_serve(self) -> None:
-        """Serve the model: the active preset, or an intent picker when it has none or several."""
-        got = self._need_model()
-        if got is None:
-            return
-        model = got[0]
-        ent = self.app.cfg.models.get(model)
-        if ent is None or len(ent.presets) != 1:
-            return self._pick_intent(model, lambda key: self.app.serve_model(model, key))
-        self.app.serve_model(model)
+        """Explicitly serve the selected preset.
+
+        Returns:
+            None.
+        """
+        got = self._need_intent()
+        if got:
+            self.app.serve_model(got[0], got[2])
 
     def action_serve_standalone(self) -> None:
-        """Serve the model on a llama-server of its own (picker when it has no preset)."""
-        got = self._need_model()
-        if got is None:
-            return
-        model = got[0]
-        ent = self.app.cfg.models.get(model)
-        if ent is None or not ent.presets:
-            return self._pick_intent(model, lambda key: self.app.serve_model(
-                model, key, standalone=True))
-        self.app.serve_model(model, standalone=True)
+        """Explicitly serve the highlighted preset as a standalone server.
+
+        Returns:
+            None.
+        """
+        got = self._need_intent()
+        if got:
+            self.app.serve_model(got[0], got[2], standalone=True)
 
     def action_tune(self) -> None:
         """Tune the highlighted intent."""
@@ -595,13 +613,41 @@ class ModelsView(BaseView):
         old = a.cfg.preset(model, key)
         prof = old.profile if old else a.cfg.default_profile
 
-        def done(new) -> None:
+        def done(new: Profile | None) -> None:
+            """Review an advanced edit before replacing the saved preset.
+
+            Args:
+                new: Proposed launch profile, or None on cancel.
+
+            Returns:
+                None.
+            """
             if new is None or (old is not None and new == old.profile):
                 return
-            a.cfg.set_preset(model, Preset(key, new, EDITED, old.measured if old else None),
-                             activate=False)
-            a.presets_changed(model)
-            self.say(f"Saved the '{key}' preset of {a.alias_of(model)} (edited)")
+            from ..screens.model_workspace import ProfileReview
+
+            def accepted(yes: bool) -> None:
+                """Persist the explicitly accepted draft for its next load.
+
+                Args:
+                    yes: Whether the user accepted the comparison.
+
+                Returns:
+                    None.
+                """
+                if yes:
+                    try:
+                        actions.save_preset(a.cfg, model, Preset(key, new, EDITED, None,
+                                                               old.goals if old else TuningGoals()))
+                    except OSError as error:
+                        a.fail(f"Cannot save candidate: {error}")
+                        return
+                    a.presets_changed(model, save=False)
+                    self.say(f"Saved {a.alias_of(model)} / {key}; applies on next load.")
+
+            a.push_screen(ProfileReview(f"{a.alias_of(model)} / {key}",
+                                        old.profile if old else None, new,
+                                        "Advanced settings draft."), accepted)
 
         a.push_screen(PresetEditor(a.cfg, prof, a.host, info, f"{a.alias_of(model)} - {key}",
                                    intent=by_key[key], apply_plan=old is None,
@@ -632,7 +678,7 @@ class ModelsView(BaseView):
         model, _, key = got
         a = self.app
         if a.cfg.preset(model, key) is None:
-            return self.say(f"No '{key}' preset yet: p plans it, t tunes it, Enter serves it.")
+            return self.say(f"No '{key}' preset yet: p plans it, t tunes it, v serves it.")
         if a.cfg.models[model].active == key:
             return self.say(f"'{key}' is already the active preset.")
         if a.activate_preset(model, key):

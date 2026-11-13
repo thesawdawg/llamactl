@@ -246,7 +246,9 @@ async def test_tune_now_opens_the_tune_screen_after_closing(ui_env: SimpleNamesp
         await press(pilot, app, "ob_close")
         assert await wait_for(pilot, lambda: isinstance(app.screen, TuneScreen))
         assert await wait_for(pilot, lambda: app.screen.state == "done")
-        assert cfg.preset(str(m)).source == "tuned"
+        assert cfg.preset(str(m)).source == "estimated"
+        app.screen.query_one("#use", Button).press()
+        assert await wait_for(pilot, lambda: cfg.preset(str(m)).source == "tuned")
 
 
 async def test_finishing_without_a_model_starts_nothing(ui_env: SimpleNamespace) -> None:

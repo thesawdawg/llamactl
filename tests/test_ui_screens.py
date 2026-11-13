@@ -87,7 +87,7 @@ async def test_plan_screen_shows_the_reasons_table_and_verdict() -> None:
         await pilot.pause()
         t = scr.query_one("#plan_table", DataTable)
         assert t.row_count == len(scr.plan.reasons) > 0
-        assert [str(c.label) for c in t.columns.values()] == ["Setting", "Base", "Planned", "Why"]
+        assert [str(c.label) for c in t.columns.values()] == ["Setting", "Default", "Planned", "Why"]
         assert "GPU" in plain(scr.query_one(".verdict", Label))
 
 

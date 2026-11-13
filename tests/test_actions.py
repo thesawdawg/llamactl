@@ -12,6 +12,8 @@ from llamactl.config import Config, Preset, Profile
 from llamactl.gateway import FAILED, LOADED, LOADING, UNLOADED, GatewayError, GatewayModel
 from llamactl.gguf import ModelInfo
 from llamactl.hardware import Device, Host
+from llamactl.measure import Measurement
+from llamactl.tuner import Candidate, TuneResult
 
 
 def _info(pooling: int = -1) -> ModelInfo:
@@ -23,6 +25,51 @@ def _info(pooling: int = -1) -> ModelInfo:
 
 HOST = Host(gpus=[Device.of("CUDA0", "G", int(16e9), int(16e9))], ram_total=int(24e9),
             ram_free=int(24e9), cpu_threads=16, cpu_cores=8)
+
+
+def test_apply_cancelled_candidate_preserves_saved_preset() -> None:
+    """A partial winner in a cancelled result cannot replace saved settings.
+
+    Returns:
+        None.
+    """
+    cfg = Config()
+    saved = Preset("chat", Profile(ctx_size=1234), "edited")
+    cfg.set_preset(str(_info().path), saved)
+    candidate = Candidate(Profile(ctx_size=8192), 8192, "GPU")
+    result = TuneResult("chat", candidate, Measurement(ok=True), ok=True, cancelled=True)
+    actions.apply_tune(cfg, _info(), result, Calibration(), record=False)
+    assert cfg.preset(str(_info().path), "chat") is saved
+
+
+def test_acceptance_write_failure_restores_saved_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failed persistence cannot leave a candidate active in application memory.
+
+    Args:
+        monkeypatch: Isolated configuration write failure injection.
+
+    Returns:
+        None.
+    """
+    cfg = Config()
+    saved = Preset("chat", Profile(ctx_size=1234), "edited")
+    cfg.set_preset(str(_info().path), saved)
+
+    def fail_save(self: Config) -> None:
+        """Simulate an unavailable configuration volume.
+
+        Args:
+            self: Configuration whose save fails.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(Config, "save", fail_save)
+    with pytest.raises(OSError, match="disk unavailable"):
+        actions.save_preset(cfg, str(_info().path), Preset("chat", Profile(ctx_size=8192)))
+    assert cfg.preset(str(_info().path), "chat") == saved
 
 
 class Clock:

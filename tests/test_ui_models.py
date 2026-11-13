@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from textual.widgets import Static
+from textual.widgets import Button, Select, Static
 
 from fakes import FakeGateway, FakeStore, plain, wait_for
 from llamactl.config import Config, Preset, Profile
@@ -12,6 +12,7 @@ from llamactl.gateway import LOADED
 from llamactl.measure import Measurement
 from llamactl.screens.confirm import ConfirmScreen
 from llamactl.screens.intent_picker import IntentPicker
+from llamactl.screens.model_workspace import ModelWorkspace, ProfileReview
 from llamactl.screens.plan import PlanScreen
 from llamactl.screens.preset_editor import PresetEditor
 from test_ui_shell import SIZE, add_preset, make_app
@@ -93,53 +94,49 @@ async def test_detail_has_one_row_per_intent_with_measured_speed(ui_env: SimpleN
         assert "Plan command (speed)" in plain(mv.query_one("#m_command", Static))
 
 
-async def test_enter_without_presets_opens_the_picker_and_serves_the_pick(
-        ui_env: SimpleNamespace) -> None:
-    m = ui_env.add_model()
-    gw = FakeGateway(ui_env.cfg)
-    app = make_app(ui_env, gateway=gw)
+async def test_enter_without_presets_opens_workspace(ui_env: SimpleNamespace) -> None:
+    """New models open controls without creating presets or loading a server."""
+    model = ui_env.add_model()
+    gateway = FakeGateway(ui_env.cfg)
+    app = make_app(ui_env, gateway=gateway)
     async with app.run_test(size=SIZE) as pilot:
         await ready(pilot, app)
         app.views["models"].model_table.focus()
         await pilot.press("enter")
-        assert await wait_for(pilot, lambda: isinstance(app.screen, IntentPicker))
-        await pilot.press("down", "enter")                   # agent
-        assert await wait_for(pilot, lambda: ("load", "alpha") in gw.calls)
-        p = ui_env.cfg.preset(str(m), "agent")
-        assert p.source == "estimated" and ui_env.cfg.models[str(m)].active == "agent"
-        assert gw.called("start") and gw.called("reload")
-        assert await wait_for(pilot, lambda: app.current_view == "serving")
-        assert await wait_for(pilot, lambda: "loaded" in plain(app._status))
-        assert Config.load().preset(str(m), "agent") is not None            # saved to disk
+        assert await wait_for(pilot, lambda: isinstance(app.screen, ModelWorkspace))
+        assert ui_env.cfg.preset(str(model), "chat") is None
+        assert not gateway.called("load") and not gateway.called("start")
 
 
 async def test_picking_another_intent_serves_alias_at_intent(ui_env: SimpleNamespace) -> None:
-    m = ui_env.add_model()
-    add_preset(ui_env, m, "edited", "chat")
-    add_preset(ui_env, m, "estimated", "speed", active=False)
-    gw = FakeGateway(ui_env.cfg)
-    app = make_app(ui_env, gateway=gw)
-    async with app.run_test(size=SIZE) as pilot:
-        await ready(pilot, app)
-        app.views["models"].model_table.focus()
-        await pilot.press("enter")                           # two presets: the picker
-        assert await wait_for(pilot, lambda: isinstance(app.screen, IntentPicker))
-        await pilot.press("down", "down", "down", "enter")   # chat, agent, context, speed
-        assert await wait_for(pilot, lambda: ("load", "alpha@speed") in gw.calls)
-        assert ui_env.cfg.models[str(m)].active == "chat"    # the active preset did not change
-
-
-async def test_enter_with_one_preset_serves_it_without_asking(ui_env: SimpleNamespace) -> None:
-    m = ui_env.add_model()
-    add_preset(ui_env, m, "edited", "chat")
-    gw = FakeGateway(ui_env.cfg, running=True)
-    app = make_app(ui_env, gateway=gw)
+    model = ui_env.add_model()
+    add_preset(ui_env, model, "edited", "chat")
+    add_preset(ui_env, model, "estimated", "speed", active=False)
+    gateway = FakeGateway(ui_env.cfg)
+    app = make_app(ui_env, gateway=gateway)
     async with app.run_test(size=SIZE) as pilot:
         await ready(pilot, app)
         app.views["models"].model_table.focus()
         await pilot.press("enter")
-        assert await wait_for(pilot, lambda: ("load", "alpha") in gw.calls)
-        assert not isinstance(app.screen, IntentPicker)
+        assert await wait_for(pilot, lambda: isinstance(app.screen, ModelWorkspace))
+        app.screen.query_one("#workspace_purpose", Select).value = "speed"
+        await pilot.pause()
+        app.screen.query_one("#workspace_serve", Button).press()
+        assert await wait_for(pilot, lambda: ("load", "alpha@speed") in gateway.calls)
+        assert ui_env.cfg.models[str(model)].active == "chat"
+
+
+async def test_enter_with_one_preset_opens_workspace(ui_env: SimpleNamespace) -> None:
+    model = ui_env.add_model()
+    add_preset(ui_env, model, "edited", "chat")
+    gateway = FakeGateway(ui_env.cfg, running=True)
+    app = make_app(ui_env, gateway=gateway)
+    async with app.run_test(size=SIZE) as pilot:
+        await ready(pilot, app)
+        app.views["models"].model_table.focus()
+        await pilot.press("enter")
+        assert await wait_for(pilot, lambda: isinstance(app.screen, ModelWorkspace))
+        assert not gateway.called("load")
 
 
 async def test_a_loaded_model_is_not_loaded_twice(ui_env: SimpleNamespace) -> None:
@@ -151,7 +148,7 @@ async def test_a_loaded_model_is_not_loaded_twice(ui_env: SimpleNamespace) -> No
     async with app.run_test(size=SIZE) as pilot:
         await ready(pilot, app)
         app.views["models"].model_table.focus()
-        await pilot.press("enter")
+        await pilot.press("v")
         assert await wait_for(pilot, lambda: "is loaded" in plain(app._status))
         assert gw.called("load") == []
 
@@ -181,7 +178,7 @@ async def test_serve_failure_shows_a_message(ui_env: SimpleNamespace) -> None:
     async with app.run_test(size=SIZE) as pilot:
         await ready(pilot, app)
         app.views["models"].model_table.focus()
-        await pilot.press("enter")
+        await pilot.press("v")
         assert await wait_for(pilot, lambda: "bad option" in plain(app._status))
         assert app.is_running
 
@@ -195,7 +192,7 @@ async def test_missing_binary_blocks_serving_with_a_message(ui_env: SimpleNamesp
     async with app.run_test(size=SIZE) as pilot:
         await ready(pilot, app)
         app.views["models"].model_table.focus()
-        await pilot.press("enter")
+        await pilot.press("v")
         assert await wait_for(pilot, lambda: "llama-server not found" in plain(app._status))
         assert gw.calls.count(("start",)) == 0
 
@@ -217,7 +214,7 @@ async def test_plan_screen_save_makes_a_preset_and_reloads_the_gateway(
         assert Config.load().preset(str(m), "chat").source == "estimated"
 
 
-async def test_edit_saves_the_preset_as_edited_and_keeps_the_measurement(
+async def test_edit_reviews_saved_preset_and_invalidates_old_measurement(
         ui_env: SimpleNamespace) -> None:
     m = ui_env.add_model()
     ui_env.cfg.set_preset(str(m), Preset("chat", Profile(ctx_size=4096), "tuned", tuned()))
@@ -232,9 +229,12 @@ async def test_edit_saves_the_preset_as_edited_and_keeps_the_measurement(
         f.input.value = "2048"
         assert await wait_for(pilot, lambda: ed._draft.ctx_size == 2048)
         await pilot.press("ctrl+s")
+        assert await wait_for(pilot, lambda: isinstance(app.screen, ProfileReview))
+        assert ui_env.cfg.preset(str(m)).source == "tuned"
+        app.screen.query_one("#review_save", Button).press()
         assert await wait_for(pilot, lambda: ui_env.cfg.preset(str(m)).source == "edited")
         p = ui_env.cfg.preset(str(m), "chat")
-        assert p.profile.ctx_size == 2048 and p.measured == tuned()
+        assert p.profile.ctx_size == 2048 and p.measured is None
         assert await wait_for(pilot, lambda: cells(app, m)[4] == "chat edited")
         assert cells(app, m)[5] == "-"                          # not tuned any more
 
@@ -263,6 +263,9 @@ async def test_edit_of_a_missing_preset_starts_from_the_plan(ui_env: SimpleNames
         assert await wait_for(pilot, lambda: isinstance(app.screen, PresetEditor))
         assert await wait_for(pilot, lambda: app.screen._draft.ctx_size > 0)   # the plan was applied
         await pilot.press("ctrl+s")
+        assert await wait_for(pilot, lambda: isinstance(app.screen, ProfileReview))
+        assert ui_env.cfg.preset(str(m), "chat") is None
+        app.screen.query_one("#review_save", Button).press()
         assert await wait_for(pilot, lambda: ui_env.cfg.preset(str(m), "chat") is not None)
         assert ui_env.cfg.preset(str(m), "chat").source == "edited"
 

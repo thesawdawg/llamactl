@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from . import hardware, hf, network, planner
+from . import actions, hardware, hf, network, planner
 from .calibration import Calibration
 from .command import build_command, command_string
 from .config import Config, ModelEntry
@@ -105,7 +105,9 @@ def preset_rows(entry: ModelEntry | None, path: Path, calibration: Calibration,
         out.append({"name": name, "intent": p.intent, "source": p.source,
                     "active": name == entry.active,
                     "stale": calibration.is_stale(p, path, build),
-                    "gen_tps": m.gen_tps if m and m.ok else None})
+                    "gen_tps": m.gen_tps if m and m.ok else None,
+                    "effective_tps": m.effective_tps if m and m.ok else None,
+                    "goals": p.goals.to_dict()})
     return out
 
 
@@ -175,8 +177,7 @@ def _size(path: Path) -> int:
 def _plans(cfg: Config, info: ModelInfo, host: Host, calibration: Calibration,
            support: ArchSupport | None = None) -> list[tuple[Intent, Plan]]:
     """Plans for every intent that applies to the model."""
-    return [(i, planner.plan(i, info, host, cfg.default_profile, cfg.headroom_pct, calibration,
-                             support))
+    return [(i, actions.plan_for(cfg, info, host, i, calibration, support))
             for i in applicable(info)]
 
 

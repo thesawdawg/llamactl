@@ -6,6 +6,10 @@ there are no earlier tagged releases. Commit entries retain their original subje
 
 ## [Unreleased]
 
+- Guided model workspace: selecting a model opens its controls without loading it. Per-preset
+  tuning goals and Quick, Normal and Full benchmarks compare a candidate with the saved preset
+  before acceptance; saving applies on the next load and leaves running settings intact. CLI
+  `tune` accepts goal and benchmark overrides and requires `--yes` to save noninteractively.
 - Responsive TUI layout: button bars wrap instead of clipping, screens scroll and stack on
   narrow terminals, and controls stay reachable down to small sizes.
 - Per-model resource usage (`ps` and the Serving view): CPU, RAM and VRAM per gateway model

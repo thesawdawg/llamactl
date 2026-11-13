@@ -23,6 +23,15 @@ because a long prompt touches almost every expert.
 [b]When to tune[/b]
 - Tune every MoE model you use. The estimated split is safe, not fast.
 - Tune again after changing the context, the KV cache type or the llama.cpp build.
+- Open a model to set the preset's context ceiling and speed targets. Effective output
+  TPS is measured per turn — new input plus generation over a prefix already in the KV
+  cache, like a real client; the default minimum is 20. Optional input and output
+  speed floors are available under advanced tuning goals.
+- Quick tests a 2k turn, Normal adds a turn over a cached 25k harness prefix, and Full
+  tests context occupancy up to 95%, preserving compaction space. Every workload must
+  pass; a result near a floor is retested and the median counts.
+- Compare saved settings with the candidate before accepting. Keep current settings
+  leaves the preset unchanged; accepted settings apply on its next load.
 
 [b]Tensor overrides (-ot)[/b]
 - For placements --n-cpu-moe cannot express, for example only the down-projection experts

@@ -250,6 +250,9 @@ class FakeStore:
 def ok(gen_tps: float = 40.0, vram: int = int(7e9)) -> Measurement:
     """A successful measurement."""
     return Measurement(ok=True, load_s=3.0, vram_used=vram, prompt_tps=900.0, gen_tps=gen_tps,
+                       effective_tps=128 / (120 / 900 + 128 / gen_tps),
+                       request_s=120 / 900 + 128 / gen_tps,
+                       prompt_tokens=120, generated_tokens=128,
                        at="2026-11-09T12:00:00+00:00", build="b1")
 
 

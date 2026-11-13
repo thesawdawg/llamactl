@@ -144,7 +144,7 @@ async def test_serving_a_model_that_starts_an_open_gateway_warns(ui_env: SimpleN
     async with app.run_test(size=SIZE) as pilot:
         await ready(pilot, app)
         app.views["models"].model_table.focus()
-        await pilot.press("enter")
+        await pilot.press("v")
         assert await wait_for(pilot, lambda: f"alpha is loaded at {LAN_URL}/v1" in plain(app._status))
         assert await wait_for(pilot, lambda: any("without an API key" in m for m, _ in notices))
 

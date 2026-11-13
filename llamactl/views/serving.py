@@ -200,8 +200,8 @@ class ServingView(BaseView):
             elif snap.status.running:
                 msg = "The gateway does not answer its model list; see its log below."
             else:
-                msg = ("The gateway is stopped. Press u to start it, or Enter on a model in "
-                       "Models (2) to serve it. Press a to attach a running server.")
+                msg = ("The gateway is stopped. Press u to start it, or open a model in "
+                       "Models (2) and choose Serve saved preset. Press a to attach a running server.")
         lbl = self.query_one("#sv_empty", Static)
         lbl.update(msg)
         lbl.display = bool(msg)

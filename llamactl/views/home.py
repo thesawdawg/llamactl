@@ -207,8 +207,8 @@ class HomeView(BaseView):
             with Vertical(id="home_right"):
                 with Vertical(id="loaded_box"):
                     yield DataTable(id="loaded", cursor_type="row")
-                    yield Static("Nothing is loaded. Press Enter on a model in Models (2); the "
-                                 "gateway loads it on first use.", id="loaded_empty")
+                    yield Static("Nothing is loaded. Open a model in Models (2), then choose "
+                                 "Serve saved preset.", id="loaded_empty")
                 with Vertical(id="steps_box"):
                     yield OptionList(id="steps")
                     yield Static("Nothing to do: everything is set up.", id="steps_empty")

@@ -96,7 +96,7 @@ def speed_of(preset: Preset | None) -> float | None:
     m = preset.measured if preset else None
     if preset is None or preset.source != TUNED or m is None or not m.ok:
         return None
-    return m.gen_tps or m.prompt_tps or None
+    return m.gen_tps or m.effective_tps or m.prompt_tps or None
 
 
 def preset_state(entry: ModelEntry | None, path: Path, calibration: Calibration,
@@ -199,13 +199,23 @@ def intent_rows(plans: dict[str, Plan], info: ModelInfo, entry: ModelEntry | Non
             continue
         preset = entry.presets.get(intent.key) if entry else None
         m = preset.measured if preset else None
+        profile = preset.profile if preset else plan.profile
+        slots = max(1, profile.parallel) if preset else intent.slots
+        context = ((profile.ctx_size or info.ctx_train) // slots
+                   if preset else plan.ctx_per_slot)
+        budget = (planner.estimate_budget(info, profile, host, calibration)
+                  if preset else plan.budget)
+        current_verdict = (planner.verdict(budget, host, headroom_pct)
+                           if preset and not (plan.support and plan.support.blocks)
+                           else plan.verdict)
         pp_tg = (f"{m.prompt_tps:.0f} / {m.gen_tps:.1f}"
                  if info.expert_count > 0 and m is not None and m.ok else "")
         rows.append(IntentRow(
             intent.key, intent.label, intent.description,
-            verdict_label(plan.verdict, plan.profile, info, plan.support), plan.ctx_per_slot,
-            intent.slots, plan.profile.cache_type_k, plan.budget.total(), usable,
-            speed_of(preset), top_reason(plan), plan.warnings, preset.source if preset else "",
+            verdict_label(current_verdict, profile, info, plan.support), context,
+            slots, profile.cache_type_k, budget.total(), usable,
+            speed_of(preset), "Saved preset; memory is estimated" if preset else top_reason(plan),
+            () if preset else plan.warnings, preset.source if preset else "",
             bool(entry and preset and entry.active == intent.key),
             bool(preset and calibration.is_stale(preset, path, build)), pp_tg))
     return rows
