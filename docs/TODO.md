@@ -2,6 +2,30 @@
 
 Tracks [SPEC.md](SPEC.md) section 11. Tick an item in the same commit that completes it.
 
+## Phase 18 - Preset tuning goals and workloads
+
+- [ ] Persist per-preset context ceiling, effective TPS floor (20 default), optional input/output floors and benchmark level
+- [ ] Measure effective output TPS and Quick/Normal/Full workloads with token-aware occupancy
+- [ ] Search increasing context and back off failing context by 5%; verify all workload constraints
+
+## Phase 19 - Deferred preset application
+
+- [ ] Preserve effective running gateway definitions across unrelated reloads and app restarts
+- [ ] Promote accepted saved settings after unload for the next explicit or on-demand load
+
+## Phase 20 - Guided model workspace
+
+- [ ] Model selection opens controls; explicit serving and advanced settings
+- [ ] Editable per-preset goals, saved/proposed comparison and per-workload results
+- [ ] Explicit candidate acceptance; keeping current never changes configuration
+- [ ] Consistent saved/estimated/running summaries and pending-next-load indication
+
+## Phase 21 - Integration and validation
+
+- [ ] Shared planning/tuning goals and CLI integration
+- [ ] Regression tests for goals, workloads, backoff, acceptance and deferred reloads
+- [ ] README/help updates and full test suite
+
 ## Phase 0 - Plan
 
 - [x] Agree direction with the owner (tuning, serving, presets, scope)

@@ -812,6 +812,37 @@ Other llama.cpp builds (ik_llama.cpp, MoE hot-cache forks): capability detection
 `llama-server --help`, settings hidden when the build lacks the flag. Undecided; the gateway
 runs one router binary, so builds cannot be mixed there.
 
+## 14. Guided model configuration and constrained tuning
+
+The agreed UX requirements and rationale are recorded in
+[`app-design-output/recommendations.md`](../app-design-output/recommendations.md).
+Selecting a model opens its controls, without loading it. A guided flow presents
+purpose and goals, an optional advanced editor, tuning, a saved-versus-candidate
+comparison, explicit acceptance, and a separate Serve action.
+
+Each model preset stores a maximum context per request, minimum effective output
+TPS (default 20), optional prompt/generation TPS floors, and benchmark level.
+Effective output TPS is actual generated tokens divided by whole request wall time,
+including prompt processing and excluding server startup. Quick tests ~2k input;
+Normal tests Quick plus ~25k harness input; Full tests 5/25/50/75/95% occupancy with
+room reserved for output and harness compaction. Each required workload must pass.
+Increase context toward the maximum; on throughput failure reduce the failing
+context by 5% and retest until it passes. Report unmet goals and incomplete searches.
+
+Tuning never replaces the saved configuration before acceptance. Compare actual
+saved values with the candidate, label measured versus estimated values, show
+per-workload performance and explain the recommendation. Keeping current settings
+preserves the preset. Accepting saves for the next load, without unloading a running
+model. Maintain separate saved and effective gateway definitions across reloads and
+app restarts so unrelated changes cannot apply a pending preset prematurely.
+
+Implementation phases:
+
+18. Persist goals and workload measurements; implement constrained context search.
+19. Preserve running gateway configurations and apply saved changes on next load.
+20. Guided model workspace, explicit comparisons and candidate acceptance.
+21. Integrate CLI/core behavior, regression coverage and user documentation.
+
 ## 13. Model architectures
 
 A GGUF names its architecture in `general.architecture`. llama.cpp refuses a file whose
